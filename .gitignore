@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.venv/
+venv/
+env/
+
+# App data & secrets (do NOT commit)
+data/crm.db
+data/secret.key
+
+# User uploads
+uploads/*
+!uploads/.gitkeep
+
+# Logs
+*.log
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/

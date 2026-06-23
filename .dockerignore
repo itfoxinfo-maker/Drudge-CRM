@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+data/crm.db
+data/secret.key
+uploads/*
+!uploads/.gitkeep
+sample-invoice.html
+*.log

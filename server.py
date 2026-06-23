@@ -1,0 +1,1552 @@
+#!/usr/bin/env python3
+"""Pest Control CRM — standard-library HTTP server.
+
+Serves a JSON REST API + a bilingual (AR/EN) single-page frontend, with photo
+uploads stored on disk. Run:  python3 server.py [port]
+"""
+import json
+import os
+import re
+import sys
+import uuid
+import mimetypes
+from urllib.parse import urlparse, parse_qs
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import database as db
+import auth
+from multipart import parse_multipart
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.join(BASE_DIR, "static")
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+ALLOWED_IMG = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+
+
+class ApiError(Exception):
+    def __init__(self, status, message):
+        self.status = status
+        self.message = message
+
+
+class Ctx:
+    def __init__(self, user, params, query, body, raw_body, content_type):
+        self.user = user
+        self.params = params          # regex path groups
+        self.query = query            # dict of query string (single values)
+        self.body = body              # parsed JSON dict (or {})
+        self.raw_body = raw_body      # raw bytes (for uploads)
+        self.content_type = content_type
+
+
+ROUTES = []
+
+
+def route(method, pattern, auth_required=True):
+    regex = re.compile("^" + pattern + "$")
+
+    def deco(fn):
+        ROUTES.append((method, regex, fn, auth_required))
+        return fn
+    return deco
+
+
+# --------------------------------------------------------------------------
+# permission helpers
+# --------------------------------------------------------------------------
+def require(user, *roles):
+    if user["role"] not in roles:
+        raise ApiError(403, "You do not have permission for this action")
+
+
+def is_staff(user):
+    return user["role"] in ("admin", "manager", "agent")
+
+
+def is_manager(user):
+    return user["role"] in ("admin", "manager")
+
+
+def client_scope_id(user):
+    """For client users, the client_id they are limited to."""
+    return user.get("client_id") if user["role"] == "client" else None
+
+
+# --------------------------------------------------------------------------
+# AUTH
+# --------------------------------------------------------------------------
+@route("POST", r"/api/auth/login", auth_required=False)
+def login(ctx):
+    email = (ctx.body.get("email") or "").strip().lower()
+    password = ctx.body.get("password") or ""
+    user = db.query("SELECT * FROM users WHERE lower(email)=? AND active=1", (email,), one=True)
+    if not user or not auth.verify_password(password, user["password_hash"]):
+        raise ApiError(401, "Invalid email or password")
+    token = auth.make_token(user["id"])
+    return {"token": token, "user": _public_user(user)}
+
+
+@route("GET", r"/api/auth/me")
+def me(ctx):
+    return _public_user(ctx.user)
+
+
+def _public_user(u):
+    return {k: u[k] for k in ("id", "full_name", "email", "role", "phone",
+                              "client_id", "specialization", "lang")}
+
+
+# --------------------------------------------------------------------------
+# DASHBOARD
+# --------------------------------------------------------------------------
+@route("GET", r"/api/dashboard")
+def dashboard(ctx):
+    u = ctx.user
+    if u["role"] == "client":
+        cid = u["client_id"]
+        return {
+            "role": "client",
+            "upcoming_visits": db.query(
+                "SELECT COUNT(*) c FROM visits WHERE client_id=? AND status IN('scheduled','in_progress')",
+                (cid,), one=True)["c"],
+            "completed_visits": db.query(
+                "SELECT COUNT(*) c FROM visits WHERE client_id=? AND status='completed'", (cid,), one=True)["c"],
+            "outstanding": _client_outstanding(cid),
+            "open_invoices": db.query(
+                "SELECT COUNT(*) c FROM invoices WHERE client_id=? AND status IN('sent','overdue')",
+                (cid,), one=True)["c"],
+        }
+    stats = {
+        "role": "staff",
+        "clients": db.query("SELECT COUNT(*) c FROM clients", one=True)["c"],
+        "agents": db.query("SELECT COUNT(*) c FROM users WHERE role='agent' AND active=1", one=True)["c"],
+        "visits_today": db.query(
+            "SELECT COUNT(*) c FROM visits WHERE date(scheduled_start)=date('now')", one=True)["c"],
+        "scheduled": db.query(
+            "SELECT COUNT(*) c FROM visits WHERE status IN('scheduled','in_progress')", one=True)["c"],
+        "low_stock": db.query(
+            "SELECT COUNT(*) c FROM chemicals WHERE quantity_in_stock <= reorder_level", one=True)["c"],
+        "outstanding": db.query(
+            "SELECT COALESCE(SUM(total),0)-COALESCE((SELECT SUM(amount) FROM payments),0) v "
+            "FROM invoices WHERE status IN('sent','overdue','paid')", one=True)["v"],
+    }
+    if u["role"] == "agent":
+        stats["my_visits"] = db.query(
+            "SELECT COUNT(*) c FROM visits WHERE agent_id=? AND status IN('scheduled','in_progress')",
+            (u["id"],), one=True)["c"]
+    return stats
+
+
+# --------------------------------------------------------------------------
+# USERS / AGENTS
+# --------------------------------------------------------------------------
+@route("GET", r"/api/users")
+def list_users(ctx):
+    require(ctx.user, "admin", "manager")
+    role = ctx.query.get("role")
+    if role:
+        rows = db.query("SELECT * FROM users WHERE role=? ORDER BY full_name", (role,))
+    else:
+        rows = db.query("SELECT * FROM users ORDER BY role, full_name")
+    return [_public_user(r) | {"active": r["active"], "hire_date": r["hire_date"]} for r in rows]
+
+
+@route("GET", r"/api/agents")
+def list_agents(ctx):
+    require(ctx.user, "admin", "manager")
+    rows = db.query("SELECT * FROM users WHERE role='agent' AND active=1 ORDER BY full_name")
+    return [_public_user(r) | {"hire_date": r["hire_date"]} for r in rows]
+
+
+@route("POST", r"/api/users")
+def create_user(ctx):
+    require(ctx.user, "admin", "manager")
+    b = ctx.body
+    if not b.get("email") or not b.get("password") or not b.get("full_name"):
+        raise ApiError(400, "Name, email and password are required")
+    if b.get("role") not in ("admin", "manager", "agent", "client"):
+        raise ApiError(400, "Invalid role")
+    if db.query("SELECT id FROM users WHERE lower(email)=?", (b["email"].lower(),), one=True):
+        raise ApiError(409, "Email already in use")
+    uid = db.execute(
+        "INSERT INTO users(full_name,email,password_hash,role,phone,client_id,specialization,hire_date,lang) "
+        "VALUES(?,?,?,?,?,?,?,?,?)",
+        (b["full_name"], b["email"], auth.hash_password(b["password"]), b["role"],
+         b.get("phone"), b.get("client_id"), b.get("specialization"), b.get("hire_date"),
+         b.get("lang", "en")))
+    return _public_user(db.query("SELECT * FROM users WHERE id=?", (uid,), one=True))
+
+
+@route("PUT", r"/api/users/(\d+)")
+def update_user(ctx):
+    require(ctx.user, "admin", "manager")
+    uid = int(ctx.params[0])
+    b = ctx.body
+    fields, vals = [], []
+    for col in ("full_name", "phone", "role", "client_id", "specialization", "hire_date", "lang", "active"):
+        if col in b:
+            fields.append(f"{col}=?")
+            vals.append(b[col])
+    if b.get("password"):
+        fields.append("password_hash=?")
+        vals.append(auth.hash_password(b["password"]))
+    if not fields:
+        raise ApiError(400, "Nothing to update")
+    vals.append(uid)
+    db.execute(f"UPDATE users SET {','.join(fields)} WHERE id=?", vals)
+    return _public_user(db.query("SELECT * FROM users WHERE id=?", (uid,), one=True))
+
+
+@route("DELETE", r"/api/users/(\d+)")
+def deactivate_user(ctx):
+    require(ctx.user, "admin")
+    db.execute("UPDATE users SET active=0 WHERE id=?", (int(ctx.params[0]),))
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------
+# CLIENTS (company folders)
+# --------------------------------------------------------------------------
+@route("GET", r"/api/clients")
+def list_clients(ctx):
+    cid = client_scope_id(ctx.user)
+    q = ctx.query.get("q", "").strip()
+    sql = "SELECT * FROM clients"
+    params = []
+    where = []
+    if cid:
+        where.append("id=?")
+        params.append(cid)
+    if q:
+        where.append("(name_en LIKE ? OR name_ar LIKE ? OR city LIKE ? OR contact_person LIKE ?)")
+        params += [f"%{q}%"] * 4
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY name_en"
+    return db.query(sql, params)
+
+
+@route("GET", r"/api/clients/(\d+)")
+def get_client(ctx):
+    cid = int(ctx.params[0])
+    _assert_client_access(ctx.user, cid)
+    client = db.query("SELECT * FROM clients WHERE id=?", (cid,), one=True)
+    if not client:
+        raise ApiError(404, "Client not found")
+    client["sites"] = db.query("SELECT * FROM sites WHERE client_id=? ORDER BY name", (cid,))
+    client["photos"] = db.query(
+        "SELECT * FROM photos WHERE entity_type='client' AND entity_id=? ORDER BY uploaded_at DESC", (cid,))
+    client["recent_visits"] = db.query(
+        "SELECT v.*, s.name_en service_en, s.name_ar service_ar, u.full_name agent_name "
+        "FROM visits v LEFT JOIN service_types s ON s.id=v.service_type_id "
+        "LEFT JOIN users u ON u.id=v.agent_id WHERE v.client_id=? "
+        "ORDER BY v.scheduled_start DESC LIMIT 10", (cid,))
+    client["finance"] = _finance_summary(cid)
+    if ctx.user["role"] == "client":
+        client["users"] = []
+    else:
+        client["users"] = [_public_user(r) for r in
+                           db.query("SELECT * FROM users WHERE client_id=?", (cid,))]
+    return client
+
+
+@route("POST", r"/api/clients")
+def create_client(ctx):
+    require(ctx.user, "admin", "manager")
+    b = ctx.body
+    if not b.get("name_en"):
+        raise ApiError(400, "Company name (English) is required")
+    cid = db.execute(
+        "INSERT INTO clients(name_en,name_ar,contact_person,phone,email,address_en,address_ar,city,notes,status) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (b["name_en"], b.get("name_ar"), b.get("contact_person"), b.get("phone"), b.get("email"),
+         b.get("address_en"), b.get("address_ar"), b.get("city"), b.get("notes"),
+         b.get("status", "active")))
+    return db.query("SELECT * FROM clients WHERE id=?", (cid,), one=True)
+
+
+@route("PUT", r"/api/clients/(\d+)")
+def update_client(ctx):
+    require(ctx.user, "admin", "manager")
+    cid = int(ctx.params[0])
+    b = ctx.body
+    cols = ("name_en", "name_ar", "contact_person", "phone", "email",
+            "address_en", "address_ar", "city", "notes", "status")
+    fields = [f"{c}=?" for c in cols if c in b]
+    vals = [b[c] for c in cols if c in b]
+    if not fields:
+        raise ApiError(400, "Nothing to update")
+    vals.append(cid)
+    db.execute(f"UPDATE clients SET {','.join(fields)} WHERE id=?", vals)
+    return db.query("SELECT * FROM clients WHERE id=?", (cid,), one=True)
+
+
+@route("DELETE", r"/api/clients/(\d+)")
+def delete_client(ctx):
+    require(ctx.user, "admin")
+    db.execute("DELETE FROM clients WHERE id=?", (int(ctx.params[0]),))
+    return {"ok": True}
+
+
+@route("POST", r"/api/clients/(\d+)/sites")
+def add_site(ctx):
+    require(ctx.user, "admin", "manager")
+    cid = int(ctx.params[0])
+    b = ctx.body
+    if not b.get("name"):
+        raise ApiError(400, "Site name is required")
+    sid = db.execute("INSERT INTO sites(client_id,name,address,area) VALUES(?,?,?,?)",
+                     (cid, b["name"], b.get("address"), b.get("area")))
+    return db.query("SELECT * FROM sites WHERE id=?", (sid,), one=True)
+
+
+@route("DELETE", r"/api/sites/(\d+)")
+def delete_site(ctx):
+    require(ctx.user, "admin", "manager")
+    db.execute("DELETE FROM sites WHERE id=?", (int(ctx.params[0]),))
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------
+# SERVICE TYPES
+# --------------------------------------------------------------------------
+@route("GET", r"/api/service-types")
+def list_service_types(ctx):
+    return db.query("SELECT * FROM service_types ORDER BY name_en")
+
+
+@route("POST", r"/api/service-types")
+def create_service_type(ctx):
+    require(ctx.user, "admin", "manager")
+    b = ctx.body
+    if not b.get("name_en"):
+        raise ApiError(400, "Name is required")
+    sid = db.execute("INSERT INTO service_types(name_en,name_ar) VALUES(?,?)",
+                     (b["name_en"], b.get("name_ar")))
+    return db.query("SELECT * FROM service_types WHERE id=?", (sid,), one=True)
+
+
+# --------------------------------------------------------------------------
+# VISITS & SCHEDULE
+# --------------------------------------------------------------------------
+@route("GET", r"/api/visits")
+def list_visits(ctx):
+    u = ctx.user
+    where, params = [], []
+    if u["role"] == "client":
+        where.append("v.client_id=?")
+        params.append(u["client_id"])
+    elif u["role"] == "agent":
+        where.append("v.agent_id=?")
+        params.append(u["id"])
+    for key, col in (("client", "v.client_id"), ("agent", "v.agent_id"),
+                     ("status", "v.status")):
+        if ctx.query.get(key):
+            where.append(f"{col}=?")
+            params.append(ctx.query[key])
+    if ctx.query.get("from"):
+        where.append("date(v.scheduled_start) >= date(?)")
+        params.append(ctx.query["from"])
+    if ctx.query.get("to"):
+        where.append("date(v.scheduled_start) <= date(?)")
+        params.append(ctx.query["to"])
+    sql = ("SELECT v.*, c.name_en client_en, c.name_ar client_ar, "
+           "s.name_en service_en, s.name_ar service_ar, u.full_name agent_name "
+           "FROM visits v JOIN clients c ON c.id=v.client_id "
+           "LEFT JOIN service_types s ON s.id=v.service_type_id "
+           "LEFT JOIN users u ON u.id=v.agent_id")
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY v.scheduled_start DESC"
+    return db.query(sql, params)
+
+
+@route("GET", r"/api/visits/(\d+)")
+def get_visit(ctx):
+    vid = int(ctx.params[0])
+    v = db.query(
+        "SELECT v.*, c.name_en client_en, c.name_ar client_ar, c.id client_id, "
+        "s.name_en service_en, s.name_ar service_ar, u.full_name agent_name, st.name site_name "
+        "FROM visits v JOIN clients c ON c.id=v.client_id "
+        "LEFT JOIN service_types s ON s.id=v.service_type_id "
+        "LEFT JOIN users u ON u.id=v.agent_id "
+        "LEFT JOIN sites st ON st.id=v.site_id WHERE v.id=?", (vid,), one=True)
+    if not v:
+        raise ApiError(404, "Visit not found")
+    _assert_visit_access(ctx.user, v)
+    v["report"] = db.query("SELECT * FROM reports WHERE visit_id=?", (vid,), one=True)
+    v["chemicals"] = db.query(
+        "SELECT cu.*, ch.name_en, ch.name_ar, ch.unit FROM chemical_usage cu "
+        "JOIN chemicals ch ON ch.id=cu.chemical_id WHERE cu.visit_id=?", (vid,))
+    v["photos"] = db.query(
+        "SELECT * FROM photos WHERE entity_type='visit' AND entity_id=? ORDER BY uploaded_at DESC", (vid,))
+    if v["report"]:
+        v["report_photos"] = db.query(
+            "SELECT * FROM photos WHERE entity_type='report' AND entity_id=? ORDER BY uploaded_at DESC",
+            (v["report"]["id"],))
+    else:
+        v["report_photos"] = []
+    return v
+
+
+@route("POST", r"/api/visits")
+def create_visit(ctx):
+    require(ctx.user, "admin", "manager")
+    b = ctx.body
+    if not b.get("client_id") or not b.get("scheduled_start"):
+        raise ApiError(400, "Client and scheduled date are required")
+    vid = db.execute(
+        "INSERT INTO visits(client_id,site_id,agent_id,service_type_id,scheduled_start,"
+        "scheduled_end,status,location,notes) VALUES(?,?,?,?,?,?,?,?,?)",
+        (b["client_id"], b.get("site_id"), b.get("agent_id"), b.get("service_type_id"),
+         b["scheduled_start"], b.get("scheduled_end"), b.get("status", "scheduled"),
+         b.get("location"), b.get("notes")))
+    return db.query("SELECT * FROM visits WHERE id=?", (vid,), one=True)
+
+
+@route("PUT", r"/api/visits/(\d+)")
+def update_visit(ctx):
+    vid = int(ctx.params[0])
+    v = db.query("SELECT * FROM visits WHERE id=?", (vid,), one=True)
+    if not v:
+        raise ApiError(404, "Visit not found")
+    u = ctx.user
+    b = ctx.body
+    # Agents may only update status of their own visits; managers update everything.
+    if u["role"] == "agent":
+        if v["agent_id"] != u["id"]:
+            raise ApiError(403, "Not your visit")
+        allowed = {"status", "notes", "completed_at"}
+        b = {k: val for k, val in b.items() if k in allowed}
+    elif not is_manager(u):
+        raise ApiError(403, "No permission")
+    cols = ("client_id", "site_id", "agent_id", "service_type_id", "scheduled_start",
+            "scheduled_end", "status", "location", "notes", "completed_at")
+    fields = [f"{c}=?" for c in cols if c in b]
+    vals = [b[c] for c in cols if c in b]
+    if b.get("status") == "completed" and "completed_at" not in b:
+        fields.append("completed_at=datetime('now')")
+    if not fields:
+        raise ApiError(400, "Nothing to update")
+    vals.append(vid)
+    db.execute(f"UPDATE visits SET {','.join(fields)} WHERE id=?", vals)
+    return db.query("SELECT * FROM visits WHERE id=?", (vid,), one=True)
+
+
+@route("DELETE", r"/api/visits/(\d+)")
+def delete_visit(ctx):
+    require(ctx.user, "admin", "manager")
+    db.execute("DELETE FROM visits WHERE id=?", (int(ctx.params[0]),))
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------
+# REPORTS
+# --------------------------------------------------------------------------
+@route("POST", r"/api/visits/(\d+)/report")
+def upsert_report(ctx):
+    vid = int(ctx.params[0])
+    v = db.query("SELECT * FROM visits WHERE id=?", (vid,), one=True)
+    if not v:
+        raise ApiError(404, "Visit not found")
+    u = ctx.user
+    if u["role"] == "agent" and v["agent_id"] != u["id"]:
+        raise ApiError(403, "Not your visit")
+    if u["role"] == "client":
+        raise ApiError(403, "No permission")
+    b = ctx.body
+    existing = db.query("SELECT * FROM reports WHERE visit_id=?", (vid,), one=True)
+    cols = ("summary", "pests_found", "findings", "recommendations", "severity", "next_visit_due")
+    if existing:
+        fields = [f"{c}=?" for c in cols if c in b]
+        vals = [b[c] for c in cols if c in b]
+        if fields:
+            vals.append(vid)
+            db.execute(f"UPDATE reports SET {','.join(fields)} WHERE visit_id=?", vals)
+    else:
+        db.execute(
+            "INSERT INTO reports(visit_id,summary,pests_found,findings,recommendations,severity,next_visit_due) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (vid, b.get("summary"), b.get("pests_found"), b.get("findings"),
+             b.get("recommendations"), b.get("severity", "low"), b.get("next_visit_due")))
+    return db.query("SELECT * FROM reports WHERE visit_id=?", (vid,), one=True)
+
+
+# --------------------------------------------------------------------------
+# CHEMICALS / INVENTORY
+# --------------------------------------------------------------------------
+@route("GET", r"/api/chemicals")
+def list_chemicals(ctx):
+    require(ctx.user, "admin", "manager", "agent")
+    q = ctx.query.get("q", "").strip()
+    if q:
+        return db.query(
+            "SELECT * FROM chemicals WHERE name_en LIKE ? OR name_ar LIKE ? OR active_ingredient LIKE ? "
+            "ORDER BY name_en", (f"%{q}%", f"%{q}%", f"%{q}%"))
+    return db.query("SELECT * FROM chemicals ORDER BY name_en")
+
+
+@route("POST", r"/api/chemicals")
+def create_chemical(ctx):
+    require(ctx.user, "admin", "manager")
+    b = ctx.body
+    if not b.get("name_en"):
+        raise ApiError(400, "Name is required")
+    cid = db.execute(
+        "INSERT INTO chemicals(name_en,name_ar,active_ingredient,unit,quantity_in_stock,"
+        "reorder_level,hazard_class,reg_no,cost_per_unit) VALUES(?,?,?,?,?,?,?,?,?)",
+        (b["name_en"], b.get("name_ar"), b.get("active_ingredient"), b.get("unit", "L"),
+         b.get("quantity_in_stock", 0), b.get("reorder_level", 0), b.get("hazard_class"),
+         b.get("reg_no"), b.get("cost_per_unit", 0)))
+    return db.query("SELECT * FROM chemicals WHERE id=?", (cid,), one=True)
+
+
+@route("PUT", r"/api/chemicals/(\d+)")
+def update_chemical(ctx):
+    require(ctx.user, "admin", "manager")
+    cid = int(ctx.params[0])
+    b = ctx.body
+    cols = ("name_en", "name_ar", "active_ingredient", "unit", "reorder_level",
+            "hazard_class", "reg_no", "cost_per_unit")
+    fields = [f"{c}=?" for c in cols if c in b]
+    vals = [b[c] for c in cols if c in b]
+    if not fields:
+        raise ApiError(400, "Nothing to update")
+    vals.append(cid)
+    db.execute(f"UPDATE chemicals SET {','.join(fields)} WHERE id=?", vals)
+    return db.query("SELECT * FROM chemicals WHERE id=?", (cid,), one=True)
+
+
+@route("DELETE", r"/api/chemicals/(\d+)")
+def delete_chemical(ctx):
+    require(ctx.user, "admin", "manager")
+    db.execute("DELETE FROM chemicals WHERE id=?", (int(ctx.params[0]),))
+    return {"ok": True}
+
+
+@route("POST", r"/api/chemicals/(\d+)/stock")
+def adjust_stock(ctx):
+    require(ctx.user, "admin", "manager")
+    cid = int(ctx.params[0])
+    b = ctx.body
+    change = float(b.get("change", 0))
+    reason = b.get("reason", "adjustment")
+    if reason not in ("purchase", "adjustment"):
+        raise ApiError(400, "Invalid reason")
+    db.execute("UPDATE chemicals SET quantity_in_stock = quantity_in_stock + ? WHERE id=?", (change, cid))
+    db.execute("INSERT INTO inventory_transactions(chemical_id,change,reason,note) VALUES(?,?,?,?)",
+               (cid, change, reason, b.get("note")))
+    return db.query("SELECT * FROM chemicals WHERE id=?", (cid,), one=True)
+
+
+@route("GET", r"/api/chemicals/(\d+)/transactions")
+def chemical_transactions(ctx):
+    require(ctx.user, "admin", "manager")
+    return db.query("SELECT * FROM inventory_transactions WHERE chemical_id=? ORDER BY created_at DESC",
+                    (int(ctx.params[0]),))
+
+
+@route("POST", r"/api/visits/(\d+)/usage")
+def record_usage(ctx):
+    vid = int(ctx.params[0])
+    v = db.query("SELECT * FROM visits WHERE id=?", (vid,), one=True)
+    if not v:
+        raise ApiError(404, "Visit not found")
+    u = ctx.user
+    if u["role"] == "agent" and v["agent_id"] != u["id"]:
+        raise ApiError(403, "Not your visit")
+    if u["role"] == "client":
+        raise ApiError(403, "No permission")
+    b = ctx.body
+    chem_id = b.get("chemical_id")
+    qty = float(b.get("quantity", 0))
+    if not chem_id or qty <= 0:
+        raise ApiError(400, "Chemical and a positive quantity are required")
+    uid = db.execute("INSERT INTO chemical_usage(visit_id,chemical_id,quantity,area_treated) VALUES(?,?,?,?)",
+                     (vid, chem_id, qty, b.get("area_treated")))
+    db.execute("UPDATE chemicals SET quantity_in_stock = quantity_in_stock - ? WHERE id=?", (qty, chem_id))
+    db.execute("INSERT INTO inventory_transactions(chemical_id,change,reason,reference) VALUES(?,?,?,?)",
+               (chem_id, -qty, "usage", f"visit:{vid}"))
+    return db.query(
+        "SELECT cu.*, ch.name_en, ch.name_ar, ch.unit FROM chemical_usage cu "
+        "JOIN chemicals ch ON ch.id=cu.chemical_id WHERE cu.id=?", (uid,), one=True)
+
+
+@route("DELETE", r"/api/usage/(\d+)")
+def delete_usage(ctx):
+    require(ctx.user, "admin", "manager", "agent")
+    uid = int(ctx.params[0])
+    row = db.query("SELECT * FROM chemical_usage WHERE id=?", (uid,), one=True)
+    if not row:
+        raise ApiError(404, "Not found")
+    db.execute("UPDATE chemicals SET quantity_in_stock = quantity_in_stock + ? WHERE id=?",
+               (row["quantity"], row["chemical_id"]))
+    db.execute("INSERT INTO inventory_transactions(chemical_id,change,reason,reference) VALUES(?,?,?,?)",
+               (row["chemical_id"], row["quantity"], "adjustment", f"usage-reversal:{uid}"))
+    db.execute("DELETE FROM chemical_usage WHERE id=?", (uid,))
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------
+# INVOICES / FINANCE
+# --------------------------------------------------------------------------
+@route("GET", r"/api/invoices")
+def list_invoices(ctx):
+    u = ctx.user
+    where, params = [], []
+    if u["role"] == "client":
+        where.append("i.client_id=?")
+        params.append(u["client_id"])
+    elif u["role"] == "agent":
+        raise ApiError(403, "No permission")
+    if ctx.query.get("client"):
+        where.append("i.client_id=?")
+        params.append(ctx.query["client"])
+    if ctx.query.get("status"):
+        where.append("i.status=?")
+        params.append(ctx.query["status"])
+    dt = ctx.query.get("doc_type", "invoice")
+    if dt != "all":
+        where.append("i.doc_type=?")
+        params.append(dt)
+    sql = ("SELECT i.*, c.name_en client_en, c.name_ar client_ar, "
+           "COALESCE((SELECT SUM(amount) FROM payments p WHERE p.invoice_id=i.id),0) paid "
+           "FROM invoices i JOIN clients c ON c.id=i.client_id")
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY i.issue_date DESC"
+    return db.query(sql, params)
+
+
+@route("GET", r"/api/invoices/(\d+)")
+def get_invoice(ctx):
+    iid = int(ctx.params[0])
+    inv = db.query("SELECT i.*, c.name_en client_en, c.name_ar client_ar, "
+                   "c.contact_person client_contact, c.phone client_phone, c.email client_email, "
+                   "c.city client_city, c.address_en client_address_en, c.address_ar client_address_ar "
+                   "FROM invoices i JOIN clients c ON c.id=i.client_id WHERE i.id=?", (iid,), one=True)
+    if not inv:
+        raise ApiError(404, "Invoice not found")
+    if ctx.user["role"] == "client" and inv["client_id"] != ctx.user["client_id"]:
+        raise ApiError(403, "No permission")
+    if ctx.user["role"] == "agent":
+        raise ApiError(403, "No permission")
+    inv["payments"] = db.query("SELECT * FROM payments WHERE invoice_id=? ORDER BY paid_at DESC", (iid,))
+    inv["paid"] = sum(p["amount"] for p in inv["payments"])
+    inv["items"] = db.query("SELECT * FROM invoice_items WHERE invoice_id=? ORDER BY id", (iid,))
+    return inv
+
+
+def _save_items(iid, items):
+    """Replace an invoice's line items; return (amount) computed from them."""
+    db.execute("DELETE FROM invoice_items WHERE invoice_id=?", (iid,))
+    total = 0.0
+    for it in items or []:
+        qty = float(it.get("quantity", 1) or 1)
+        price = float(it.get("unit_price", 0) or 0)
+        amt = round(qty * price, 2)
+        total += amt
+        db.execute("INSERT INTO invoice_items(invoice_id,description,quantity,unit_price,amount) "
+                   "VALUES(?,?,?,?,?)", (iid, it.get("description", ""), qty, price, amt))
+    return round(total, 2)
+
+
+@route("POST", r"/api/invoices")
+def create_invoice(ctx):
+    require(ctx.user, "admin", "manager")
+    b = ctx.body
+    if not b.get("client_id") or not b.get("issue_date"):
+        raise ApiError(400, "Client and issue date are required")
+    doc_type = b.get("doc_type", "invoice")
+    items = b.get("items")
+    number = b.get("number") or _next_invoice_number(doc_type)
+    iid = db.execute(
+        "INSERT INTO invoices(client_id,visit_id,contract_id,doc_type,number,issue_date,due_date,"
+        "valid_until,amount,tax,total,status,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (b["client_id"], b.get("visit_id"), b.get("contract_id"), doc_type, number,
+         b["issue_date"], b.get("due_date"), b.get("valid_until"), 0, 0, 0,
+         b.get("status", "draft"), b.get("notes")))
+    # amount: from items if provided, else flat amount
+    amount = _save_items(iid, items) if items else float(b.get("amount", 0))
+    tax = float(b.get("tax", 0))
+    if b.get("tax_rate"):  # percentage helper
+        tax = round(amount * float(b["tax_rate"]) / 100, 2)
+    db.execute("UPDATE invoices SET amount=?, tax=?, total=? WHERE id=?",
+               (amount, tax, amount + tax, iid))
+    return db.query("SELECT * FROM invoices WHERE id=?", (iid,), one=True)
+
+
+@route("PUT", r"/api/invoices/(\d+)")
+def update_invoice(ctx):
+    require(ctx.user, "admin", "manager")
+    iid = int(ctx.params[0])
+    b = ctx.body
+    cur = db.query("SELECT * FROM invoices WHERE id=?", (iid,), one=True)
+    if not cur:
+        raise ApiError(404, "Not found")
+    if "items" in b:                       # items drive the amount
+        b["amount"] = _save_items(iid, b["items"])
+    if "amount" in b or "tax" in b:
+        amount = float(b.get("amount", cur["amount"]))
+        tax = float(b.get("tax", cur["tax"]))
+        b["amount"], b["tax"], b["total"] = amount, tax, amount + tax
+    cols = ("visit_id", "issue_date", "due_date", "valid_until", "amount", "tax",
+            "total", "status", "notes", "number", "doc_type")
+    fields = [f"{c}=?" for c in cols if c in b]
+    vals = [b[c] for c in cols if c in b]
+    if fields:
+        vals.append(iid)
+        db.execute(f"UPDATE invoices SET {','.join(fields)} WHERE id=?", vals)
+    return db.query("SELECT * FROM invoices WHERE id=?", (iid,), one=True)
+
+
+@route("DELETE", r"/api/invoices/(\d+)")
+def delete_invoice(ctx):
+    require(ctx.user, "admin", "manager")
+    db.execute("DELETE FROM invoices WHERE id=?", (int(ctx.params[0]),))
+    return {"ok": True}
+
+
+@route("POST", r"/api/invoices/(\d+)/payments")
+def add_payment(ctx):
+    require(ctx.user, "admin", "manager")
+    iid = int(ctx.params[0])
+    b = ctx.body
+    amount = float(b.get("amount", 0))
+    if amount <= 0:
+        raise ApiError(400, "Payment amount must be positive")
+    db.execute("INSERT INTO payments(invoice_id,amount,method,note) VALUES(?,?,?,?)",
+               (iid, amount, b.get("method", "cash"), b.get("note")))
+    # auto-mark paid if fully covered
+    inv = db.query("SELECT * FROM invoices WHERE id=?", (iid,), one=True)
+    paid = db.query("SELECT COALESCE(SUM(amount),0) p FROM payments WHERE invoice_id=?", (iid,), one=True)["p"]
+    if paid >= inv["total"] and inv["status"] != "cancelled":
+        db.execute("UPDATE invoices SET status='paid' WHERE id=?", (iid,))
+    return get_invoice(Ctx(ctx.user, [str(iid)], {}, {}, b"", ""))
+
+
+@route("GET", r"/api/clients/(\d+)/finance")
+def client_finance(ctx):
+    cid = int(ctx.params[0])
+    _assert_client_access(ctx.user, cid)
+    return _finance_summary(cid)
+
+
+@route("POST", r"/api/invoices/(\d+)/convert")
+def convert_quote(ctx):
+    """Convert an accepted quote into a draft invoice (copies line items)."""
+    require(ctx.user, "admin", "manager")
+    qid = int(ctx.params[0])
+    q = db.query("SELECT * FROM invoices WHERE id=?", (qid,), one=True)
+    if not q or q["doc_type"] != "quote":
+        raise ApiError(400, "Not a quote")
+    iid = db.execute(
+        "INSERT INTO invoices(client_id,visit_id,contract_id,doc_type,number,issue_date,due_date,"
+        "amount,tax,total,status,notes) VALUES(?,?,?,?,?,date('now'),date('now','+15 days'),?,?,?,?,?)",
+        (q["client_id"], q["visit_id"], q["contract_id"], "invoice", _next_invoice_number("invoice"),
+         q["amount"], q["tax"], q["total"], "draft", q["notes"]))
+    for it in db.query("SELECT * FROM invoice_items WHERE invoice_id=?", (qid,)):
+        db.execute("INSERT INTO invoice_items(invoice_id,description,quantity,unit_price,amount) "
+                   "VALUES(?,?,?,?,?)", (iid, it["description"], it["quantity"], it["unit_price"], it["amount"]))
+    db.execute("UPDATE invoices SET status='accepted' WHERE id=?", (qid,))
+    return db.query("SELECT * FROM invoices WHERE id=?", (iid,), one=True)
+
+
+# --------------------------------------------------------------------------
+# SETTINGS (company profile / branding)
+# --------------------------------------------------------------------------
+DEFAULT_SETTINGS = {
+    "company_name_en": "PestCare Pest Control Co.", "company_name_ar": "شركة بيست كير لمكافحة الآفات",
+    "address_en": "Riyadh, Saudi Arabia", "address_ar": "الرياض، المملكة العربية السعودية",
+    "phone": "+966 11 000 0000", "email": "billing@pestcare.com", "vat_no": "300000000000003",
+    "currency": "EGP", "tax_rate": "14", "logo": "",
+}
+
+
+def get_settings():
+    s = dict(DEFAULT_SETTINGS)
+    for r in db.query("SELECT key, value FROM settings"):
+        s[r["key"]] = r["value"]
+    return s
+
+
+@route("GET", r"/api/settings")
+def read_settings(ctx):
+    return get_settings()
+
+
+@route("PUT", r"/api/settings")
+def write_settings(ctx):
+    require(ctx.user, "admin", "manager")
+    for k, v in ctx.body.items():
+        db.execute("INSERT INTO settings(key,value) VALUES(?,?) "
+                   "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (k, str(v)))
+    return get_settings()
+
+
+@route("POST", r"/api/settings/logo")
+def upload_logo(ctx):
+    require(ctx.user, "admin", "manager")
+    _fields, files = parse_multipart(ctx.raw_body, ctx.content_type)
+    if not files:
+        raise ApiError(400, "No file uploaded")
+    f = files[0]
+    ext = os.path.splitext(f["filename"])[1].lower()
+    if ext not in ALLOWED_IMG:
+        raise ApiError(400, "Only image files are allowed")
+    fname = f"logo_{uuid.uuid4().hex}{ext}"
+    with open(os.path.join(UPLOAD_DIR, fname), "wb") as out:
+        out.write(f["data"])
+    db.execute("INSERT INTO settings(key,value) VALUES('logo',?) "
+               "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (fname,))
+    return get_settings()
+
+
+# --------------------------------------------------------------------------
+# CONTRACTS (recurring schedules)
+# --------------------------------------------------------------------------
+FREQ_DAYS = {"weekly": 7, "biweekly": 14, "monthly": 30, "quarterly": 91,
+             "semiannual": 182, "annual": 365}
+
+
+@route("GET", r"/api/contracts")
+def list_contracts(ctx):
+    u = ctx.user
+    where, params = [], []
+    if u["role"] == "client":
+        where.append("ct.client_id=?")
+        params.append(u["client_id"])
+    elif u["role"] == "agent":
+        where.append("ct.agent_id=?")
+        params.append(u["id"])
+    if ctx.query.get("client"):
+        where.append("ct.client_id=?")
+        params.append(ctx.query["client"])
+    sql = ("SELECT ct.*, c.name_en client_en, c.name_ar client_ar, "
+           "s.name_en service_en, s.name_ar service_ar, u.full_name agent_name "
+           "FROM contracts ct JOIN clients c ON c.id=ct.client_id "
+           "LEFT JOIN service_types s ON s.id=ct.service_type_id "
+           "LEFT JOIN users u ON u.id=ct.agent_id")
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY ct.next_run_date"
+    return db.query(sql, params)
+
+
+@route("POST", r"/api/contracts")
+def create_contract(ctx):
+    require(ctx.user, "admin", "manager")
+    b = ctx.body
+    if not b.get("client_id") or not b.get("start_date") or not b.get("frequency"):
+        raise ApiError(400, "Client, start date and frequency are required")
+    cid = db.execute(
+        "INSERT INTO contracts(client_id,site_id,service_type_id,agent_id,frequency,start_date,"
+        "end_date,next_run_date,price,status,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (b["client_id"], b.get("site_id"), b.get("service_type_id"), b.get("agent_id"),
+         b["frequency"], b["start_date"], b.get("end_date"), b["start_date"],
+         float(b.get("price", 0)), b.get("status", "active"), b.get("notes")))
+    return db.query("SELECT * FROM contracts WHERE id=?", (cid,), one=True)
+
+
+@route("PUT", r"/api/contracts/(\d+)")
+def update_contract(ctx):
+    require(ctx.user, "admin", "manager")
+    cid = int(ctx.params[0])
+    b = ctx.body
+    cols = ("site_id", "service_type_id", "agent_id", "frequency", "start_date",
+            "end_date", "next_run_date", "price", "status", "notes")
+    fields = [f"{c}=?" for c in cols if c in b]
+    vals = [b[c] for c in cols if c in b]
+    if not fields:
+        raise ApiError(400, "Nothing to update")
+    vals.append(cid)
+    db.execute(f"UPDATE contracts SET {','.join(fields)} WHERE id=?", vals)
+    return db.query("SELECT * FROM contracts WHERE id=?", (cid,), one=True)
+
+
+@route("DELETE", r"/api/contracts/(\d+)")
+def delete_contract(ctx):
+    require(ctx.user, "admin", "manager")
+    db.execute("DELETE FROM contracts WHERE id=?", (int(ctx.params[0]),))
+    return {"ok": True}
+
+
+@route("POST", r"/api/contracts/run")
+def run_contracts(ctx):
+    """Generate visits for all active contracts due within the look-ahead window."""
+    require(ctx.user, "admin", "manager")
+    created = _generate_due_visits()
+    return {"created": created}
+
+
+def _generate_due_visits(lookahead_days=14):
+    """Create visits for contracts whose next_run_date falls within the window.
+    Advances next_run_date by the frequency. Returns number of visits created."""
+    horizon = f"+{lookahead_days} days"
+    due = db.query(
+        "SELECT * FROM contracts WHERE status='active' AND date(next_run_date) <= date('now',?) "
+        "AND (end_date IS NULL OR date(next_run_date) <= date(end_date))", (horizon,))
+    count = 0
+    for ct in due:
+        days = FREQ_DAYS.get(ct["frequency"], 30)
+        run = ct["next_run_date"]
+        # generate every occurrence already due up to the horizon (avoids gaps)
+        for _ in range(60):  # safety cap
+            row = db.query("SELECT date(?) d, date('now',?) h", (run, horizon), one=True)
+            if row["d"] > row["h"]:
+                break
+            if ct["end_date"]:
+                er = db.query("SELECT date(?) d, date(?) e", (run, ct["end_date"]), one=True)
+                if er["d"] > er["e"]:
+                    break
+            # skip if a visit for this contract already exists on that date
+            exists = db.query(
+                "SELECT id FROM visits WHERE client_id=? AND date(scheduled_start)=date(?) "
+                "AND service_type_id IS ?", (ct["client_id"], run, ct["service_type_id"]), one=True)
+            if not exists:
+                db.execute(
+                    "INSERT INTO visits(client_id,site_id,agent_id,service_type_id,scheduled_start,"
+                    "status,notes) VALUES(?,?,?,?,?,?,?)",
+                    (ct["client_id"], ct["site_id"], ct["agent_id"], ct["service_type_id"],
+                     run + " 09:00:00", "scheduled", f"Auto-generated from contract #{ct['id']}"))
+                count += 1
+            nxt = db.query("SELECT date(?, ?) n", (run, f"+{days} days"), one=True)["n"]
+            run = nxt
+        db.execute("UPDATE contracts SET next_run_date=? WHERE id=?", (run, ct["id"]))
+    return count
+
+
+# --------------------------------------------------------------------------
+# NOTIFICATIONS / REMINDERS
+# --------------------------------------------------------------------------
+@route("GET", r"/api/notifications")
+def list_notifications(ctx):
+    if ctx.user["role"] in ("admin", "manager", "agent"):
+        try: _generate_reminders()   # keep the bell live without a manual trigger
+        except Exception as e: print("reminder gen:", e)
+    rows = db.query("SELECT * FROM notifications WHERE user_id=? ORDER BY created_at DESC LIMIT 50",
+                    (ctx.user["id"],))
+    unread = sum(1 for r in rows if not r["is_read"])
+    return {"items": rows, "unread": unread}
+
+
+@route("POST", r"/api/notifications/read")
+def mark_notifications_read(ctx):
+    ids = ctx.body.get("ids")
+    if ids:
+        q = ",".join("?" * len(ids))
+        db.execute(f"UPDATE notifications SET is_read=1 WHERE user_id=? AND id IN ({q})",
+                   [ctx.user["id"], *ids])
+    else:
+        db.execute("UPDATE notifications SET is_read=1 WHERE user_id=?", (ctx.user["id"],))
+    return {"ok": True}
+
+
+@route("POST", r"/api/notifications/generate")
+def gen_notifications(ctx):
+    require(ctx.user, "admin", "manager")
+    return {"created": _generate_reminders()}
+
+
+def _notify(user_id, ntype, title, body, link_view=None, link_id=None, dedup_key=None):
+    if dedup_key and db.query("SELECT id FROM notifications WHERE dedup_key=?", (dedup_key,), one=True):
+        return False
+    db.execute("INSERT INTO notifications(user_id,type,title,body,link_view,link_id,dedup_key) "
+               "VALUES(?,?,?,?,?,?,?)", (user_id, ntype, title, body, link_view, link_id, dedup_key))
+    _maybe_send_email(user_id, title, body)
+    return True
+
+
+def _maybe_send_email(user_id, subject, body):
+    """Send email if SMTP is configured in settings; otherwise no-op (in-app only)."""
+    s = get_settings()
+    host = s.get("smtp_host")
+    if not host:
+        return
+    try:
+        import smtplib
+        from email.message import EmailMessage
+        user = db.query("SELECT email FROM users WHERE id=?", (user_id,), one=True)
+        if not user or not user["email"]:
+            return
+        msg = EmailMessage()
+        msg["From"] = s.get("smtp_from", s.get("email", "noreply@pestcare.com"))
+        msg["To"] = user["email"]
+        msg["Subject"] = subject
+        msg.set_content(body or subject)
+        port = int(s.get("smtp_port", 587))
+        with smtplib.SMTP(host, port, timeout=10) as srv:
+            if s.get("smtp_tls", "1") == "1":
+                srv.starttls()
+            if s.get("smtp_user"):
+                srv.login(s["smtp_user"], s.get("smtp_pass", ""))
+            srv.send_message(msg)
+    except Exception as e:
+        print("email send failed:", e)
+
+
+def _generate_reminders():
+    """Scan upcoming visits and overdue invoices and create de-duplicated reminders."""
+    created = 0
+    # upcoming visits in next 2 days -> notify assigned agent
+    for v in db.query(
+        "SELECT v.id, v.agent_id, v.scheduled_start, c.name_en FROM visits v "
+        "JOIN clients c ON c.id=v.client_id WHERE v.status='scheduled' AND v.agent_id IS NOT NULL "
+        "AND date(v.scheduled_start) BETWEEN date('now') AND date('now','+2 days')"):
+        if _notify(v["agent_id"], "visit_reminder", "Upcoming visit",
+                   f"{v['name_en']} on {v['scheduled_start'][:16]}", "visit", v["id"],
+                   f"visitrem:{v['id']}:{v['scheduled_start'][:10]}"):
+            created += 1
+    # overdue invoices -> notify managers/admins
+    managers = db.query("SELECT id FROM users WHERE role IN ('admin','manager') AND active=1")
+    for inv in db.query(
+        "SELECT i.id, i.number, i.total, c.name_en FROM invoices i JOIN clients c ON c.id=i.client_id "
+        "WHERE i.doc_type='invoice' AND i.status IN ('sent','overdue') AND i.due_date IS NOT NULL "
+        "AND date(i.due_date) < date('now')"):
+        db.execute("UPDATE invoices SET status='overdue' WHERE id=? AND status='sent'", (inv["id"],))
+        for m in managers:
+            if _notify(m["id"], "invoice_overdue", "Invoice overdue",
+                       f"{inv['number']} — {inv['name_en']} ({inv['total']})", "invoice", inv["id"],
+                       f"ovd:{inv['id']}:{m['id']}"):
+                created += 1
+    return created
+
+
+# --------------------------------------------------------------------------
+# ANALYTICS
+# --------------------------------------------------------------------------
+@route("GET", r"/api/analytics")
+def analytics(ctx):
+    require(ctx.user, "admin", "manager")
+    months = db.query(
+        "SELECT strftime('%Y-%m', issue_date) m, SUM(total) total, "
+        "SUM((SELECT COALESCE(SUM(amount),0) FROM payments p WHERE p.invoice_id=i.id)) paid "
+        "FROM invoices i WHERE doc_type='invoice' GROUP BY m ORDER BY m DESC LIMIT 12")
+    ar_aging = db.query(
+        "SELECT CASE WHEN due_date IS NULL OR date(due_date)>=date('now') THEN 'current' "
+        "WHEN date(due_date)>=date('now','-30 days') THEN '1-30' "
+        "WHEN date(due_date)>=date('now','-60 days') THEN '31-60' ELSE '60+' END bucket, "
+        "SUM(total - COALESCE((SELECT SUM(amount) FROM payments p WHERE p.invoice_id=i.id),0)) due "
+        "FROM invoices i WHERE doc_type='invoice' AND status NOT IN('paid','cancelled') GROUP BY bucket")
+    agents = db.query(
+        "SELECT u.full_name, COUNT(v.id) total, "
+        "SUM(CASE WHEN v.status='completed' THEN 1 ELSE 0 END) completed "
+        "FROM users u LEFT JOIN visits v ON v.agent_id=u.id WHERE u.role='agent' GROUP BY u.id ORDER BY completed DESC")
+    chemicals = db.query(
+        "SELECT ch.name_en, ch.name_ar, ch.unit, COALESCE(SUM(cu.quantity),0) used "
+        "FROM chemicals ch LEFT JOIN chemical_usage cu ON cu.chemical_id=ch.id "
+        "GROUP BY ch.id HAVING used > 0 ORDER BY used DESC LIMIT 10")
+    services = db.query(
+        "SELECT s.name_en, s.name_ar, COUNT(v.id) cnt FROM service_types s "
+        "LEFT JOIN visits v ON v.service_type_id=s.id GROUP BY s.id HAVING cnt>0 ORDER BY cnt DESC")
+    totals = {
+        "revenue": db.query("SELECT COALESCE(SUM(amount),0) v FROM payments", one=True)["v"],
+        "invoiced": db.query("SELECT COALESCE(SUM(total),0) v FROM invoices WHERE doc_type='invoice'", one=True)["v"],
+        "visits_completed": db.query("SELECT COUNT(*) c FROM visits WHERE status='completed'", one=True)["c"],
+        "active_contracts": db.query("SELECT COUNT(*) c FROM contracts WHERE status='active'", one=True)["c"],
+    }
+    return {"months": months, "ar_aging": ar_aging, "agents": agents,
+            "chemicals": chemicals, "services": services, "totals": totals}
+
+
+def _month_labels(n=12):
+    import datetime
+    today = datetime.date.today().replace(day=1)
+    out, y, m = [], today.year, today.month
+    for i in range(n - 1, -1, -1):
+        mm, yy = m - i, y
+        while mm <= 0:
+            mm += 12; yy -= 1
+        out.append(f"{yy:04d}-{mm:02d}")
+    return out
+
+
+@route("GET", r"/api/clients/(\d+)/analytics")
+def client_analytics(ctx):
+    """Everything we know about one client, shaped for curve + 3D charts."""
+    cid = int(ctx.params[0])
+    _assert_client_access(ctx.user, cid)
+    if ctx.user["role"] == "agent":
+        raise ApiError(403, "No permission")
+    labels = _month_labels(12)
+    # build continuous 12-month series (fill gaps with zero) for smooth curves
+    inv_by = {r["m"]: r["v"] for r in db.query(
+        "SELECT strftime('%Y-%m',issue_date) m, SUM(total) v FROM invoices "
+        "WHERE client_id=? AND doc_type='invoice' GROUP BY m", (cid,))}
+    paid_by = {r["m"]: r["v"] for r in db.query(
+        "SELECT strftime('%Y-%m',p.paid_at) m, SUM(p.amount) v FROM payments p "
+        "JOIN invoices i ON i.id=p.invoice_id WHERE i.client_id=? GROUP BY m", (cid,))}
+    vis_by = {r["m"]: r["v"] for r in db.query(
+        "SELECT strftime('%Y-%m',scheduled_start) m, COUNT(*) v FROM visits "
+        "WHERE client_id=? GROUP BY m", (cid,))}
+    months = [{"m": k, "invoiced": round(inv_by.get(k, 0) or 0, 2),
+               "paid": round(paid_by.get(k, 0) or 0, 2), "visits": vis_by.get(k, 0) or 0}
+              for k in labels]
+    status = db.query("SELECT status, COUNT(*) cnt FROM visits WHERE client_id=? GROUP BY status", (cid,))
+    services = db.query(
+        "SELECT s.name_en, s.name_ar, COUNT(v.id) cnt FROM service_types s "
+        "JOIN visits v ON v.service_type_id=s.id WHERE v.client_id=? GROUP BY s.id "
+        "HAVING cnt>0 ORDER BY cnt DESC", (cid,))
+    severity = db.query(
+        "SELECT r.severity, COUNT(*) cnt FROM reports r JOIN visits v ON v.id=r.visit_id "
+        "WHERE v.client_id=? AND r.severity IS NOT NULL GROUP BY r.severity", (cid,))
+    chemicals = db.query(
+        "SELECT ch.name_en, ch.name_ar, ch.unit, SUM(cu.quantity) used FROM chemical_usage cu "
+        "JOIN chemicals ch ON ch.id=cu.chemical_id JOIN visits v ON v.id=cu.visit_id "
+        "WHERE v.client_id=? GROUP BY ch.id ORDER BY used DESC LIMIT 8", (cid,))
+    fin = _finance_summary(cid)
+    totals = {
+        "visits": db.query("SELECT COUNT(*) c FROM visits WHERE client_id=?", (cid,), one=True)["c"],
+        "completed": db.query("SELECT COUNT(*) c FROM visits WHERE client_id=? AND status='completed'", (cid,), one=True)["c"],
+        "invoiced": fin["total_invoiced"], "paid": fin["total_paid"], "outstanding": fin["outstanding"],
+        "contracts": db.query("SELECT COUNT(*) c FROM contracts WHERE client_id=? AND status='active'", (cid,), one=True)["c"],
+    }
+    return {"months": months, "status": status, "services": services,
+            "severity": severity, "chemicals": chemicals, "totals": totals}
+
+
+# --------------------------------------------------------------------------
+# E-SIGNATURE (capture on report)
+# --------------------------------------------------------------------------
+@route("POST", r"/api/visits/(\d+)/signature")
+def save_signature(ctx):
+    vid = int(ctx.params[0])
+    v = db.query("SELECT * FROM visits WHERE id=?", (vid,), one=True)
+    if not v:
+        raise ApiError(404, "Visit not found")
+    u = ctx.user
+    if u["role"] == "client":
+        raise ApiError(403, "No permission")
+    if u["role"] == "agent" and v["agent_id"] != u["id"]:
+        raise ApiError(403, "Not your visit")
+    b = ctx.body
+    which = b.get("which")  # 'customer' | 'technician'
+    data_url = b.get("data", "")
+    if which not in ("customer", "technician") or "," not in data_url:
+        raise ApiError(400, "which and data (data URL) required")
+    import base64
+    raw = base64.b64decode(data_url.split(",", 1)[1])
+    fname = f"sig_{which}_{uuid.uuid4().hex}.png"
+    with open(os.path.join(UPLOAD_DIR, fname), "wb") as out:
+        out.write(raw)
+    # ensure a report row exists
+    rep = db.query("SELECT * FROM reports WHERE visit_id=?", (vid,), one=True)
+    if not rep:
+        db.execute("INSERT INTO reports(visit_id) VALUES(?)", (vid,))
+    col = "customer_signature" if which == "customer" else "technician_signature"
+    db.execute(f"UPDATE reports SET {col}=? WHERE visit_id=?", (fname, vid))
+    if which == "customer" and b.get("customer_name"):
+        db.execute("UPDATE reports SET customer_name=? WHERE visit_id=?", (b["customer_name"], vid))
+    return db.query("SELECT * FROM reports WHERE visit_id=?", (vid,), one=True)
+
+
+# --------------------------------------------------------------------------
+# CSV EXPORT
+# --------------------------------------------------------------------------
+@route("GET", r"/api/export/(clients|visits|invoices|chemicals|payments)\.csv")
+def export_csv(ctx):
+    require(ctx.user, "admin", "manager")
+    entity = ctx.params[0]
+    queries = {
+        "clients": "SELECT id,name_en,name_ar,contact_person,phone,email,city,status,created_at FROM clients",
+        "visits": "SELECT v.id,c.name_en client,v.scheduled_start,v.status,u.full_name agent "
+                  "FROM visits v JOIN clients c ON c.id=v.client_id LEFT JOIN users u ON u.id=v.agent_id",
+        "invoices": "SELECT i.number,c.name_en client,i.doc_type,i.issue_date,i.due_date,i.total,i.status "
+                    "FROM invoices i JOIN clients c ON c.id=i.client_id",
+        "chemicals": "SELECT name_en,name_ar,active_ingredient,unit,quantity_in_stock,reorder_level,reg_no FROM chemicals",
+        "payments": "SELECT p.id,i.number invoice,p.amount,p.method,p.paid_at FROM payments p "
+                    "JOIN invoices i ON i.id=p.invoice_id",
+    }
+    rows = db.query(queries[entity])
+    return {"_csv": rows, "_filename": entity + ".csv"}
+
+
+# --------------------------------------------------------------------------
+# PHOTOS / UPLOADS
+# --------------------------------------------------------------------------
+@route("GET", r"/api/photos")
+def list_photos(ctx):
+    et = ctx.query.get("entity_type")
+    eid = ctx.query.get("entity_id")
+    if not et or not eid:
+        raise ApiError(400, "entity_type and entity_id required")
+    return db.query("SELECT * FROM photos WHERE entity_type=? AND entity_id=? ORDER BY uploaded_at DESC",
+                    (et, eid))
+
+
+@route("POST", r"/api/photos")
+def upload_photo(ctx):
+    if ctx.user["role"] == "client":
+        raise ApiError(403, "No permission")
+    fields, files = parse_multipart(ctx.raw_body, ctx.content_type)
+    if not files:
+        raise ApiError(400, "No file uploaded")
+    et = fields.get("entity_type")
+    eid = fields.get("entity_id")
+    if et not in ("client", "report", "visit", "chemical") or not eid:
+        raise ApiError(400, "Valid entity_type and entity_id required")
+    f = files[0]
+    ext = os.path.splitext(f["filename"])[1].lower()
+    if ext not in ALLOWED_IMG:
+        raise ApiError(400, "Only image files are allowed")
+    fname = f"{uuid.uuid4().hex}{ext}"
+    with open(os.path.join(UPLOAD_DIR, fname), "wb") as out:
+        out.write(f["data"])
+    pid = db.execute(
+        "INSERT INTO photos(entity_type,entity_id,filename,original_name,caption,uploaded_by) "
+        "VALUES(?,?,?,?,?,?)",
+        (et, int(eid), fname, f["filename"], fields.get("caption"), ctx.user["id"]))
+    return db.query("SELECT * FROM photos WHERE id=?", (pid,), one=True)
+
+
+@route("DELETE", r"/api/photos/(\d+)")
+def delete_photo(ctx):
+    require(ctx.user, "admin", "manager", "agent")
+    pid = int(ctx.params[0])
+    row = db.query("SELECT * FROM photos WHERE id=?", (pid,), one=True)
+    if row:
+        try:
+            os.remove(os.path.join(UPLOAD_DIR, row["filename"]))
+        except OSError:
+            pass
+        db.execute("DELETE FROM photos WHERE id=?", (pid,))
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------
+# SITE MAPS + DEVICE MARKERS (traps, bait stations, monitors …)
+# --------------------------------------------------------------------------
+@route("GET", r"/api/clients/(\d+)/maps")
+def list_maps(ctx):
+    cid = int(ctx.params[0])
+    _assert_client_access(ctx.user, cid)
+    return db.query(
+        "SELECT m.*, s.name site_name, "
+        "(SELECT COUNT(*) FROM map_markers k WHERE k.map_id=m.id) marker_count "
+        "FROM maps m LEFT JOIN sites s ON s.id=m.site_id WHERE m.client_id=? "
+        "ORDER BY m.created_at DESC", (cid,))
+
+
+@route("GET", r"/api/maps/(\d+)")
+def get_map(ctx):
+    mid = int(ctx.params[0])
+    m = db.query("SELECT m.*, c.name_en client_en, c.name_ar client_ar, s.name site_name "
+                 "FROM maps m JOIN clients c ON c.id=m.client_id "
+                 "LEFT JOIN sites s ON s.id=m.site_id WHERE m.id=?", (mid,), one=True)
+    if not m:
+        raise ApiError(404, "Map not found")
+    _assert_client_access(ctx.user, m["client_id"])
+    m["markers"] = db.query("SELECT * FROM map_markers WHERE map_id=? ORDER BY id", (mid,))
+    return m
+
+
+@route("POST", r"/api/maps")
+def upload_map(ctx):
+    require(ctx.user, "admin", "manager")
+    fields, files = parse_multipart(ctx.raw_body, ctx.content_type)
+    if not files:
+        raise ApiError(400, "No map image uploaded")
+    cid = fields.get("client_id")
+    if not cid:
+        raise ApiError(400, "client_id required")
+    f = files[0]
+    ext = os.path.splitext(f["filename"])[1].lower()
+    if ext not in ALLOWED_IMG:
+        raise ApiError(400, "Only image files are allowed")
+    fname = f"map_{uuid.uuid4().hex}{ext}"
+    with open(os.path.join(UPLOAD_DIR, fname), "wb") as out:
+        out.write(f["data"])
+    mid = db.execute(
+        "INSERT INTO maps(client_id,site_id,name,filename,uploaded_by) VALUES(?,?,?,?,?)",
+        (int(cid), fields.get("site_id") or None, fields.get("name") or "Site map",
+         fname, ctx.user["id"]))
+    return db.query("SELECT * FROM maps WHERE id=?", (mid,), one=True)
+
+
+@route("DELETE", r"/api/maps/(\d+)")
+def delete_map(ctx):
+    require(ctx.user, "admin", "manager")
+    mid = int(ctx.params[0])
+    row = db.query("SELECT * FROM maps WHERE id=?", (mid,), one=True)
+    if row:
+        try:
+            os.remove(os.path.join(UPLOAD_DIR, row["filename"]))
+        except OSError:
+            pass
+        db.execute("DELETE FROM maps WHERE id=?", (mid,))
+    return {"ok": True}
+
+
+@route("POST", r"/api/maps/(\d+)/markers")
+def add_marker(ctx):
+    require(ctx.user, "admin", "manager", "agent")
+    mid = int(ctx.params[0])
+    if not db.query("SELECT id FROM maps WHERE id=?", (mid,), one=True):
+        raise ApiError(404, "Map not found")
+    b = ctx.body
+    nid = db.execute(
+        "INSERT INTO map_markers(map_id,type,label,x,y,status,notes) VALUES(?,?,?,?,?,?,?)",
+        (mid, b.get("type", "other"), b.get("label"), float(b.get("x", 0)),
+         float(b.get("y", 0)), b.get("status", "ok"), b.get("notes")))
+    return db.query("SELECT * FROM map_markers WHERE id=?", (nid,), one=True)
+
+
+@route("PUT", r"/api/markers/(\d+)")
+def update_marker(ctx):
+    require(ctx.user, "admin", "manager", "agent")
+    nid = int(ctx.params[0])
+    b = ctx.body
+    cols = ("type", "label", "x", "y", "status", "notes")
+    fields = [f"{c}=?" for c in cols if c in b]
+    vals = [b[c] for c in cols if c in b]
+    if not fields:
+        raise ApiError(400, "Nothing to update")
+    vals.append(nid)
+    db.execute(f"UPDATE map_markers SET {','.join(fields)} WHERE id=?", vals)
+    return db.query("SELECT * FROM map_markers WHERE id=?", (nid,), one=True)
+
+
+@route("DELETE", r"/api/markers/(\d+)")
+def delete_marker(ctx):
+    require(ctx.user, "admin", "manager", "agent")
+    db.execute("DELETE FROM map_markers WHERE id=?", (int(ctx.params[0]),))
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------
+# GLOBAL SEARCH
+# --------------------------------------------------------------------------
+@route("GET", r"/api/search")
+def search(ctx):
+    q = ctx.query.get("q", "").strip()
+    if not q:
+        return {"clients": [], "visits": [], "chemicals": [], "invoices": []}
+    like = f"%{q}%"
+    u = ctx.user
+    res = {"clients": [], "visits": [], "chemicals": [], "invoices": []}
+    if u["role"] == "client":
+        cid = u["client_id"]
+        res["clients"] = db.query(
+            "SELECT id,name_en,name_ar,city FROM clients WHERE id=? AND (name_en LIKE ? OR name_ar LIKE ?)",
+            (cid, like, like))
+        res["visits"] = db.query(
+            "SELECT v.id,v.scheduled_start,v.status,c.name_en client_en FROM visits v "
+            "JOIN clients c ON c.id=v.client_id WHERE v.client_id=? AND "
+            "(v.location LIKE ? OR v.notes LIKE ?)", (cid, like, like))
+        res["invoices"] = db.query(
+            "SELECT id,number,total,status FROM invoices WHERE client_id=? AND number LIKE ?", (cid, like))
+        return res
+    res["clients"] = db.query(
+        "SELECT id,name_en,name_ar,city FROM clients WHERE name_en LIKE ? OR name_ar LIKE ? "
+        "OR city LIKE ? OR contact_person LIKE ? LIMIT 20", (like, like, like, like))
+    vsql = ("SELECT v.id,v.scheduled_start,v.status,c.name_en client_en FROM visits v "
+            "JOIN clients c ON c.id=v.client_id WHERE (v.location LIKE ? OR v.notes LIKE ? "
+            "OR c.name_en LIKE ?)")
+    vparams = [like, like, like]
+    if u["role"] == "agent":
+        vsql += " AND v.agent_id=?"
+        vparams.append(u["id"])
+    res["visits"] = db.query(vsql + " LIMIT 20", vparams)
+    if is_manager(u) or u["role"] == "agent":
+        res["chemicals"] = db.query(
+            "SELECT id,name_en,name_ar,quantity_in_stock,unit FROM chemicals "
+            "WHERE name_en LIKE ? OR name_ar LIKE ? OR active_ingredient LIKE ? LIMIT 20",
+            (like, like, like))
+    if is_manager(u):
+        res["invoices"] = db.query(
+            "SELECT i.id,i.number,i.total,i.status,c.name_en client_en FROM invoices i "
+            "JOIN clients c ON c.id=i.client_id WHERE i.number LIKE ? OR c.name_en LIKE ? LIMIT 20",
+            (like, like))
+    return res
+
+
+# --------------------------------------------------------------------------
+# internal helpers
+# --------------------------------------------------------------------------
+def _assert_client_access(user, client_id):
+    if user["role"] == "client" and user["client_id"] != client_id:
+        raise ApiError(403, "No permission")
+
+
+def _assert_visit_access(user, visit):
+    if user["role"] == "client" and visit["client_id"] != user["client_id"]:
+        raise ApiError(403, "No permission")
+    if user["role"] == "agent" and visit["agent_id"] != user["id"]:
+        raise ApiError(403, "No permission")
+
+
+def _client_outstanding(cid):
+    total = db.query("SELECT COALESCE(SUM(total),0) v FROM invoices WHERE client_id=? "
+                     "AND status IN('sent','overdue','paid')", (cid,), one=True)["v"]
+    paid = db.query("SELECT COALESCE(SUM(p.amount),0) v FROM payments p "
+                    "JOIN invoices i ON i.id=p.invoice_id WHERE i.client_id=?", (cid,), one=True)["v"]
+    return round(total - paid, 2)
+
+
+def _finance_summary(cid):
+    invoices = db.query(
+        "SELECT i.*, COALESCE((SELECT SUM(amount) FROM payments p WHERE p.invoice_id=i.id),0) paid "
+        "FROM invoices i WHERE i.client_id=? ORDER BY i.issue_date DESC", (cid,))
+    total = sum(i["total"] for i in invoices)
+    paid = sum(i["paid"] for i in invoices)
+    return {
+        "invoices": invoices,
+        "total_invoiced": round(total, 2),
+        "total_paid": round(paid, 2),
+        "outstanding": round(total - paid, 2),
+    }
+
+
+def _next_invoice_number(doc_type="invoice"):
+    prefix = "QUO" if doc_type == "quote" else "INV"
+    n = db.query("SELECT COUNT(*) c FROM invoices WHERE doc_type=?", (doc_type,), one=True)["c"] + 1
+    return f"{prefix}-{n:05d}"
+
+
+# --------------------------------------------------------------------------
+# HTTP plumbing
+# --------------------------------------------------------------------------
+class Handler(BaseHTTPRequestHandler):
+    server_version = "PestCRM/1.0"
+
+    def log_message(self, fmt, *args):
+        pass  # quiet
+
+    # dispatch -------------------------------------------------------------
+    def _handle(self, method):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        # static + uploads
+        if method == "GET" and not path.startswith("/api/"):
+            return self._serve_static(path)
+
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        raw_body = self.rfile.read(length) if length else b""
+        content_type = self.headers.get("Content-Type", "")
+        body = {}
+        if raw_body and content_type.startswith("application/json"):
+            try:
+                body = json.loads(raw_body.decode())
+            except Exception:
+                return self._json(400, {"error": "Invalid JSON body"})
+
+        query = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+
+        for m, regex, fn, auth_req in ROUTES:
+            if m != method:
+                continue
+            match = regex.match(path)
+            if not match:
+                continue
+            user = None
+            if auth_req:
+                user = self._current_user()
+                if not user:
+                    return self._json(401, {"error": "Authentication required"})
+            ctx = Ctx(user, list(match.groups()), query, body, raw_body, content_type)
+            try:
+                result = fn(ctx)
+                if isinstance(result, dict) and "_csv" in result:
+                    return self._csv(result["_csv"], result.get("_filename", "export.csv"))
+                return self._json(200, result)
+            except ApiError as e:
+                return self._json(e.status, {"error": e.message})
+            except Exception as e:
+                return self._json(500, {"error": f"Server error: {e}"})
+        return self._json(404, {"error": "Not found"})
+
+    def do_GET(self):
+        self._handle("GET")
+
+    def do_POST(self):
+        self._handle("POST")
+
+    def do_PUT(self):
+        self._handle("PUT")
+
+    def do_DELETE(self):
+        self._handle("DELETE")
+
+    # helpers --------------------------------------------------------------
+    def _current_user(self):
+        hdr = self.headers.get("Authorization", "")
+        if not hdr.startswith("Bearer "):
+            return None
+        uid = auth.verify_token(hdr[7:])
+        if not uid:
+            return None
+        return db.query("SELECT * FROM users WHERE id=? AND active=1", (uid,), one=True)
+
+    def _json(self, status, payload):
+        data = json.dumps(payload, default=str).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _csv(self, rows, filename):
+        import csv, io
+        buf = io.StringIO()
+        if rows:
+            w = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
+            w.writeheader()
+            w.writerows(rows)
+        data = ("﻿" + buf.getvalue()).encode("utf-8")  # BOM for Excel/Arabic
+        self.send_response(200)
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _serve_static(self, path):
+        if path == "/" or path == "":
+            path = "/index.html"
+        if path.startswith("/uploads/"):
+            base, rel = UPLOAD_DIR, path[len("/uploads/"):]
+        else:
+            base, rel = STATIC_DIR, path.lstrip("/")
+        full = os.path.normpath(os.path.join(base, rel))
+        if not full.startswith(base) or not os.path.isfile(full):
+            # SPA fallback
+            full = os.path.join(STATIC_DIR, "index.html")
+        ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
+        with open(full, "rb") as f:
+            data = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        # Always serve the freshest app code (no stale cached UI in browsers).
+        if path.startswith("/uploads/"):
+            self.send_header("Cache-Control", "public, max-age=86400")
+        else:
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def main():
+    db.init_db()
+    # auto-seed on first run
+    if db.query("SELECT COUNT(*) c FROM users", one=True)["c"] == 0:
+        import seed
+        seed.run()
+    # generate any due recurring visits + reminders at startup
+    try:
+        _generate_due_visits()
+        _generate_reminders()
+    except Exception as e:
+        print("startup generation:", e)
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
+    srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    print(f"Pest Control CRM running on http://localhost:{port}")
+    print("Default login: admin@pestcrm.com / admin123")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down.")
+
+
+if __name__ == "__main__":
+    main()
