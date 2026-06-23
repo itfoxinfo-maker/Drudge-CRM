@@ -289,7 +289,14 @@ tr.clickable:hover { background: var(--green-l); }
 .col3d-lbl { margin-top: 10px; font-size: 11px; color: var(--muted); text-align: center; max-width: 80px; font-weight: 600; }
 
 /* FoxSystems branding (app chrome) */
-.brand-logo { width: 200px; max-width: 84%; height: auto; margin: 0 auto 10px; display: block; }
+/* Login card is light, but the logo's wordmark is white — sit it on a dark
+   brand chip so the text + fox are clearly legible. */
+.brand-logo {
+  width: 230px; max-width: 88%; height: auto; margin: 0 auto 12px; display: block;
+  background: linear-gradient(135deg, #0b2236, #103a4d);
+  padding: 16px 24px; border-radius: 18px;
+  box-shadow: 0 12px 28px rgba(11, 34, 54, .32);
+}
 .brand-sm { flex-direction: column; align-items: flex-start; gap: 9px; }
 .brand-logo-sm { width: 152px; max-width: 100%; height: auto; display: block; }
 .powered { margin-top: 16px; font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: .02em; text-align: center; }
