@@ -289,16 +289,34 @@ tr.clickable:hover { background: var(--green-l); }
 .col3d-lbl { margin-top: 10px; font-size: 11px; color: var(--muted); text-align: center; max-width: 80px; font-weight: 600; }
 
 /* FoxSystems branding (app chrome) */
-/* Login card is light, but the logo's wordmark is white — sit it on a dark
-   brand chip so the text + fox are clearly legible. */
-.brand-logo {
-  width: 230px; max-width: 88%; height: auto; margin: 0 auto 12px; display: block;
-  background: linear-gradient(135deg, #0b2236, #103a4d);
-  padding: 16px 24px; border-radius: 18px;
-  box-shadow: 0 12px 28px rgba(11, 34, 54, .32);
-}
+.brand-logo { width: 240px; max-width: 90%; height: auto; margin: 2px auto 14px; display: block; }
 .brand-sm { flex-direction: column; align-items: flex-start; gap: 9px; }
 .brand-logo-sm { width: 152px; max-width: 100%; height: auto; display: block; }
 .powered { margin-top: 16px; font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: .02em; text-align: center; }
 .powered-sm { margin-top: 8px; font-size: 10.5px; color: rgba(255,255,255,.5); letter-spacing: .02em; }
 @media (max-width: 860px) { .brand-logo-sm { width: 44px; } .powered-sm { display: none; } }
+
+/* Dark navy login card — matches the FoxSystems logo so it blends in. */
+.login-card {
+  background: linear-gradient(160deg, #0e2c42 0%, #0b2236 100%);
+  border: 1px solid rgba(255,255,255,.10); color: #e7eef5;
+  box-shadow: 0 24px 70px rgba(0,0,0,.5);
+}
+.login-card h1 { color: #f3f7fb; }
+.login-card label { color: #c4d2df; }
+.login-card .muted, .login-hint, .powered { color: #93a6b9; }
+.login-card input {
+  background: rgba(255,255,255,.06); border-color: rgba(255,255,255,.14); color: #eaf1f7;
+}
+.login-card input::placeholder { color: #7f93a6; }
+.login-card input:focus { border-color: #2dd4bf; box-shadow: 0 0 0 4px rgba(45,212,191,.18); }
+.login-card .link-btn { color: #5eead4; }
+.login-card .link-btn:hover { color: #99f6e4; }
+/* Cohesive dark-blue backdrop to match the FoxSystems brand. */
+.login-screen {
+  background: radial-gradient(1200px 600px at 10% 0%, #14507a 0%, transparent 50%),
+              radial-gradient(1000px 700px at 100% 100%, #0e7490 0%, transparent 55%),
+              linear-gradient(135deg, #0a2236, #06141f);
+}
+.login-screen::before { background: #38bdf8; }
+.login-screen::after { background: #22d3ee; }
