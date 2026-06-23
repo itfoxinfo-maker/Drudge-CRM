@@ -456,19 +456,36 @@ def upsert_report(ctx):
         raise ApiError(403, "No permission")
     b = ctx.body
     existing = db.query("SELECT * FROM reports WHERE visit_id=?", (vid,), one=True)
-    cols = ("summary", "pests_found", "findings", "recommendations", "severity", "next_visit_due")
+    text_cols = ("summary", "pests_found", "findings", "recommendations", "severity",
+                 "next_visit_due", "spare_parts_changed", "branch_issue")
+    # Engineer service log — quantities of parts/materials used during the visit.
+    num_cols = ("lamps_used", "cables_used", "transformers_used", "light_sheets_used",
+                "fipronil_ml", "imidacloprid_gm", "baits_count", "glo_pieces", "flybase_bags")
+
+    def num(v):
+        try:
+            return float(v) if str(v).strip() != "" else 0
+        except (TypeError, ValueError):
+            return 0
+
     if existing:
-        fields = [f"{c}=?" for c in cols if c in b]
-        vals = [b[c] for c in cols if c in b]
+        fields, vals = [], []
+        for c in text_cols:
+            if c in b:
+                fields.append(f"{c}=?"); vals.append(b[c])
+        for c in num_cols:
+            if c in b:
+                fields.append(f"{c}=?"); vals.append(num(b[c]))
         if fields:
             vals.append(vid)
             db.execute(f"UPDATE reports SET {','.join(fields)} WHERE visit_id=?", vals)
     else:
-        db.execute(
-            "INSERT INTO reports(visit_id,summary,pests_found,findings,recommendations,severity,next_visit_due) "
-            "VALUES(?,?,?,?,?,?,?)",
-            (vid, b.get("summary"), b.get("pests_found"), b.get("findings"),
-             b.get("recommendations"), b.get("severity", "low"), b.get("next_visit_due")))
+        cols = ("visit_id",) + text_cols + num_cols
+        vals = [vid] + [b.get(c) for c in text_cols] + [num(b.get(c)) for c in num_cols]
+        # severity must not be NULL (CHECK constraint) — default it.
+        vals[list(cols).index("severity")] = b.get("severity") or "low"
+        placeholders = ",".join("?" * len(cols))
+        db.execute(f"INSERT INTO reports({','.join(cols)}) VALUES({placeholders})", vals)
     return db.query("SELECT * FROM reports WHERE visit_id=?", (vid,), one=True)
 
 

@@ -94,6 +94,19 @@ CREATE TABLE IF NOT EXISTS reports (
     customer_name        TEXT,
     customer_signature   TEXT,   -- filename of captured signature image
     technician_signature TEXT,
+    -- Engineer service log (per the field visit tracker): parts & materials
+    -- consumed during the visit, plus any branch issue found.
+    spare_parts_changed  TEXT,
+    lamps_used           REAL NOT NULL DEFAULT 0,
+    cables_used          REAL NOT NULL DEFAULT 0,
+    transformers_used    REAL NOT NULL DEFAULT 0,
+    light_sheets_used    REAL NOT NULL DEFAULT 0,
+    fipronil_ml          REAL NOT NULL DEFAULT 0,
+    imidacloprid_gm      REAL NOT NULL DEFAULT 0,
+    baits_count          REAL NOT NULL DEFAULT 0,
+    glo_pieces           REAL NOT NULL DEFAULT 0,
+    flybase_bags         REAL NOT NULL DEFAULT 0,
+    branch_issue         TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -282,6 +295,20 @@ def _migrate(conn):
     # report signature columns
     for c, ddl in (("customer_name", "TEXT"), ("customer_signature", "TEXT"),
                    ("technician_signature", "TEXT")):
+        if c not in cols("reports"):
+            conn.execute(f"ALTER TABLE reports ADD COLUMN {c} {ddl}")
+    # engineer service-log columns (materials & parts consumed per visit)
+    for c, ddl in (("spare_parts_changed", "TEXT"),
+                   ("lamps_used", "REAL NOT NULL DEFAULT 0"),
+                   ("cables_used", "REAL NOT NULL DEFAULT 0"),
+                   ("transformers_used", "REAL NOT NULL DEFAULT 0"),
+                   ("light_sheets_used", "REAL NOT NULL DEFAULT 0"),
+                   ("fipronil_ml", "REAL NOT NULL DEFAULT 0"),
+                   ("imidacloprid_gm", "REAL NOT NULL DEFAULT 0"),
+                   ("baits_count", "REAL NOT NULL DEFAULT 0"),
+                   ("glo_pieces", "REAL NOT NULL DEFAULT 0"),
+                   ("flybase_bags", "REAL NOT NULL DEFAULT 0"),
+                   ("branch_issue", "TEXT")):
         if c not in cols("reports"):
             conn.execute(f"ALTER TABLE reports ADD COLUMN {c} {ddl}")
     # invoice columns

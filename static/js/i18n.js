@@ -128,6 +128,12 @@ const TRANSLATIONS = {
     activity_detections: "Activity Detections", device_hotspots: "Activity Hotspots",
     detections: "Detections", no_trend_data: "No monitoring data yet.",
     by_device_type: "By Device Type", last_inspection: "Last Inspection", inspections: "Inspections",
+    // engineer service log (visit-tracker materials)
+    materials_used: "Service & Materials Used", spare_parts_changed: "Spare Parts Changed",
+    lamps_used: "Lamps Used", cables_used: "Cables Used", transformers_used: "Transformers Used",
+    light_sheets_used: "Light Sheets Used", fipronil_ml: "Fipronil (ml)",
+    imidacloprid_gm: "Imidacloprid (gm)", baits_count: "Baits (#)", glo_pieces: "Glo Pieces (#)",
+    flybase_bags: "Flybase Bags", branch_issue: "Branch Issue",
   },
   ar: {
     app_name: "نظام إدارة مكافحة الآفات",
@@ -239,6 +245,12 @@ const TRANSLATIONS = {
     activity_detections: "حالات رصد النشاط", device_hotspots: "بؤر النشاط",
     detections: "حالات الرصد", no_trend_data: "لا توجد بيانات مراقبة بعد.",
     by_device_type: "حسب نوع الجهاز", last_inspection: "آخر فحص", inspections: "عمليات الفحص",
+    // engineer service log (visit-tracker materials)
+    materials_used: "الخدمة والمواد المستخدمة", spare_parts_changed: "قطع الغيار المستبدلة",
+    lamps_used: "اللمبات المستخدمة", cables_used: "الكابلات المستخدمة", transformers_used: "المحولات المستخدمة",
+    light_sheets_used: "الألواح اللاصقة المستخدمة", fipronil_ml: "فيبرونيل (مل)",
+    imidacloprid_gm: "إيميداكلوبريد (جم)", baits_count: "الطعوم (عدد)", glo_pieces: "قطع جلو (عدد)",
+    flybase_bags: "أكياس فلاي بيس", branch_issue: "مشكلة الفرع",
   },
 };
 

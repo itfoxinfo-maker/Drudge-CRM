@@ -538,18 +538,40 @@ function reportForm(rep, visitId, canEdit) {
       ${field(t("severity"), "severity", { options: sev, value: rep.severity || "low" })}
       ${field(t("next_visit_due"), "next_visit_due", { type: "date", value: rep.next_visit_due })}
     </div>
+    <div class="section-title" style="margin:18px 0 8px"><h3>🧰 ${t("materials_used")}</h3></div>
+    ${field(t("spare_parts_changed"), "spare_parts_changed", { value: rep.spare_parts_changed })}
+    <div class="form-grid">
+      ${field(t("lamps_used"), "lamps_used", { type: "number", value: rep.lamps_used || "" })}
+      ${field(t("cables_used"), "cables_used", { type: "number", value: rep.cables_used || "" })}
+      ${field(t("transformers_used"), "transformers_used", { type: "number", value: rep.transformers_used || "" })}
+      ${field(t("light_sheets_used"), "light_sheets_used", { type: "number", value: rep.light_sheets_used || "" })}
+      ${field(t("fipronil_ml"), "fipronil_ml", { type: "number", value: rep.fipronil_ml || "" })}
+      ${field(t("imidacloprid_gm"), "imidacloprid_gm", { type: "number", value: rep.imidacloprid_gm || "" })}
+      ${field(t("baits_count"), "baits_count", { type: "number", value: rep.baits_count || "" })}
+      ${field(t("glo_pieces"), "glo_pieces", { type: "number", value: rep.glo_pieces || "" })}
+      ${field(t("flybase_bags"), "flybase_bags", { type: "number", value: rep.flybase_bags || "" })}
+    </div>
+    ${field(t("branch_issue"), "branch_issue", { value: rep.branch_issue, textarea: true })}
     ${canEdit ? `<div class="form-actions"><button class="btn" type="submit">${t("save_report")}</button></div>` : ""}
     </form>${!canEdit ? "<script>document.querySelectorAll('#report-form [name]').forEach(e=>e.disabled=true)</script>" : ""}`;
 }
 function clientReportView(rep) {
   if (!rep || !rep.id) return `<div class="empty">${t("none")}</div>`;
+  // material rows: only show the ones the engineer actually recorded
+  const matKeys = ["lamps_used", "cables_used", "transformers_used", "light_sheets_used",
+    "fipronil_ml", "imidacloprid_gm", "baits_count", "glo_pieces", "flybase_bags"];
+  const mat = matKeys.filter(k => Number(rep[k]) > 0)
+    .map(k => `<div>${t(k)}</div><div>${esc(rep[k])}</div>`).join("");
   return `<div class="kv">
     <div>${t("summary")}</div><div>${esc(rep.summary || "—")}</div>
     <div>${t("pests_found")}</div><div>${esc(rep.pests_found || "—")}</div>
     <div>${t("findings")}</div><div>${esc(rep.findings || "—")}</div>
     <div>${t("recommendations")}</div><div>${esc(rep.recommendations || "—")}</div>
     <div>${t("severity")}</div><div class="sev-${rep.severity}">${t("sev_" + (rep.severity || "low"))}</div>
-    <div>${t("next_visit_due")}</div><div>${fmtDate(rep.next_visit_due)}</div></div>`;
+    <div>${t("next_visit_due")}</div><div>${fmtDate(rep.next_visit_due)}</div>
+    ${rep.spare_parts_changed ? `<div>${t("spare_parts_changed")}</div><div>${esc(rep.spare_parts_changed)}</div>` : ""}
+    ${mat}
+    ${rep.branch_issue ? `<div>${t("branch_issue")}</div><div>${esc(rep.branch_issue)}</div>` : ""}</div>`;
 }
 function usageForm(visitId) {
   const opts = cache.chemicals.map(c => ({ v: c.id, l: `${localized(c, "name")} (${c.quantity_in_stock} ${c.unit})` }));
@@ -923,6 +945,11 @@ function printCertificate(visit) {
   const chemRows = (visit.chemicals || []).map(cu =>
     `<tr><td>${esc(localized(cu, "name"))}</td><td class="num">${cu.quantity} ${esc(cu.unit || "")}</td>
      <td>${esc(cu.area_treated || "—")}</td></tr>`).join("");
+  // engineer service-log materials (only the ones with recorded quantities)
+  const matKeys = ["lamps_used", "cables_used", "transformers_used", "light_sheets_used",
+    "fipronil_ml", "imidacloprid_gm", "baits_count", "glo_pieces", "flybase_bags"];
+  const matRows = matKeys.filter(k => Number(rep[k]) > 0)
+    .map(k => `<tr><td>${esc(t(k))}</td><td class="num">${esc(rep[k])}</td></tr>`).join("");
   const row = (label, val) => val ? `<tr><td class="lbl">${esc(label)}</td><td>${esc(val)}</td></tr>` : "";
   const doc = `<!DOCTYPE html><html lang="${LANG}" dir="${dir}"><head><meta charset="utf-8">
     <title>${esc(certNo)}</title>
@@ -988,7 +1015,12 @@ function printCertificate(visit) {
         ${row(t("recommendations"), rep.recommendations)}
         <tr><td class="lbl">${esc(t("severity"))}</td><td><span class="sev">${esc(t("sev_" + sev))}</span></td></tr>
         ${row(t("next_visit_due"), rep.next_visit_due ? fmtDate(rep.next_visit_due) : "")}
+        ${row(t("spare_parts_changed"), rep.spare_parts_changed)}
+        ${row(t("branch_issue"), rep.branch_issue)}
       </table>
+      ${matRows ? `<h3 class="sec">${esc(t("materials_used"))}</h3>
+        <table class="data"><thead><tr><th>${esc(t("materials_used"))}</th><th class="num">${esc(t("quantity"))}</th></tr></thead>
+        <tbody>${matRows}</tbody></table>` : ""}
       ${chemRows ? `<h3 class="sec">${esc(t("chemicals_applied"))}</h3>
         <table class="data"><thead><tr><th>${esc(t("name_en"))}</th><th class="num">${esc(t("quantity"))}</th>
         <th>${esc(t("area_treated"))}</th></tr></thead><tbody>${chemRows}</tbody></table>` : ""}

@@ -32,7 +32,10 @@ The database (`data/crm.db`) is created and seeded with demo data on first launc
 - **Visit scheduling** — assign agents, service type, date/time, status workflow
   (scheduled → in progress → completed / cancelled), with filters by status / agent / date.
 - **Visit reports** — summary, pests found, findings, recommendations, severity, next-visit
-  due date, plus report photos.
+  due date, plus report photos. Each report also carries an **engineer service log** (from the
+  field visit tracker): spare parts changed, lamps / cables / transformers / light sheets used,
+  Fipronil (ml), Imidacloprid (gm), baits, Glo pieces, Flybase bags and any branch issue —
+  entered by the technician on the visit and carried onto the service certificate.
 - **Chemicals & inventory** — stock levels, reorder alerts (low-stock), hazard class,
   registration no., cost; stock purchases/adjustments are logged.
 - **Chemicals used per visit** — record consumption per visit; stock auto-decrements and the
