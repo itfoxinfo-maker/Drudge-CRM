@@ -1111,6 +1111,13 @@ def client_analytics(ctx):
         "SELECT ch.name_en, ch.name_ar, ch.unit, SUM(cu.quantity) used FROM chemical_usage cu "
         "JOIN chemicals ch ON ch.id=cu.chemical_id JOIN visits v ON v.id=cu.visit_id "
         "WHERE v.client_id=? GROUP BY ch.id ORDER BY used DESC LIMIT 8", (cid,))
+    # Engineer service-log materials consumed across all of this client's visits.
+    mat_cols = ("lamps_used", "cables_used", "transformers_used", "light_sheets_used",
+                "fipronil_ml", "imidacloprid_gm", "baits_count", "glo_pieces", "flybase_bags")
+    mat_sum = db.query(
+        "SELECT " + ",".join(f"COALESCE(SUM(r.{c}),0) {c}" for c in mat_cols) +
+        " FROM reports r JOIN visits v ON v.id=r.visit_id WHERE v.client_id=?", (cid,), one=True)
+    materials = [{"key": c, "total": round(mat_sum[c] or 0, 2)} for c in mat_cols if (mat_sum[c] or 0) > 0]
     fin = _finance_summary(cid)
     totals = {
         "visits": db.query("SELECT COUNT(*) c FROM visits WHERE client_id=?", (cid,), one=True)["c"],
@@ -1119,7 +1126,7 @@ def client_analytics(ctx):
         "contracts": db.query("SELECT COUNT(*) c FROM contracts WHERE client_id=? AND status='active'", (cid,), one=True)["c"],
     }
     return {"months": months, "status": status, "services": services,
-            "severity": severity, "chemicals": chemicals, "totals": totals}
+            "severity": severity, "chemicals": chemicals, "materials": materials, "totals": totals}
 
 
 @route("GET", r"/api/clients/(\d+)/pest-trends")

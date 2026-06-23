@@ -1575,6 +1575,16 @@ function pestTrendsBlock(tr) {
     </div>`;
 }
 
+// Materials-consumed rollup: total parts/chemicals used across all the
+// client's visits (from the engineer service log). Returns "" when none.
+function materialsBlock(materials) {
+  if (!materials || !materials.length) return "";
+  const cards = materials.map((m, i) =>
+    `<div class="stat-card ${["c-blue", "c-green", "c-teal", "c-amber", "c-purple"][i % 5]}">
+      <div class="sc-ic">📦</div><div><div class="v">${m.total}</div><div class="l">${esc(t(m.key))}</div></div></div>`).join("");
+  return `<div class="cards">${cards}</div>`;
+}
+
 // ====================================================================
 // Per-company analytics
 // ====================================================================
@@ -1608,6 +1618,7 @@ async function viewClientAnalytics(v, arg) {
     visits: curveChart(labels, [{ name: t("nav_visits"), color: "#7c3aed", values: a.months.map(m => m.visits) }]),
     status: pie3d(statusSeg), severity: pie3d(sevSeg),
     services: cols3d(svcItems), chemicals: cols3d(chemItems),
+    materials: materialsBlock(a.materials),
     pestTrends: pestTrendsBlock(tr),
   };
   v.innerHTML = `
@@ -1623,6 +1634,7 @@ async function viewClientAnalytics(v, arg) {
       <div class="panel"><h3>🧰 ${t("service_mix")}</h3>${parts.services}</div>
     </div>
     <div class="panel"><h3>🧪 ${t("chemical_usage")}</h3>${parts.chemicals}</div>
+    ${parts.materials ? `<div class="panel"><h3>📦 ${t("materials_consumed")}</h3>${parts.materials}</div>` : ""}
     ${parts.pestTrends ? `<div class="section-title" style="margin-top:8px"><h2>🐭 ${t("pest_trends")}</h2></div>${parts.pestTrends}` : ""}`;
   $("bc").addEventListener("click", () => navigate(role() === "client" ? "folder" : "client", { id }));
   $("export-analytics").addEventListener("click", () => printAnalytics(c, parts));
@@ -1687,6 +1699,7 @@ function printAnalytics(c, parts) {
       <div class="panel"><h3>🧰 ${esc(t("service_mix"))}</h3>${parts.services}</div>
     </div>
     <div class="panel"><h3>🧪 ${esc(t("chemical_usage"))}</h3>${parts.chemicals}</div>
+    ${parts.materials ? `<div class="panel"><h3>📦 ${esc(t("materials_consumed"))}</h3>${parts.materials}</div>` : ""}
     ${parts.pestTrends ? `<h2 style="margin:18px 0 6px">🐭 ${esc(t("pest_trends"))}</h2>${parts.pestTrends}` : ""}`;
   analyticsReportDoc(t("analytics_report"), localized(c, "name"), body);
 }

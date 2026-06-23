@@ -58,7 +58,10 @@ The database (`data/crm.db`) is created and seeded with demo data on first launc
 - **E-signatures** — capture customer & technician signatures on a visit via touch/mouse canvas;
   stored as images and shown on the report.
 - **Analytics** — monthly invoiced-vs-paid, receivables aging, agent productivity, chemical
-  consumption and service mix (rendered as bar charts).
+  consumption and service mix (rendered as bar charts). Per-client analytics also includes a
+  **materials-consumed rollup** — totals of lamps, cables, transformers, light sheets, baits,
+  Glo pieces, Flybase bags, Fipronil and Imidacloprid summed across the client's visits
+  (from the engineer service log) — and a **pest-activity trends** section.
 - **Site / branch maps** — upload a floor-plan image per client (optionally per site) and place
   **device markers** on it (bait stations, rodent traps, insect light traps, monitoring points,
   treatment areas). Each marker has a label, status (OK / needs service / pest activity / missing)

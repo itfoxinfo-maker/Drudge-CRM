@@ -134,6 +134,7 @@ const TRANSLATIONS = {
     light_sheets_used: "Light Sheets Used", fipronil_ml: "Fipronil (ml)",
     imidacloprid_gm: "Imidacloprid (gm)", baits_count: "Baits (#)", glo_pieces: "Glo Pieces (#)",
     flybase_bags: "Flybase Bags", branch_issue: "Branch Issue",
+    materials_consumed: "Materials Consumed",
   },
   ar: {
     app_name: "نظام إدارة مكافحة الآفات",
@@ -251,6 +252,7 @@ const TRANSLATIONS = {
     light_sheets_used: "الألواح اللاصقة المستخدمة", fipronil_ml: "فيبرونيل (مل)",
     imidacloprid_gm: "إيميداكلوبريد (جم)", baits_count: "الطعوم (عدد)", glo_pieces: "قطع جلو (عدد)",
     flybase_bags: "أكياس فلاي بيس", branch_issue: "مشكلة الفرع",
+    materials_consumed: "إجمالي المواد المستهلكة",
   },
 };
 
