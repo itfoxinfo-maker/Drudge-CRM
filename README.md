@@ -1,6 +1,10 @@
-# 🐜 PestCare CRM
+# PestCare CRM — *Powered by FoxSystems*
+
+<p align="center"><img src="static/foxsyslogo.png" alt="FoxSystems" width="280"></p>
 
 A complete, **bilingual (English / العربية)** CRM for a pest-control company.
+The application is branded **FoxSystems** (login, sidebar and "Powered by FoxSystems"
+mark); each operator's own company logo still appears on their invoices and certificates.
 Built with **zero external dependencies** — pure Python 3 standard library on the
 backend and vanilla HTML/CSS/JS on the frontend.
 

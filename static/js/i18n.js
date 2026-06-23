@@ -141,6 +141,7 @@ const TRANSLATIONS = {
     download_certificate: "Download", report_pending: "Report pending",
     cert_settings: "Service Certificate", cert_footer_label: "Footer Note",
     cert_settings_hint: "Customize the wording printed on every service certificate (and add your license / accreditation number).",
+    powered_by: "Powered by FoxSystems",
   },
   ar: {
     app_name: "نظام إدارة مكافحة الآفات",
@@ -265,6 +266,7 @@ const TRANSLATIONS = {
     download_certificate: "تحميل", report_pending: "التقرير قيد الإعداد",
     cert_settings: "شهادة الخدمة", cert_footer_label: "ملاحظة التذييل",
     cert_settings_hint: "خصّص النص المطبوع على كل شهادة خدمة (وأضف رقم الترخيص / الاعتماد).",
+    powered_by: "مدعوم من FoxSystems",
   },
 };
 

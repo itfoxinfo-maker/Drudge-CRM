@@ -44,6 +44,8 @@ function applyStaticLabels() {
   $("logout-btn").textContent = t("logout");
   $("lang-toggle").textContent = t("language");
   $("quick-search").placeholder = t("search_placeholder");
+  $("login-powered").textContent = t("powered_by");
+  $("sidebar-powered").textContent = t("powered_by");
 }
 
 async function boot() {
