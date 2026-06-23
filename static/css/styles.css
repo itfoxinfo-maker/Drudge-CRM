@@ -312,6 +312,12 @@ tr.clickable:hover { background: var(--green-l); }
 .login-card input:focus { border-color: #2dd4bf; box-shadow: 0 0 0 4px rgba(45,212,191,.18); }
 .login-card .link-btn { color: #5eead4; }
 .login-card .link-btn:hover { color: #99f6e4; }
+/* Navy sidebar to match the FoxSystems theme (was green). */
+.sidebar { background: linear-gradient(180deg, #0e2c42 0%, #0a2236 55%, #07182a 100%); color: #aac1d4; }
+.nav-item.active { background: linear-gradient(135deg, #1e6fd6, #0ea5b7); box-shadow: 0 6px 16px rgba(14,116,144,.45); }
+.sidebar-foot .link-btn { color: #7fc6dd; }
+.sidebar-foot .link-btn:hover { color: #fff; }
+.sidebar-foot .muted { color: #8aa0b4; }
 /* Cohesive dark-blue backdrop to match the FoxSystems brand. */
 .login-screen {
   background: radial-gradient(1200px 600px at 10% 0%, #14507a 0%, transparent 50%),
