@@ -351,7 +351,8 @@ def list_visits(ctx):
         where.append("date(v.scheduled_start) <= date(?)")
         params.append(ctx.query["to"])
     sql = ("SELECT v.*, c.name_en client_en, c.name_ar client_ar, "
-           "s.name_en service_en, s.name_ar service_ar, u.full_name agent_name "
+           "s.name_en service_en, s.name_ar service_ar, u.full_name agent_name, "
+           "EXISTS(SELECT 1 FROM reports r WHERE r.visit_id=v.id) has_report "
            "FROM visits v JOIN clients c ON c.id=v.client_id "
            "LEFT JOIN service_types s ON s.id=v.service_type_id "
            "LEFT JOIN users u ON u.id=v.agent_id")
@@ -777,6 +778,16 @@ DEFAULT_SETTINGS = {
     "address_en": "Riyadh, Saudi Arabia", "address_ar": "الرياض، المملكة العربية السعودية",
     "phone": "+966 11 000 0000", "email": "billing@pestcare.com", "vat_no": "300000000000003",
     "currency": "EGP", "tax_rate": "14", "logo": "",
+    # Service-certificate template (editable in Settings, used on every certificate).
+    "cert_statement_en": "This is to certify that pest control services were carried out at the "
+                         "premises detailed below, in accordance with professional standards and applicable regulations.",
+    "cert_statement_ar": "نشهد بموجب هذه الوثيقة بأنه تم تنفيذ أعمال مكافحة الآفات في الموقع الموضح أدناه، "
+                         "وفقاً للمعايير المهنية واللوائح المعمول بها.",
+    "cert_footer_en": "This certificate is issued based on the service performed on the date stated above. "
+                      "Continued protection is subject to the recommended next service date.",
+    "cert_footer_ar": "تصدر هذه الشهادة بناءً على الخدمة المنفذة في التاريخ المذكور أعلاه. "
+                      "تستمر الحماية وفقاً لموعد الخدمة القادم الموصى به.",
+    "cert_license_no": "",
 }
 
 

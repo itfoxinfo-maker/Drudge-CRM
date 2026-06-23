@@ -135,6 +135,12 @@ const TRANSLATIONS = {
     imidacloprid_gm: "Imidacloprid (gm)", baits_count: "Baits (#)", glo_pieces: "Glo Pieces (#)",
     flybase_bags: "Flybase Bags", branch_issue: "Branch Issue",
     materials_consumed: "Materials Consumed",
+    // certificate settings + client certificates page
+    nav_certificates: "Certificates", my_certificates: "My Certificates",
+    certificates_hint: "Download a service certificate for any completed visit.",
+    download_certificate: "Download", report_pending: "Report pending",
+    cert_settings: "Service Certificate", cert_footer_label: "Footer Note",
+    cert_settings_hint: "Customize the wording printed on every service certificate (and add your license / accreditation number).",
   },
   ar: {
     app_name: "نظام إدارة مكافحة الآفات",
@@ -253,6 +259,12 @@ const TRANSLATIONS = {
     imidacloprid_gm: "إيميداكلوبريد (جم)", baits_count: "الطعوم (عدد)", glo_pieces: "قطع جلو (عدد)",
     flybase_bags: "أكياس فلاي بيس", branch_issue: "مشكلة الفرع",
     materials_consumed: "إجمالي المواد المستهلكة",
+    // certificate settings + client certificates page
+    nav_certificates: "الشهادات", my_certificates: "شهاداتي",
+    certificates_hint: "حمّل شهادة خدمة لأي زيارة منجزة.",
+    download_certificate: "تحميل", report_pending: "التقرير قيد الإعداد",
+    cert_settings: "شهادة الخدمة", cert_footer_label: "ملاحظة التذييل",
+    cert_settings_hint: "خصّص النص المطبوع على كل شهادة خدمة (وأضف رقم الترخيص / الاعتماد).",
   },
 };
 

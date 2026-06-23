@@ -70,7 +70,9 @@ The database (`data/crm.db`) is created and seeded with demo data on first launc
 - **Compliance / service certificates** — one-click printable **Pest Control Service Certificate**
   per completed visit (bilingual EN/AR, print-to-PDF from the browser). Pulls in service details,
   report findings, severity, chemicals applied and captured customer/technician signatures — the
-  document food-safety/HACCP audits ask for.
+  document food-safety/HACCP audits ask for. The certificate wording (statement, footer, license /
+  accreditation number) is **editable in Settings**, and every **client can browse and download**
+  their own certificates from a dedicated *Certificates* page in the portal.
 - **Pest-activity trends** — every device (bait station, trap, monitor…) status update is recorded
   as a monitoring event, and each client's analytics page gains a **trends** section: monthly
   inspections-vs-detections curve, detections by device type, and an **activity hotspots** table.

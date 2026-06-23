@@ -105,6 +105,7 @@ function navItems() {
     items.push({ k: "visits", i: "🗓️", t: "nav_visits" });
     items.push({ k: "contracts", i: "🔁", t: "nav_contracts" });
     items.push({ k: "invoices", i: "💳", t: "nav_invoices" });
+    items.push({ k: "certificates", i: "📄", t: "nav_certificates" });
     items.push({ k: "folder", i: "📁", t: "company_folder" });
   } else {
     items.push({ k: "clients", i: "🏢", t: "nav_clients" });
@@ -150,6 +151,7 @@ async function navigate(view, arg) {
     else if (view === "contracts") await viewContracts(v);
     else if (view === "analytics") await viewAnalytics(v);
     else if (view === "settings") await viewSettings(v);
+    else if (view === "certificates") await viewCertificates(v);
     else if (view === "search") await viewSearch(v, arg);
   } catch (e) {
     v.innerHTML = `<div class="empty">⚠️ ${esc(e.message)}</div>`;
@@ -939,6 +941,9 @@ function printCertificate(visit) {
   const rep = visit.report || {};
   const certNo = "CERT-" + String(visit.id).padStart(5, "0");
   const svcDate = visit.completed_at || visit.scheduled_start;
+  // Certificate wording is editable in Settings; fall back to the built-in text.
+  const statement = (ar ? S.cert_statement_ar : S.cert_statement_en) || t("cert_statement");
+  const footer = (ar ? S.cert_footer_ar : S.cert_footer_en) || t("cert_footer");
   const sevColors = { low: "#1f8a4c", medium: "#d97706", high: "#e0541b", critical: "#d23f3f" };
   const sev = rep.severity || "low";
   const sigImg = f => f ? `<img src="/uploads/${esc(f)}" style="max-height:70px;max-width:220px">` : "";
@@ -992,9 +997,10 @@ function printCertificate(visit) {
           </div></div>
         <div class="title"><h2>${esc(t("service_certificate"))}</h2>
           <div class="no">${esc(t("cert_no"))}: ${esc(certNo)}</div>
-          <div class="no">${esc(t("issued_on"))}: ${fmtDate(new Date().toISOString())}</div></div>
+          <div class="no">${esc(t("issued_on"))}: ${fmtDate(new Date().toISOString())}</div>
+          ${S.cert_license_no ? `<div class="no">${esc(t("cert_license_no"))}: ${esc(S.cert_license_no)}</div>` : ""}</div>
       </div>
-      <div class="statement">${esc(t("cert_statement"))}</div>
+      <div class="statement">${esc(statement)}</div>
       <div style="display:flex;gap:24px">
         <div style="flex:1"><h3 class="sec">${esc(t("premises"))}</h3>
           <table class="kvt">
@@ -1029,7 +1035,7 @@ function printCertificate(visit) {
         <div class="sig">${sigImg(rep.technician_signature)}<div class="ln">${esc(visit.agent_name || t("technician_signature"))}</div></div>
         <div class="sig"><div style="height:70px"></div><div class="ln">${esc(t("authorized_signature"))} — ${esc(compName)}</div></div>
       </div>
-      <div class="foot">${esc(t("cert_footer"))}</div>
+      <div class="foot">${esc(footer)}</div>
     </div>
     <script>window.onload=function(){setTimeout(function(){window.print()},400)}<\/script>
     </body></html>`;
@@ -1038,6 +1044,35 @@ function printCertificate(visit) {
   w.document.open();
   w.document.write(doc);
   w.document.close();
+}
+
+// ---- client-facing certificates list (download per completed visit) ----
+async function viewCertificates(v) {
+  const visits = await API.get("/visits?status=completed");
+  const rows = visits.map(vis => {
+    const ready = !!vis.has_report;
+    const cell = ready
+      ? `<button class="btn sm" data-cert="${vis.id}">📄 ${t("download_certificate")}</button>`
+      : `<span class="muted">${t("report_pending")}</span>`;
+    return `<tr>
+      <td>CERT-${String(vis.id).padStart(5, "0")}</td>
+      <td>${fmtDate(vis.completed_at || vis.scheduled_start)}</td>
+      <td>${esc(localized(vis, "service") || "—")}</td>
+      <td>${esc(vis.agent_name || "—")}</td>
+      <td>${cell}</td></tr>`;
+  }).join("") || `<tr><td colspan="5" class="empty">${t("none")}</td></tr>`;
+  v.innerHTML = `<div class="page-head"><h2>📄 ${t("my_certificates")}</h2></div>
+    <div class="panel"><p class="muted" style="margin:0 0 14px">${t("certificates_hint")}</p>
+      <table><thead><tr><th>${t("cert_no")}</th><th>${t("date_of_service")}</th>
+      <th>${t("service")}</th><th>${t("agent")}</th><th>${t("certificate")}</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>`;
+  v.querySelectorAll("[data-cert]").forEach(b => b.addEventListener("click", async () => {
+    const visit = await API.get("/visits/" + b.dataset.cert);
+    if (!visit.report || !(visit.report.summary || visit.report.findings || visit.report.pests_found)) {
+      alert(t("no_report_for_cert")); return;
+    }
+    printCertificate(visit);
+  }));
 }
 
 // ====================================================================
@@ -1371,6 +1406,15 @@ async function viewSettings(v) {
           <button class="btn secondary sm" type="submit">${t("upload_logo")}</button></form>
       </div>
     </div>
+    <div class="panel"><h3>📄 ${t("cert_settings")}</h3>
+      <p class="muted" style="margin:0 0 12px">${t("cert_settings_hint")}</p>
+      <form id="cert-form">
+        ${field(t("cert_license_no"), "cert_license_no", { value: s.cert_license_no })}
+        ${field(t("cert_statement") + " (EN)", "cert_statement_en", { value: s.cert_statement_en, textarea: true })}
+        ${field(t("cert_statement") + " (AR)", "cert_statement_ar", { value: s.cert_statement_ar, textarea: true })}
+        ${field(t("cert_footer_label") + " (EN)", "cert_footer_en", { value: s.cert_footer_en, textarea: true })}
+        ${field(t("cert_footer_label") + " (AR)", "cert_footer_ar", { value: s.cert_footer_ar, textarea: true })}
+        <div class="form-actions"><button class="btn" type="submit">${t("save_settings")}</button></div></form></div>
     <div class="panel"><h3>${t("smtp_note")}</h3>
       <form id="smtp-form"><div class="form-grid">
         ${field(t("smtp_host"), "smtp_host", { value: s.smtp_host })}
@@ -1381,6 +1425,9 @@ async function viewSettings(v) {
       </div><div class="form-actions"><button class="btn" type="submit">${t("save_settings")}</button></div></form></div>`;
   $("set-form").addEventListener("submit", async (e) => {
     e.preventDefault(); SETTINGS = await API.put("/settings", formData($("set-form"))); toast(t("settings_saved"));
+  });
+  $("cert-form").addEventListener("submit", async (e) => {
+    e.preventDefault(); SETTINGS = await API.put("/settings", formData($("cert-form"))); toast(t("settings_saved"));
   });
   $("smtp-form").addEventListener("submit", async (e) => {
     e.preventDefault(); SETTINGS = await API.put("/settings", formData($("smtp-form"))); toast(t("settings_saved"));
