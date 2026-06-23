@@ -467,7 +467,9 @@ async function viewVisit(v, arg) {
   v.innerHTML = `
     <div class="breadcrumb" id="bc">← ${t("nav_schedule")}</div>
     <div class="page-head"><h2>${t("visit_detail")} — ${esc(localized(visit, "client"))}</h2>
-      <div>${statusBadge(visit.status)}</div></div>
+      <div style="display:flex;gap:8px;align-items:center">
+        ${visit.status === "completed" ? `<button class="btn sm" id="print-cert">📄 ${t("print_certificate")}</button>` : ""}
+        ${statusBadge(visit.status)}</div></div>
     <div class="grid-2">
       <div class="panel"><h3>${t("nav_visits")}</h3><div class="kv">
         <div>${t("client")}</div><div>${esc(localized(visit, "client"))}</div>
@@ -501,6 +503,12 @@ async function viewVisit(v, arg) {
       <div id="photos" class="photo-grid"></div></div>`;
 
   $("bc").addEventListener("click", () => navigate(role() === "client" ? "visits" : "schedule"));
+  if ($("print-cert")) $("print-cert").addEventListener("click", () => {
+    if (!visit.report || !(visit.report.summary || visit.report.findings || visit.report.pests_found)) {
+      alert(t("no_report_for_cert")); return;
+    }
+    printCertificate(visit);
+  });
   v.querySelectorAll("[data-sign]").forEach(b => b.addEventListener("click", () => signatureDialog(id, b.dataset.sign)));
   if ($("v-status-btn")) $("v-status-btn").addEventListener("click", async () => {
     await API.put("/visits/" + id, { status: $("v-status").value }); toast(t("saved")); navigate("visit", { id });
@@ -892,6 +900,109 @@ function printInvoice(inv) {
     </body></html>`;
   const w = window.open("", "_blank");
   if (!w) { alert("Please allow pop-ups to print the invoice."); return; }
+  w.document.open();
+  w.document.write(doc);
+  w.document.close();
+}
+
+// ---- printable pest-control service / compliance certificate ----
+// Built from the already-loaded visit + report; opens a clean doc and prints.
+function printCertificate(visit) {
+  const ar = LANG === "ar";
+  const dir = ar ? "rtl" : "ltr";
+  const S = SETTINGS || {};
+  const compName = (ar ? S.company_name_ar : S.company_name_en) || S.company_name_en || "Company";
+  const compAddr = (ar ? S.address_ar : S.address_en) || S.address_en || "";
+  const logoHtml = S.logo ? `<img src="/uploads/${esc(S.logo)}" style="height:52px">` : `<div class="logo">🐜</div>`;
+  const rep = visit.report || {};
+  const certNo = "CERT-" + String(visit.id).padStart(5, "0");
+  const svcDate = visit.completed_at || visit.scheduled_start;
+  const sevColors = { low: "#1f8a4c", medium: "#d97706", high: "#e0541b", critical: "#d23f3f" };
+  const sev = rep.severity || "low";
+  const sigImg = f => f ? `<img src="/uploads/${esc(f)}" style="max-height:70px;max-width:220px">` : "";
+  const chemRows = (visit.chemicals || []).map(cu =>
+    `<tr><td>${esc(localized(cu, "name"))}</td><td class="num">${cu.quantity} ${esc(cu.unit || "")}</td>
+     <td>${esc(cu.area_treated || "—")}</td></tr>`).join("");
+  const row = (label, val) => val ? `<tr><td class="lbl">${esc(label)}</td><td>${esc(val)}</td></tr>` : "";
+  const doc = `<!DOCTYPE html><html lang="${LANG}" dir="${dir}"><head><meta charset="utf-8">
+    <title>${esc(certNo)}</title>
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+      *{box-sizing:border-box}
+      body{font-family:${ar ? "'Cairo'" : "'Inter'"},system-ui,sans-serif;color:#1c2733;margin:0;padding:40px;font-size:13px}
+      .cert{max-width:780px;margin:auto;border:2px solid #1f8a4c;border-radius:10px;padding:30px 34px;position:relative}
+      .cert:before{content:"";position:absolute;inset:6px;border:1px solid #cfe6d8;border-radius:7px;pointer-events:none}
+      .top{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #1f8a4c;padding-bottom:16px}
+      .logo{font-size:36px}
+      .co h1{margin:0 0 4px;font-size:18px;color:#156c3a}
+      .co .muted{color:#6b7a87;line-height:1.6;font-size:12px}
+      .title{text-align:${ar ? "left" : "right"}}
+      .title h2{margin:0;font-size:21px;color:#1f8a4c;line-height:1.25}
+      .title .no{font-size:13px;font-weight:600;margin-top:6px;color:#6b7a87}
+      .statement{margin:20px 0;padding:14px 16px;background:#f0f7f2;border-radius:8px;line-height:1.7;color:#2b3a45}
+      h3.sec{margin:20px 0 6px;font-size:11px;color:#156c3a;text-transform:uppercase;letter-spacing:.07em}
+      table{width:100%;border-collapse:collapse}
+      .kvt td{padding:6px 4px;vertical-align:top;line-height:1.6}
+      .kvt td.lbl{color:#6b7a87;width:34%;white-space:nowrap}
+      .data th,.data td{padding:9px 10px;text-align:${ar ? "right" : "left"};border-bottom:1px solid #e3e8ec}
+      .data th{background:#f0f7f2;color:#156c3a;font-size:11px;text-transform:uppercase}
+      .num{text-align:${ar ? "left" : "right"};white-space:nowrap}
+      .sev{display:inline-block;padding:3px 12px;border-radius:20px;font-weight:700;font-size:12px;color:#fff;background:${sevColors[sev]}}
+      .sigs{display:flex;justify-content:space-between;gap:24px;margin-top:30px}
+      .sig{flex:1;text-align:center}
+      .sig .ln{border-top:1px solid #1c2733;margin-top:6px;padding-top:6px;color:#6b7a87;font-size:12px}
+      .foot{margin-top:24px;padding-top:12px;border-top:1px solid #e3e8ec;color:#6b7a87;text-align:center;font-size:11px;line-height:1.6}
+      @media print{body{padding:0}.noprint{display:none}*{-webkit-print-color-adjust:exact !important;print-color-adjust:exact !important}}
+      .noprint{text-align:center;margin-bottom:20px}
+      .pbtn{background:#1f8a4c;color:#fff;border:none;padding:10px 22px;border-radius:8px;font-size:14px;cursor:pointer}
+    </style></head><body>
+    <div class="noprint"><button class="pbtn" onclick="window.print()">🖨️ ${esc(t("print_pdf"))}</button></div>
+    <div class="cert">
+      <div class="top">
+        <div style="display:flex;gap:12px">${logoHtml}
+          <div class="co"><h1>${esc(compName)}</h1>
+            <div class="muted">${esc(compAddr)}<br>${esc(S.phone || "")} · ${esc(S.email || "")}<br>${esc(t("vat_no"))}: ${esc(S.vat_no || "")}</div>
+          </div></div>
+        <div class="title"><h2>${esc(t("service_certificate"))}</h2>
+          <div class="no">${esc(t("cert_no"))}: ${esc(certNo)}</div>
+          <div class="no">${esc(t("issued_on"))}: ${fmtDate(new Date().toISOString())}</div></div>
+      </div>
+      <div class="statement">${esc(t("cert_statement"))}</div>
+      <div style="display:flex;gap:24px">
+        <div style="flex:1"><h3 class="sec">${esc(t("premises"))}</h3>
+          <table class="kvt">
+            ${row(t("client"), localized(visit, "client"))}
+            ${row(t("location"), visit.location || visit.site_name)}
+          </table></div>
+        <div style="flex:1"><h3 class="sec">${esc(t("nav_visits"))}</h3>
+          <table class="kvt">
+            ${row(t("service"), localized(visit, "service"))}
+            ${row(t("date_of_service"), fmtDateTime(svcDate))}
+            ${row(t("agent"), visit.agent_name)}
+          </table></div>
+      </div>
+      <h3 class="sec">${esc(t("report"))}</h3>
+      <table class="kvt">
+        ${row(t("pests_found"), rep.pests_found)}
+        ${row(t("findings"), rep.findings)}
+        ${row(t("recommendations"), rep.recommendations)}
+        <tr><td class="lbl">${esc(t("severity"))}</td><td><span class="sev">${esc(t("sev_" + sev))}</span></td></tr>
+        ${row(t("next_visit_due"), rep.next_visit_due ? fmtDate(rep.next_visit_due) : "")}
+      </table>
+      ${chemRows ? `<h3 class="sec">${esc(t("chemicals_applied"))}</h3>
+        <table class="data"><thead><tr><th>${esc(t("name_en"))}</th><th class="num">${esc(t("quantity"))}</th>
+        <th>${esc(t("area_treated"))}</th></tr></thead><tbody>${chemRows}</tbody></table>` : ""}
+      <div class="sigs">
+        <div class="sig">${sigImg(rep.customer_signature)}<div class="ln">${esc(rep.customer_name || t("customer_signature"))}</div></div>
+        <div class="sig">${sigImg(rep.technician_signature)}<div class="ln">${esc(visit.agent_name || t("technician_signature"))}</div></div>
+        <div class="sig"><div style="height:70px"></div><div class="ln">${esc(t("authorized_signature"))} — ${esc(compName)}</div></div>
+      </div>
+      <div class="foot">${esc(t("cert_footer"))}</div>
+    </div>
+    <script>window.onload=function(){setTimeout(function(){window.print()},400)}<\/script>
+    </body></html>`;
+  const w = window.open("", "_blank");
+  if (!w) { alert("Please allow pop-ups to print the certificate."); return; }
   w.document.open();
   w.document.write(doc);
   w.document.close();
@@ -1395,13 +1506,52 @@ function cols3d(items) {
   return `<div class="cols3d">${cols}</div>`;
 }
 
+// Pest-activity trend section (device monitoring) — returns "" when the
+// client has no devices, so it only appears where it's meaningful.
+function pestTrendsBlock(tr) {
+  if (!tr || !tr.totals || !tr.totals.devices) return "";
+  const T = tr.totals;
+  const labels = tr.months.map(m => monthShort(m.m));
+  const statusColors = { ok: "#16a34a", needs_service: "#d97706", activity: "#dc2626", missing: "#64748b" };
+  const sc = (val, label, icon, cls) => `<div class="stat-card ${cls}"><div class="sc-ic">${icon}</div><div><div class="v">${val}</div><div class="l">${label}</div></div></div>`;
+  const typeItems = tr.by_type.map((r, i) => ({
+    label: r.type ? t("type_" + r.type) : t("none"), value: r.detections,
+    color: PALETTE[(i + 1) % PALETTE.length] }));
+  const trend = curveChart(labels, [
+    { name: t("inspections"), color: "#2563eb", values: tr.months.map(m => m.inspections) },
+    { name: t("detections"), color: "#dc2626", values: tr.months.map(m => m.detections) }]);
+  const hotRows = (tr.hotspots || []).map(h => `<tr>
+      <td>${esc(h.label || "#" + h.id)}</td>
+      <td>${esc(h.type ? t("type_" + h.type) : "—")}</td>
+      <td>${esc(h.map_name || "—")}</td>
+      <td class="num"><strong>${h.detections}</strong></td>
+      <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:11px;font-weight:700;color:#fff;background:${statusColors[h.status] || "#64748b"}">${esc(t("mst_" + h.status))}</span></td>
+    </tr>`).join("") || `<tr><td colspan="5" class="empty">${t("no_trend_data")}</td></tr>`;
+  return `
+    <div class="cards">
+      ${sc(T.devices, t("total_devices"), "📍", "c-blue")}
+      ${sc(T.inspections, t("monitoring_events"), "🔎", "c-teal")}
+      ${sc(T.detections, t("activity_detections"), "🐭", "danger")}
+      ${sc(T.active_now, t("mst_activity"), "⚠️", "c-amber")}</div>
+    <div class="panel"><h3>📈 ${t("pest_trends")}</h3>${trend}</div>
+    <div class="grid-2">
+      <div class="panel"><h3>🐛 ${t("by_device_type")}</h3>${cols3d(typeItems)}</div>
+      <div class="panel"><h3>🔥 ${t("device_hotspots")}</h3>
+        <table><thead><tr><th>${t("marker_label")}</th><th>${t("marker_type")}</th><th>${t("map_name")}</th>
+        <th class="num">${t("detections")}</th><th>${t("marker_status")}</th></tr></thead>
+        <tbody>${hotRows}</tbody></table></div>
+    </div>`;
+}
+
 // ====================================================================
 // Per-company analytics
 // ====================================================================
 async function viewClientAnalytics(v, arg) {
   const id = (arg && arg.id) || (role() === "client" ? API.user.client_id : null);
   if (!id) { v.innerHTML = `<div class="empty">${t("none")}</div>`; return; }
-  const [c, a] = await Promise.all([API.get("/clients/" + id), API.get(`/clients/${id}/analytics`)]);
+  const [c, a, tr] = await Promise.all([API.get("/clients/" + id),
+    API.get(`/clients/${id}/analytics`),
+    API.get(`/clients/${id}/pest-trends`).catch(() => null)]);
   const T = a.totals;
   const labels = a.months.map(m => monthShort(m.m));
   const statusColors = { scheduled: "#2563eb", in_progress: "#d97706", completed: "#16a34a", cancelled: "#dc2626" };
@@ -1426,6 +1576,7 @@ async function viewClientAnalytics(v, arg) {
     visits: curveChart(labels, [{ name: t("nav_visits"), color: "#7c3aed", values: a.months.map(m => m.visits) }]),
     status: pie3d(statusSeg), severity: pie3d(sevSeg),
     services: cols3d(svcItems), chemicals: cols3d(chemItems),
+    pestTrends: pestTrendsBlock(tr),
   };
   v.innerHTML = `
     <div class="breadcrumb" id="bc">← 📁 ${esc(localized(c, "name"))}</div>
@@ -1439,7 +1590,8 @@ async function viewClientAnalytics(v, arg) {
       <div class="panel"><h3>🧭 ${t("severity_distribution")}</h3>${parts.severity}</div>
       <div class="panel"><h3>🧰 ${t("service_mix")}</h3>${parts.services}</div>
     </div>
-    <div class="panel"><h3>🧪 ${t("chemical_usage")}</h3>${parts.chemicals}</div>`;
+    <div class="panel"><h3>🧪 ${t("chemical_usage")}</h3>${parts.chemicals}</div>
+    ${parts.pestTrends ? `<div class="section-title" style="margin-top:8px"><h2>🐭 ${t("pest_trends")}</h2></div>${parts.pestTrends}` : ""}`;
   $("bc").addEventListener("click", () => navigate(role() === "client" ? "folder" : "client", { id }));
   $("export-analytics").addEventListener("click", () => printAnalytics(c, parts));
 }
@@ -1502,7 +1654,8 @@ function printAnalytics(c, parts) {
       <div class="panel"><h3>🧭 ${esc(t("severity_distribution"))}</h3>${parts.severity}</div>
       <div class="panel"><h3>🧰 ${esc(t("service_mix"))}</h3>${parts.services}</div>
     </div>
-    <div class="panel"><h3>🧪 ${esc(t("chemical_usage"))}</h3>${parts.chemicals}</div>`;
+    <div class="panel"><h3>🧪 ${esc(t("chemical_usage"))}</h3>${parts.chemicals}</div>
+    ${parts.pestTrends ? `<h2 style="margin:18px 0 6px">🐭 ${esc(t("pest_trends"))}</h2>${parts.pestTrends}` : ""}`;
   analyticsReportDoc(t("analytics_report"), localized(c, "name"), body);
 }
 

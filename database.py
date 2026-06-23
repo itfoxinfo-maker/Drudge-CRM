@@ -247,8 +247,24 @@ CREATE TABLE IF NOT EXISTS map_markers (
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Status history for map markers — powers pest-activity trend analytics.
+-- One row per recorded inspection / status change of a device.
+CREATE TABLE IF NOT EXISTS marker_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    marker_id   INTEGER NOT NULL REFERENCES map_markers(id) ON DELETE CASCADE,
+    map_id      INTEGER NOT NULL REFERENCES maps(id) ON DELETE CASCADE,
+    client_id   INTEGER REFERENCES clients(id) ON DELETE CASCADE,
+    type        TEXT,                       -- device type at time of record
+    status      TEXT NOT NULL,              -- ok / needs_service / activity / missing
+    note        TEXT,
+    recorded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_maps_client ON maps(client_id);
 CREATE INDEX IF NOT EXISTS idx_markers_map ON map_markers(map_id);
+CREATE INDEX IF NOT EXISTS idx_marker_events_client ON marker_events(client_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_marker_events_marker ON marker_events(marker_id);
 CREATE INDEX IF NOT EXISTS idx_visits_agent ON visits(agent_id);
 CREATE INDEX IF NOT EXISTS idx_visits_client ON visits(client_id);
 CREATE INDEX IF NOT EXISTS idx_photos_entity ON photos(entity_type, entity_id);
@@ -303,11 +319,47 @@ def get_conn():
     return conn
 
 
+def _backfill_marker_events(conn):
+    """Seed demo monitoring history once, so pest-trend charts are meaningful
+    on existing databases. Only runs when there are markers but no events yet.
+    Real events are recorded going forward whenever a device status is set."""
+    has_events = conn.execute("SELECT 1 FROM marker_events LIMIT 1").fetchone()
+    markers = conn.execute(
+        "SELECT k.id, k.map_id, k.type, k.status, m.client_id "
+        "FROM map_markers k JOIN maps m ON m.id=k.map_id").fetchall()
+    if has_events or not markers:
+        return
+    import random
+    random.seed(42)
+    for mk in markers:
+        # 6 monthly inspections; devices currently showing activity get
+        # occasional historical detections so a trend emerges.
+        prone = mk["status"] in ("activity", "needs_service")
+        for months_ago in range(6, 0, -1):
+            if prone and random.random() < 0.45:
+                st = "activity"
+            elif random.random() < 0.12:
+                st = "needs_service"
+            else:
+                st = "ok"
+            conn.execute(
+                "INSERT INTO marker_events(marker_id,map_id,client_id,type,status,note,recorded_at) "
+                "VALUES(?,?,?,?,?,?,datetime('now',?))",
+                (mk["id"], mk["map_id"], mk["client_id"], mk["type"], st,
+                 "Routine inspection", f"-{months_ago} months"))
+        # a current-state event reflecting the device's present status
+        conn.execute(
+            "INSERT INTO marker_events(marker_id,map_id,client_id,type,status,note) "
+            "VALUES(?,?,?,?,?,?)",
+            (mk["id"], mk["map_id"], mk["client_id"], mk["type"], mk["status"], "Latest inspection"))
+
+
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = get_conn()
     conn.executescript(SCHEMA)
     _migrate(conn)
+    _backfill_marker_events(conn)
     conn.commit()
     conn.close()
 

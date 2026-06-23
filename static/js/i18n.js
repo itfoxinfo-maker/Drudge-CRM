@@ -113,6 +113,21 @@ const TRANSLATIONS = {
     type_bait_station: "Bait Station", type_rodent_trap: "Rodent Trap", type_insect_light: "Insect Light Trap",
     type_monitor: "Monitoring Point", type_treatment: "Treatment Area", type_other: "Other",
     mst_ok: "OK / Active", mst_needs_service: "Needs Service", mst_activity: "Pest Activity", mst_missing: "Missing",
+    // compliance / service certificate
+    certificate: "Certificate", print_certificate: "Service Certificate",
+    service_certificate: "Pest Control Service Certificate",
+    cert_no: "Certificate No.", date_of_service: "Date of Service", premises: "Premises",
+    service_provider: "Service Provider", chemicals_applied: "Products / Chemicals Applied",
+    active_ingredient: "Active Ingredient", cert_reg_no: "Reg. No.",
+    cert_statement: "This is to certify that pest control services were carried out at the premises detailed below, in accordance with professional standards and applicable regulations.",
+    cert_footer: "This certificate is issued based on the service performed on the date stated above. Continued protection is subject to the recommended next service date.",
+    authorized_signature: "Authorized Signature", no_report_for_cert: "Complete and save the visit report before issuing a certificate.",
+    issued_on: "Issued on",
+    // pest activity trends
+    pest_trends: "Pest Activity Trends", monitoring_events: "Monitoring Records",
+    activity_detections: "Activity Detections", device_hotspots: "Activity Hotspots",
+    detections: "Detections", no_trend_data: "No monitoring data yet.",
+    by_device_type: "By Device Type", last_inspection: "Last Inspection", inspections: "Inspections",
   },
   ar: {
     app_name: "نظام إدارة مكافحة الآفات",
@@ -209,6 +224,21 @@ const TRANSLATIONS = {
     type_bait_station: "محطة طُعم", type_rodent_trap: "مصيدة قوارض", type_insect_light: "مصيدة ضوئية للحشرات",
     type_monitor: "نقطة مراقبة", type_treatment: "منطقة معالجة", type_other: "أخرى",
     mst_ok: "سليم / نشط", mst_needs_service: "يحتاج صيانة", mst_activity: "نشاط آفات", mst_missing: "مفقود",
+    // compliance / service certificate
+    certificate: "شهادة", print_certificate: "شهادة خدمة",
+    service_certificate: "شهادة خدمة مكافحة الآفات",
+    cert_no: "رقم الشهادة", date_of_service: "تاريخ الخدمة", premises: "الموقع",
+    service_provider: "مزود الخدمة", chemicals_applied: "المنتجات / المبيدات المستخدمة",
+    active_ingredient: "المادة الفعالة", cert_reg_no: "رقم التسجيل",
+    cert_statement: "نشهد بموجب هذه الوثيقة بأنه تم تنفيذ أعمال مكافحة الآفات في الموقع الموضح أدناه، وفقاً للمعايير المهنية واللوائح المعمول بها.",
+    cert_footer: "تصدر هذه الشهادة بناءً على الخدمة المنفذة في التاريخ المذكور أعلاه. تستمر الحماية وفقاً لموعد الخدمة القادم الموصى به.",
+    authorized_signature: "التوقيع المعتمد", no_report_for_cert: "أكمل تقرير الزيارة واحفظه قبل إصدار الشهادة.",
+    issued_on: "صدرت في",
+    // pest activity trends
+    pest_trends: "اتجاهات نشاط الآفات", monitoring_events: "سجلات المراقبة",
+    activity_detections: "حالات رصد النشاط", device_hotspots: "بؤر النشاط",
+    detections: "حالات الرصد", no_trend_data: "لا توجد بيانات مراقبة بعد.",
+    by_device_type: "حسب نوع الجهاز", last_inspection: "آخر فحص", inspections: "عمليات الفحص",
   },
 };
 

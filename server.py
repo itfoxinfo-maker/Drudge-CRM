@@ -1105,6 +1105,53 @@ def client_analytics(ctx):
             "severity": severity, "chemicals": chemicals, "totals": totals}
 
 
+@route("GET", r"/api/clients/(\d+)/pest-trends")
+def client_pest_trends(ctx):
+    """Device-monitoring trends for one client: monthly pest-activity
+    detections, breakdown by device type, and activity hotspots. Used for
+    audit/compliance reporting (e.g. HACCP)."""
+    cid = int(ctx.params[0])
+    _assert_client_access(ctx.user, cid)
+    if ctx.user["role"] == "agent":
+        raise ApiError(403, "No permission")
+    labels = _month_labels(12)
+    insp_by = {r["m"]: r["v"] for r in db.query(
+        "SELECT strftime('%Y-%m',recorded_at) m, COUNT(*) v FROM marker_events "
+        "WHERE client_id=? GROUP BY m", (cid,))}
+    act_by = {r["m"]: r["v"] for r in db.query(
+        "SELECT strftime('%Y-%m',recorded_at) m, COUNT(*) v FROM marker_events "
+        "WHERE client_id=? AND status='activity' GROUP BY m", (cid,))}
+    months = [{"m": k, "inspections": insp_by.get(k, 0) or 0,
+               "detections": act_by.get(k, 0) or 0} for k in labels]
+    by_type = db.query(
+        "SELECT type, COUNT(*) detections FROM marker_events "
+        "WHERE client_id=? AND status='activity' GROUP BY type ORDER BY detections DESC", (cid,))
+    hotspots = db.query(
+        "SELECT k.id, k.label, k.type, k.status, mp.name map_name, "
+        "COUNT(e.id) detections, MAX(e.recorded_at) last_seen "
+        "FROM marker_events e JOIN map_markers k ON k.id=e.marker_id "
+        "JOIN maps mp ON mp.id=e.map_id "
+        "WHERE e.client_id=? AND e.status='activity' "
+        "GROUP BY e.marker_id ORDER BY detections DESC, last_seen DESC LIMIT 8", (cid,))
+    totals = {
+        "inspections": db.query(
+            "SELECT COUNT(*) c FROM marker_events WHERE client_id=?", (cid,), one=True)["c"],
+        "detections": db.query(
+            "SELECT COUNT(*) c FROM marker_events WHERE client_id=? AND status='activity'",
+            (cid,), one=True)["c"],
+        "devices": db.query(
+            "SELECT COUNT(DISTINCT k.id) c FROM map_markers k JOIN maps m ON m.id=k.map_id "
+            "WHERE m.client_id=?", (cid,), one=True)["c"],
+        "active_now": db.query(
+            "SELECT COUNT(*) c FROM map_markers k JOIN maps m ON m.id=k.map_id "
+            "WHERE m.client_id=? AND k.status='activity'", (cid,), one=True)["c"],
+    }
+    last = db.query(
+        "SELECT MAX(recorded_at) v FROM marker_events WHERE client_id=?", (cid,), one=True)
+    return {"months": months, "by_type": by_type, "hotspots": hotspots,
+            "totals": totals, "last_inspection": last["v"] if last else None}
+
+
 # --------------------------------------------------------------------------
 # E-SIGNATURE (capture on report)
 # --------------------------------------------------------------------------
@@ -1277,6 +1324,17 @@ def delete_map(ctx):
     return {"ok": True}
 
 
+def _log_marker_event(marker_id, map_id, status, note, user_id):
+    """Append a monitoring record for a device (feeds pest-trend analytics)."""
+    client_id = db.query("SELECT client_id FROM maps WHERE id=?", (map_id,), one=True)
+    mk = db.query("SELECT type FROM map_markers WHERE id=?", (marker_id,), one=True)
+    db.execute(
+        "INSERT INTO marker_events(marker_id,map_id,client_id,type,status,note,recorded_by) "
+        "VALUES(?,?,?,?,?,?,?)",
+        (marker_id, map_id, client_id["client_id"] if client_id else None,
+         mk["type"] if mk else None, status, note, user_id))
+
+
 @route("POST", r"/api/maps/(\d+)/markers")
 def add_marker(ctx):
     require(ctx.user, "admin", "manager", "agent")
@@ -1284,10 +1342,12 @@ def add_marker(ctx):
     if not db.query("SELECT id FROM maps WHERE id=?", (mid,), one=True):
         raise ApiError(404, "Map not found")
     b = ctx.body
+    status = b.get("status", "ok")
     nid = db.execute(
         "INSERT INTO map_markers(map_id,type,label,x,y,status,notes) VALUES(?,?,?,?,?,?,?)",
         (mid, b.get("type", "other"), b.get("label"), float(b.get("x", 0)),
-         float(b.get("y", 0)), b.get("status", "ok"), b.get("notes")))
+         float(b.get("y", 0)), status, b.get("notes")))
+    _log_marker_event(nid, mid, status, b.get("notes") or "Device installed", ctx.user["id"])
     return db.query("SELECT * FROM map_markers WHERE id=?", (nid,), one=True)
 
 
@@ -1296,6 +1356,9 @@ def update_marker(ctx):
     require(ctx.user, "admin", "manager", "agent")
     nid = int(ctx.params[0])
     b = ctx.body
+    existing = db.query("SELECT * FROM map_markers WHERE id=?", (nid,), one=True)
+    if not existing:
+        raise ApiError(404, "Marker not found")
     cols = ("type", "label", "x", "y", "status", "notes")
     fields = [f"{c}=?" for c in cols if c in b]
     vals = [b[c] for c in cols if c in b]
@@ -1303,6 +1366,11 @@ def update_marker(ctx):
         raise ApiError(400, "Nothing to update")
     vals.append(nid)
     db.execute(f"UPDATE map_markers SET {','.join(fields)} WHERE id=?", vals)
+    # Record an inspection event when status is (re)set — even if unchanged,
+    # an agent re-confirming a device is a valid monitoring record.
+    if "status" in b:
+        _log_marker_event(nid, existing["map_id"], b["status"],
+                          b.get("notes", existing.get("notes")), ctx.user["id"])
     return db.query("SELECT * FROM map_markers WHERE id=?", (nid,), one=True)
 
 

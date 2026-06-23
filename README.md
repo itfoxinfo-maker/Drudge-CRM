@@ -61,6 +61,14 @@ The database (`data/crm.db`) is created and seeded with demo data on first launc
   treatment areas). Each marker has a label, status (OK / needs service / pest activity / missing)
   and notes. Agents open the map in the field, see all devices, and update them; clients view
   their own maps read-only.
+- **Compliance / service certificates** — one-click printable **Pest Control Service Certificate**
+  per completed visit (bilingual EN/AR, print-to-PDF from the browser). Pulls in service details,
+  report findings, severity, chemicals applied and captured customer/technician signatures — the
+  document food-safety/HACCP audits ask for.
+- **Pest-activity trends** — every device (bait station, trap, monitor…) status update is recorded
+  as a monitoring event, and each client's analytics page gains a **trends** section: monthly
+  inspections-vs-detections curve, detections by device type, and an **activity hotspots** table.
+  Included in the analytics PDF export.
 - **Deployment & data** — Dockerfile (zero-dependency image), CSV export of clients/visits/
   invoices/chemicals/payments, and a 27-check automated test suite.
 
