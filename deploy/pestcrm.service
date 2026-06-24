@@ -1,0 +1,15 @@
+[Unit]
+Description=PestCare CRM (API + SPA) on port 8000
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/pest-crm
+Environment=PESTCRM_DATA_DIR=/root/pest-crm/data
+ExecStart=/usr/bin/python3 /root/pest-crm/server.py 8000
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
