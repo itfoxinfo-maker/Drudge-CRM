@@ -126,6 +126,28 @@ async function showApp() {
   initNotifications();
   initOfflineUI();
   navigate("dashboard");
+  promptDraftReports();
+}
+
+// On login, if the user has unfinished (draft) reports, pop up a reminder to
+// complete & save them. Drafts are auto-saved server-side, so this fires when an
+// agent logged out mid-report.
+async function promptDraftReports() {
+  if (role() === "client") return;
+  try {
+    const d = await API.get("/reports/drafts");
+    const items = (d && d.items) || [];
+    if (!items.length) return;
+    const rows = items.map(r => `<div class="notif" data-visit="${r.visit_id}" style="cursor:pointer">
+        <div class="nt">${esc(localized(r, "name"))}</div>
+        <div class="nb muted small">${r.scheduled_start ? fmtDateTime(r.scheduled_start) : ""}${role() !== "agent" && r.agent_name ? " · " + esc(r.agent_name) : ""}</div>
+      </div>`).join("");
+    openModal(`⚠ ${t("drafts_pending_title")}`, `<p class="muted">${t("drafts_pending_body")}</p>${rows}`, (body) => {
+      body.querySelectorAll("[data-visit]").forEach(el => el.addEventListener("click", () => {
+        closeModal(); navigate("visit", { id: el.dataset.visit });
+      }));
+    });
+  } catch (e) { /* non-blocking */ }
 }
 
 // ---- offline status pill + pending-sync badge ----
@@ -293,6 +315,12 @@ function statusKey(s) {
     cancelled: "st_cancelled", draft: "inv_draft", sent: "inv_sent", paid: "inv_paid",
     overdue: "inv_overdue", accepted: "accepted", active: "active", inactive: "status" };
   return map[s] || s;
+}
+
+// Human label for a required report field returned in a report_incomplete error.
+function reportFieldLabel(key) {
+  const map = { customer_signature: "customer_sig", technician_signature: "technician_sig" };
+  return t(map[key] || key);
 }
 
 // ====================================================================
@@ -621,7 +649,8 @@ async function viewVisit(v, arg) {
         <select id="v-status">${["scheduled", "in_progress", "completed", "cancelled"].map(s => `<option value="${s}" ${visit.status === s ? "selected" : ""}>${t(statusKey(s))}</option>`).join("")}</select>
         <button class="btn sm" id="v-status-btn">${t("change_status")}</button></div>` : ""}
       </div>
-      <div class="panel"><div class="section-title"><h3>${t("report")}</h3></div>
+      <div class="panel"><div class="section-title"><h3>${t("report")}</h3>
+        ${role() !== "client" && rep.id ? `<span class="badge b-${rep.status === "complete" ? "completed" : "draft"}">${t(rep.status === "complete" ? "report_complete" : "report_draft")}</span>` : ""}</div>
         ${role() === "client" ? clientReportView(rep) : reportForm(rep, id, canEdit)}
       </div>
     </div>
@@ -642,7 +671,7 @@ async function viewVisit(v, arg) {
 
   $("bc").addEventListener("click", () => navigate(role() === "client" ? "visits" : "schedule"));
   if ($("print-cert")) $("print-cert").addEventListener("click", () => {
-    if (!visit.report || !(visit.report.summary || visit.report.findings || visit.report.pests_found)) {
+    if (!visit.report || visit.report.status !== "complete") {
       alert(t("no_report_for_cert")); return;
     }
     printCertificate(visit);
@@ -651,10 +680,47 @@ async function viewVisit(v, arg) {
   if ($("v-status-btn")) $("v-status-btn").addEventListener("click", async () => {
     const saved = await API.put("/visits/" + id, { status: $("v-status").value }); if (handledOffline(saved)) return; toast(t("saved")); navigate("visit", { id });
   });
-  if ($("report-form")) $("report-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const saved = await API.post(`/visits/${id}/report`, formData($("report-form"))); if (handledOffline(saved)) return; toast(t("saved"));
-  });
+  if ($("report-form")) {
+    const form = $("report-form");
+    const hint = $("report-draft-hint");
+    // Auto-save as a draft while the agent types so an unfinished report is never
+    // lost if they log out / close the app before completing it.
+    let draftTimer = null, draftBusy = false;
+    async function saveDraft() {
+      if (draftBusy) return;
+      draftBusy = true;
+      try {
+        const r = await API.post(`/visits/${id}/report`, { ...formData(form), status: "draft" });
+        if (handledOffline(r)) return;
+        if (hint) hint.textContent = "✓ " + t("draft_saved");
+      } catch (e) { /* keep typing; will retry on next change */ }
+      finally { draftBusy = false; }
+    }
+    form.addEventListener("input", () => {
+      if (hint) hint.textContent = "…";
+      clearTimeout(draftTimer);
+      draftTimer = setTimeout(saveDraft, 1200);
+    });
+    // Submit = finalise. Requires the core fields + both signatures (server-checked).
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      clearTimeout(draftTimer);
+      try {
+        const saved = await API.post(`/visits/${id}/report`, { ...formData(form), status: "complete" });
+        if (handledOffline(saved)) return;
+        toast(t("report_completed"));
+        navigate("visit", { id });
+      } catch (err) {
+        const msg = String(err && err.message || "");
+        if (msg.startsWith("report_incomplete:")) {
+          const keys = msg.slice("report_incomplete:".length).split(",").filter(Boolean);
+          alert(t("report_incomplete_msg") + "\n\n• " + keys.map(reportFieldLabel).join("\n• "));
+        } else {
+          alert(msg || t("error"));
+        }
+      }
+    });
+  }
   if ($("add-chem")) $("add-chem").addEventListener("click", () => usageForm(id));
   v.querySelectorAll("[data-rmuse]").forEach(b => b.addEventListener("click", async () => {
     const r = await API.del("/usage/" + b.dataset.rmuse); if (handledOffline(r, b.closest("tr"))) return; navigate("visit", { id });
@@ -692,7 +758,9 @@ function reportForm(rep, visitId, canEdit) {
       ${field(t("flybase_bags"), "flybase_bags", { type: "number", value: rep.flybase_bags || "" })}
     </div>
     ${field(t("branch_issue"), "branch_issue", { value: rep.branch_issue, textarea: true })}
-    ${canEdit ? `<div class="form-actions"><button class="btn" type="submit">${t("save_report")}</button></div>` : ""}
+    ${canEdit ? `<div class="form-actions" style="justify-content:space-between;align-items:center">
+        <span id="report-draft-hint" class="muted small"></span>
+        <button class="btn" type="submit">✔ ${t("complete_save_report")}</button></div>` : ""}
     </form>${!canEdit ? "<script>document.querySelectorAll('#report-form [name]').forEach(e=>e.disabled=true)</script>" : ""}
     ${rep.id ? `<div class="section-title" style="margin:18px 0 8px"><h3>📎 ${t("attachments")}</h3>
       ${canEdit ? `<button type="button" class="btn sm" id="add-report-file">📎 ${t("add_attachment")}</button>` : ""}</div>
@@ -1346,7 +1414,7 @@ async function viewCertificates(v) {
       <tbody>${rows}</tbody></table></div>`;
   v.querySelectorAll("[data-cert]").forEach(b => b.addEventListener("click", async () => {
     const visit = await API.get("/visits/" + b.dataset.cert);
-    if (!visit.report || !(visit.report.summary || visit.report.findings || visit.report.pests_found)) {
+    if (!visit.report || visit.report.status !== "complete") {
       alert(t("no_report_for_cert")); return;
     }
     printCertificate(visit);

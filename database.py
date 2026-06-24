@@ -110,6 +110,10 @@ CREATE TABLE IF NOT EXISTS reports (
     glo_pieces           REAL NOT NULL DEFAULT 0,
     flybase_bags         REAL NOT NULL DEFAULT 0,
     branch_issue         TEXT,
+    -- 'draft' while the agent is still filling it in (auto-saved); 'complete'
+    -- once the core fields + both signatures are captured.
+    status          TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','complete')),
+    completed_at    TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -364,6 +368,17 @@ def _migrate(conn):
                    ("branch_issue", "TEXT")):
         if c not in cols("reports"):
             conn.execute(f"ALTER TABLE reports ADD COLUMN {c} {ddl}")
+    # report draft/complete workflow: agents auto-save drafts; a report is only
+    # "complete" once the core fields + both signatures are present.
+    if "status" not in cols("reports"):
+        conn.execute("ALTER TABLE reports ADD COLUMN status TEXT NOT NULL DEFAULT 'draft'")
+        # Legacy rows predate the workflow — treat them as complete so we don't
+        # nag agents to re-finish historical reports.
+        conn.execute("UPDATE reports SET status='complete'")
+    if "completed_at" not in cols("reports"):
+        conn.execute("ALTER TABLE reports ADD COLUMN completed_at TEXT")
+        conn.execute("UPDATE reports SET completed_at=created_at "
+                     "WHERE completed_at IS NULL AND status='complete'")
     # invoice columns
     for c, ddl in (("contract_id", "INTEGER"), ("doc_type", "TEXT DEFAULT 'invoice'"),
                    ("valid_until", "TEXT")):

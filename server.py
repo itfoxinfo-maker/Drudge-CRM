@@ -729,7 +729,7 @@ def list_visits(ctx):
         params.append(ctx.query["to"])
     sql = ("SELECT v.*, c.name_en client_en, c.name_ar client_ar, "
            "s.name_en service_en, s.name_ar service_ar, u.full_name agent_name, "
-           "EXISTS(SELECT 1 FROM reports r WHERE r.visit_id=v.id) has_report "
+           "EXISTS(SELECT 1 FROM reports r WHERE r.visit_id=v.id AND r.status='complete') has_report "
            "FROM visits v JOIN clients c ON c.id=v.client_id "
            "LEFT JOIN service_types s ON s.id=v.service_type_id "
            "LEFT JOIN users u ON u.id=v.agent_id")
@@ -753,6 +753,9 @@ def get_visit(ctx):
     require_perm(ctx.user, "visits.view")
     _assert_visit_access(ctx.user, v)
     v["report"] = db.query("SELECT * FROM reports WHERE visit_id=?", (vid,), one=True)
+    # Clients only ever see a finished report — a draft is still being worked on.
+    if ctx.user["role"] == "client" and v["report"] and v["report"]["status"] != "complete":
+        v["report"] = None
     v["chemicals"] = db.query(
         "SELECT cu.*, ch.name_en, ch.name_ar, ch.unit FROM chemical_usage cu "
         "JOIN chemicals ch ON ch.id=cu.chemical_id WHERE cu.visit_id=?", (vid,))
@@ -844,6 +847,11 @@ def upsert_report(ctx):
         except (TypeError, ValueError):
             return 0
 
+    # The agent finalising the report sends status=complete; everything else
+    # (auto-save while typing) is stored as a draft and can't be finalised until
+    # the required fields + both signatures are present.
+    want_complete = (b.get("status") or "").lower() == "complete"
+
     if existing:
         fields, vals = [], []
         for c in text_cols:
@@ -862,7 +870,56 @@ def upsert_report(ctx):
         vals[list(cols).index("severity")] = b.get("severity") or "low"
         placeholders = ",".join("?" * len(cols))
         db.execute(f"INSERT INTO reports({','.join(cols)}) VALUES({placeholders})", vals)
+
+    # Re-read the merged row to validate / set the status against final values.
+    rep = db.query("SELECT * FROM reports WHERE visit_id=?", (vid,), one=True)
+    if want_complete:
+        missing = _report_incomplete_fields(rep)
+        if missing:
+            raise ApiError(400, "report_incomplete:" + ",".join(missing))
+        db.execute("UPDATE reports SET status='complete', completed_at=datetime('now') "
+                   "WHERE visit_id=? AND status!='complete'", (vid,))
+    elif rep["status"] != "complete":
+        # keep it a draft (clear any stale completed_at)
+        db.execute("UPDATE reports SET status='draft', completed_at=NULL WHERE visit_id=?", (vid,))
     return db.query("SELECT * FROM reports WHERE visit_id=?", (vid,), one=True)
+
+
+# Fields (and signatures) required before a report can be marked complete.
+REPORT_REQUIRED_FIELDS = ("summary", "findings", "pests_found", "severity")
+
+
+def _report_incomplete_fields(rep):
+    """Return the list of required-but-missing field keys for a report row."""
+    missing = [f for f in REPORT_REQUIRED_FIELDS if not (rep.get(f) or "").strip()]
+    if not rep.get("customer_signature"):
+        missing.append("customer_signature")
+    if not rep.get("technician_signature"):
+        missing.append("technician_signature")
+    return missing
+
+
+def _draft_reports_for(user):
+    """Unfinished (draft) reports the user is responsible for.
+
+    Agents see their own; managers/admins see all open drafts so they can chase."""
+    sql = ("SELECT r.visit_id, r.created_at, v.agent_id, u.full_name agent_name, "
+           "c.name_en, c.name_ar, v.scheduled_start "
+           "FROM reports r JOIN visits v ON v.id=r.visit_id "
+           "JOIN clients c ON c.id=v.client_id LEFT JOIN users u ON u.id=v.agent_id "
+           "WHERE r.status='draft' ")
+    params = ()
+    if user["role"] == "agent":
+        sql += "AND v.agent_id=? "
+        params = (user["id"],)
+    sql += "ORDER BY r.created_at DESC"
+    return db.query(sql, params)
+
+
+@route("GET", r"/api/reports/drafts")
+def list_draft_reports(ctx):
+    require_perm(ctx.user, "visits.view")
+    return {"items": _draft_reports_for(ctx.user)}
 
 
 # --------------------------------------------------------------------------
@@ -1592,6 +1649,18 @@ def _generate_reminders():
         if _notify(v["agent_id"], "visit_reminder", "Upcoming visit",
                    f"{v['name_en']} on {v['scheduled_start'][:16]}", "visit", v["id"],
                    f"visitrem:{v['id']}:{v['scheduled_start'][:10]}"):
+            created += 1
+    # unfinished (draft) reports left by agents -> remind the agent to complete &
+    # save. Only nag once the draft has sat for >10 min (i.e. they likely left the
+    # visit / logged out mid-report rather than still actively typing).
+    for r in db.query(
+        "SELECT r.visit_id, v.agent_id, c.name_en FROM reports r "
+        "JOIN visits v ON v.id=r.visit_id JOIN clients c ON c.id=v.client_id "
+        "WHERE r.status='draft' AND v.agent_id IS NOT NULL "
+        "AND datetime(r.created_at) < datetime('now','-10 minutes')"):
+        if _notify(r["agent_id"], "report_draft", "Unfinished report",
+                   f"Complete & save your report for {r['name_en']}", "visit", r["visit_id"],
+                   f"draftrep:{r['visit_id']}"):
             created += 1
     # overdue invoices -> notify managers/admins
     managers = db.query("SELECT id FROM users WHERE role IN ('admin','manager') AND active=1")
