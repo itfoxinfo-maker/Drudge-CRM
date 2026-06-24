@@ -24,6 +24,38 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 ALLOWED_IMG = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+MAX_UPLOAD_BYTES = 8 * 1024 * 1024   # 8 MB per uploaded file
+
+
+def _sniff_image(data: bytes) -> bool:
+    """True if the bytes start with a known image signature (JPEG/PNG/GIF/WEBP)."""
+    if len(data) < 12:
+        return False
+    if data[:3] == b"\xff\xd8\xff":                      # JPEG
+        return True
+    if data[:8] == b"\x89PNG\r\n\x1a\n":                  # PNG
+        return True
+    if data[:6] in (b"GIF87a", b"GIF89a"):               # GIF
+        return True
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":    # WEBP
+        return True
+    return False
+
+
+def _validate_image_upload(f):
+    """Validate an uploaded file dict from parse_multipart: extension, size and
+    actual content signature. Raises ApiError on any problem."""
+    ext = os.path.splitext(f["filename"])[1].lower()
+    if ext not in ALLOWED_IMG:
+        raise ApiError(400, "Only image files are allowed")
+    data = f["data"]
+    if not data:
+        raise ApiError(400, "Empty file")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise ApiError(413, f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)")
+    if not _sniff_image(data):
+        raise ApiError(400, "File is not a valid image")
+    return ext
 
 
 class ApiError(Exception):
@@ -1091,9 +1123,7 @@ def upload_logo(ctx):
     if not files:
         raise ApiError(400, "No file uploaded")
     f = files[0]
-    ext = os.path.splitext(f["filename"])[1].lower()
-    if ext not in ALLOWED_IMG:
-        raise ApiError(400, "Only image files are allowed")
+    ext = _validate_image_upload(f)
     fname = f"logo_{uuid.uuid4().hex}{ext}"
     with open(os.path.join(UPLOAD_DIR, fname), "wb") as out:
         out.write(f["data"])
@@ -1540,9 +1570,7 @@ def upload_photo(ctx):
         raise ApiError(400, "Valid entity_type and entity_id required")
     require_perm(ctx.user, _PHOTO_ENTITY_PERM[et])
     f = files[0]
-    ext = os.path.splitext(f["filename"])[1].lower()
-    if ext not in ALLOWED_IMG:
-        raise ApiError(400, "Only image files are allowed")
+    ext = _validate_image_upload(f)
     fname = f"{uuid.uuid4().hex}{ext}"
     with open(os.path.join(UPLOAD_DIR, fname), "wb") as out:
         out.write(f["data"])
@@ -1608,9 +1636,7 @@ def upload_map(ctx):
     if not cid:
         raise ApiError(400, "client_id required")
     f = files[0]
-    ext = os.path.splitext(f["filename"])[1].lower()
-    if ext not in ALLOWED_IMG:
-        raise ApiError(400, "Only image files are allowed")
+    ext = _validate_image_upload(f)
     fname = f"map_{uuid.uuid4().hex}{ext}"
     with open(os.path.join(UPLOAD_DIR, fname), "wb") as out:
         out.write(f["data"])
@@ -1800,6 +1826,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_static(path)
 
         length = int(self.headers.get("Content-Length", 0) or 0)
+        # Reject oversized bodies before reading them into memory (multipart
+        # overhead allowed on top of the per-file image cap).
+        if length > MAX_UPLOAD_BYTES + 1024 * 1024:
+            return self._json(413, {"error": "Request body too large"})
         raw_body = self.rfile.read(length) if length else b""
         content_type = self.headers.get("Content-Type", "")
         body = {}
