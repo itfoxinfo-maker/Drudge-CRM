@@ -214,6 +214,19 @@ def require_perm(user, perm):
         raise ApiError(403, "You do not have permission for this action")
 
 
+def audit(ctx, action, entity=None, entity_id=None, detail=None):
+    """Append an entry to the audit trail. Never raises (best-effort)."""
+    try:
+        u = ctx.user or {}
+        db.execute(
+            "INSERT INTO audit_log(user_id,user_name,action,entity,entity_id,detail,ip) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (u.get("id"), u.get("full_name"), action, entity,
+             None if entity_id is None else str(entity_id), detail, getattr(ctx, "ip", None)))
+    except Exception:
+        traceback.print_exc()
+
+
 # A photo's required permission depends on the entity it is attached to.
 _PHOTO_ENTITY_PERM = {
     "client": "clients.edit", "report": "visits.edit",
@@ -376,6 +389,7 @@ def create_user(ctx):
         (b["full_name"], b["email"], auth.hash_password(b["password"]), b["role"],
          b.get("phone"), b.get("client_id"), b.get("specialization"), b.get("hire_date"),
          b.get("lang", "en")))
+    audit(ctx, "user.create", "user", uid, f"{b['role']} {b['email']}")
     return _public_user(db.query("SELECT * FROM users WHERE id=?", (uid,), one=True))
 
 
@@ -398,13 +412,17 @@ def update_user(ctx):
         raise ApiError(400, "Nothing to update")
     vals.append(uid)
     db.execute(f"UPDATE users SET {','.join(fields)} WHERE id=?", vals)
+    audit(ctx, "user.update", "user", uid,
+          ("password reset; " if b.get("password") else "") + ", ".join(f for f in b if f != "password"))
     return _public_user(db.query("SELECT * FROM users WHERE id=?", (uid,), one=True))
 
 
 @route("DELETE", r"/api/users/(\d+)")
 def deactivate_user(ctx):
     require_perm(ctx.user, "users.delete")
-    db.execute("UPDATE users SET active=0 WHERE id=?", (int(ctx.params[0]),))
+    uid = int(ctx.params[0])
+    db.execute("UPDATE users SET active=0 WHERE id=?", (uid,))
+    audit(ctx, "user.delete", "user", uid, "deactivated")
     return {"ok": True}
 
 
@@ -447,6 +465,8 @@ def update_role_permissions(ctx):
                 "INSERT INTO role_permissions(role,perm,allowed) VALUES(?,?,?) "
                 "ON CONFLICT(role,perm) DO UPDATE SET allowed=excluded.allowed",
                 (role, perm, allowed))
+    audit(ctx, "permissions.role.update", "role", role,
+          f"set {len(perms)} permission(s) for role '{role}'")
     return {"role": role, "effective": effective_role_perms(role),
             "overrides": _role_overrides(role)}
 
@@ -489,8 +509,17 @@ def update_user_permissions(ctx):
                 "ON CONFLICT(user_id,perm) DO UPDATE SET allowed=excluded.allowed",
                 (uid, perm, 1 if val else 0))
     full = db.query("SELECT * FROM users WHERE id=?", (uid,), one=True)
+    audit(ctx, "permissions.user.update", "user", uid,
+          f"set {len(perms)} per-user override(s)")
     return {"user_id": uid, "effective": effective_user_perms(full),
             "overrides": _user_overrides(uid)}
+
+
+@route("GET", r"/api/audit")
+def list_audit(ctx):
+    require_perm(ctx.user, "permissions.view")
+    limit = min(int(ctx.query.get("limit", 100) or 100), 500)
+    return db.query("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,))
 
 
 # --------------------------------------------------------------------------
@@ -848,6 +877,7 @@ def adjust_stock(ctx):
         cx.execute("UPDATE chemicals SET quantity_in_stock = quantity_in_stock + ? WHERE id=?", (change, cid))
         cx.execute("INSERT INTO inventory_transactions(chemical_id,change,reason,note) VALUES(?,?,?,?)",
                    (cid, change, reason, b.get("note")))
+    audit(ctx, "stock.adjust", "chemical", cid, f"{reason} {change:+g}")
     return db.query("SELECT * FROM chemicals WHERE id=?", (cid,), one=True)
 
 
@@ -990,6 +1020,7 @@ def create_invoice(ctx):
             tax = round(amount * float(b["tax_rate"]) / 100, 2)
         cx.execute("UPDATE invoices SET amount=?, tax=?, total=? WHERE id=?",
                    (amount, tax, amount + tax, iid))
+    audit(ctx, "invoice.create", "invoice", iid, f"{doc_type} {number} total {amount + tax:g}")
     return db.query("SELECT * FROM invoices WHERE id=?", (iid,), one=True)
 
 
@@ -1015,13 +1046,16 @@ def update_invoice(ctx):
         if fields:
             vals.append(iid)
             cx.execute(f"UPDATE invoices SET {','.join(fields)} WHERE id=?", vals)
+    audit(ctx, "invoice.update", "invoice", iid, ", ".join(k for k in b if k != "items"))
     return db.query("SELECT * FROM invoices WHERE id=?", (iid,), one=True)
 
 
 @route("DELETE", r"/api/invoices/(\d+)")
 def delete_invoice(ctx):
     require_perm(ctx.user, "invoices.delete")
-    db.execute("DELETE FROM invoices WHERE id=?", (int(ctx.params[0]),))
+    iid = int(ctx.params[0])
+    db.execute("DELETE FROM invoices WHERE id=?", (iid,))
+    audit(ctx, "invoice.delete", "invoice", iid)
     return {"ok": True}
 
 
@@ -1042,6 +1076,7 @@ def add_payment(ctx):
                           (iid,)).fetchone()["p"]
         if inv and paid >= inv["total"] and inv["status"] != "cancelled":
             cx.execute("UPDATE invoices SET status='paid' WHERE id=?", (iid,))
+    audit(ctx, "payment.create", "invoice", iid, f"{amount:g} via {b.get('method', 'cash')}")
     return get_invoice(Ctx(ctx.user, [str(iid)], {}, {}, b"", ""))
 
 

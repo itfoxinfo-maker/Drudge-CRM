@@ -307,6 +307,20 @@ CREATE TABLE IF NOT EXISTS user_permissions (
     allowed INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (user_id, perm)
 );
+
+-- Audit trail: who did what, on which record. Append-only.
+CREATE TABLE IF NOT EXISTS audit_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    user_name   TEXT,                          -- denormalized for history
+    action      TEXT NOT NULL,                 -- e.g. invoice.create
+    entity      TEXT,                          -- e.g. invoice
+    entity_id   TEXT,
+    detail      TEXT,                          -- short human-readable note
+    ip          TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
 """
 
 # Additive migrations for databases created by an earlier version.
