@@ -346,3 +346,7 @@ tr.clickable:hover { background: var(--green-l); }
 .perm-table tbody tr:hover { background: #f7fafc; }
 .pcell.overridden { background: var(--amber-l); border-radius: 6px; }
 .pcell.na { background: repeating-linear-gradient(45deg, transparent, transparent 4px, #f1f5f9 4px, #f1f5f9 8px); }
+
+/* ---- list pagination ---- */
+.pager { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 14px; }
+.pager .btn[disabled] { opacity: .45; cursor: default; }

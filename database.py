@@ -5,6 +5,7 @@ demo data is seeded by seed.py.
 """
 import sqlite3
 import os
+import contextlib
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("PESTCRM_DATA_DIR", os.path.join(BASE_DIR, "data"))
@@ -28,6 +29,8 @@ CREATE TABLE IF NOT EXISTS users (
     hire_date     TEXT,
     lang          TEXT NOT NULL DEFAULT 'en',
     active        INTEGER NOT NULL DEFAULT 1,
+    -- bumped to invalidate a user's outstanding session tokens (see auth.py)
+    token_version INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -304,6 +307,20 @@ CREATE TABLE IF NOT EXISTS user_permissions (
     allowed INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (user_id, perm)
 );
+
+-- Audit trail: who did what, on which record. Append-only.
+CREATE TABLE IF NOT EXISTS audit_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    user_name   TEXT,                          -- denormalized for history
+    action      TEXT NOT NULL,                 -- e.g. invoice.create
+    entity      TEXT,                          -- e.g. invoice
+    entity_id   TEXT,
+    detail      TEXT,                          -- short human-readable note
+    ip          TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
 """
 
 # Additive migrations for databases created by an earlier version.
@@ -334,6 +351,9 @@ def _migrate(conn):
                    ("valid_until", "TEXT")):
         if c not in cols("invoices"):
             conn.execute(f"ALTER TABLE invoices ADD COLUMN {c} {ddl}")
+    # token_version: bump to revoke a user's existing session tokens
+    if "token_version" not in cols("users"):
+        conn.execute("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0")
     # Drop the old CHECK on invoices.status (rebuild) if present.
     ddl_row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='invoices'").fetchone()
@@ -358,10 +378,36 @@ def _migrate(conn):
 
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
+    # timeout lets a writer wait instead of failing instantly on a locked DB.
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # WAL allows concurrent readers alongside a writer (ThreadingHTTPServer);
+    # busy_timeout makes contending writers wait up to 5s rather than erroring.
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
+
+
+@contextlib.contextmanager
+def transaction():
+    """Run several statements on one connection, committed atomically.
+
+    Usage:
+        with db.transaction() as cx:
+            cx.execute(...); cx.execute(...)
+    On any exception the whole block is rolled back. cx.execute returns the
+    cursor, so cx.execute(...).lastrowid gives the new id.
+    """
+    conn = get_conn()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def _backfill_marker_events(conn):

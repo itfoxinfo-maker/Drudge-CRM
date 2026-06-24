@@ -54,15 +54,17 @@ def _b64d(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + pad)
 
 
-def make_token(user_id: int) -> str:
-    payload = {"uid": user_id, "exp": int(time.time()) + TOKEN_TTL}
+def make_token(user_id: int, token_version: int = 0) -> str:
+    # tv (token version) is matched against the user's current token_version,
+    # so bumping that column server-side invalidates all existing tokens.
+    payload = {"uid": user_id, "tv": token_version, "exp": int(time.time()) + TOKEN_TTL}
     body = _b64e(json.dumps(payload).encode())
     sig = _b64e(hmac.new(_secret(), body.encode(), hashlib.sha256).digest())
     return body + "." + sig
 
 
 def verify_token(token: str):
-    """Return user_id if valid, else None."""
+    """Return the token payload dict {uid, tv, exp} if valid, else None."""
     try:
         body, sig = token.split(".", 1)
         expected = _b64e(hmac.new(_secret(), body.encode(), hashlib.sha256).digest())
@@ -71,6 +73,6 @@ def verify_token(token: str):
         payload = json.loads(_b64d(body))
         if payload.get("exp", 0) < time.time():
             return None
-        return payload.get("uid")
+        return payload
     except Exception:
         return None

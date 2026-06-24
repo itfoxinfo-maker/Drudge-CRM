@@ -12,8 +12,6 @@ function fmtDateTime(s) { if (!s) return "—"; const d = new Date(s.replace(" "
 function toast(msg) { const e = $("toast"); e.textContent = msg; e.classList.remove("hidden"); setTimeout(() => e.classList.add("hidden"), 2200); }
 
 function role() { return API.user ? API.user.role : null; }
-function isManager() { return ["admin", "manager"].includes(role()); }
-function isStaff() { return ["admin", "manager", "agent"].includes(role()); }
 
 // ---- RBAC: permission checks driven by API.user.permissions ----
 // admin is always allowed; otherwise consult the resolved permission map.
@@ -31,17 +29,31 @@ function canModule(mod) {
   return Object.keys(p).some(k => k.startsWith(mod + ".") && p[k]);
 }
 
+// ---- pagination helper for list views ----
+const PAGE_SIZE = 25;
+function pagerHTML(d) {
+  if (!d || (d.pages || 1) <= 1) return "";
+  return `<div class="pager">
+    <button class="btn sm secondary" data-pg="prev" ${d.page <= 1 ? "disabled" : ""}>‹ ${t("prev")}</button>
+    <span class="muted small">${t("page")} ${d.page} / ${d.pages} · ${d.total}</span>
+    <button class="btn sm secondary" data-pg="next" ${d.page >= d.pages ? "disabled" : ""}>${t("next")} ›</button></div>`;
+}
+function wirePager(scope, d, go) {
+  scope.querySelectorAll("[data-pg]").forEach(b => b.addEventListener("click", () => {
+    if (b.dataset.pg === "prev" && d.page > 1) go(d.page - 1);
+    else if (b.dataset.pg === "next" && d.page < d.pages) go(d.page + 1);
+  }));
+}
+
 // ---- caches for dropdowns ----
 const cache = { services: [], agents: [], clients: [], chemicals: [] };
 let SETTINGS = {};
 async function loadCaches() {
   try { SETTINGS = await API.get("/settings"); } catch (e) {}
   try { cache.services = await API.get("/service-types"); } catch (e) {}
-  if (isManager()) { try { cache.agents = await API.get("/agents"); } catch (e) {} }
-  if (isStaff()) {
-    try { cache.clients = await API.get("/clients"); } catch (e) {}
-    try { cache.chemicals = await API.get("/chemicals"); } catch (e) {}
-  }
+  if (can("users.view")) { try { cache.agents = await API.get("/agents"); } catch (e) {} }
+  if (can("clients.view")) { try { cache.clients = await API.get("/clients"); } catch (e) {} }
+  if (can("chemicals.view")) { try { cache.chemicals = await API.get("/chemicals"); } catch (e) {} }
 }
 
 // ====================================================================
@@ -108,7 +120,10 @@ $("login-form").addEventListener("submit", async (e) => {
 });
 $("login-lang").addEventListener("click", () => { toggleLang(); applyStaticLabels(); });
 $("lang-toggle").addEventListener("click", () => { toggleLang(); applyStaticLabels(); showApp(); });
-$("logout-btn").addEventListener("click", () => { API.clearAuth(); showLogin(); });
+$("logout-btn").addEventListener("click", async () => {
+  try { await API.post("/auth/logout", {}); } catch (e) {}  // revoke token server-side
+  API.clearAuth(); showLogin();
+});
 
 // quick search
 $("quick-search").addEventListener("keydown", (e) => {
@@ -253,20 +268,26 @@ async function viewDashboard(v) {
 // Clients list
 // ====================================================================
 async function viewClients(v) {
-  const clients = await API.get("/clients");
   v.innerHTML = `<div class="page-head"><h2>${t("clients_title")}</h2>
-    ${isManager() ? `<button class="btn" id="add-client">+ ${t("new_client")}</button>` : ""}</div>
-    <div class="panel">
-      <table><thead><tr><th>${t("company_name_en")}</th><th>${t("contact_person")}</th>
-      <th>${t("phone")}</th><th>${t("city")}</th><th>${t("status")}</th></tr></thead>
-      <tbody>${clients.map(c => `<tr class="clickable" data-id="${c.id}">
+    ${can("clients.create") ? `<button class="btn" id="add-client">+ ${t("new_client")}</button>` : ""}</div>
+    <div class="panel" id="clients-list">${t("loading")}</div>`;
+  if ($("add-client")) $("add-client").addEventListener("click", () => clientForm());
+  const render = async (page) => {
+    const d = await API.get(`/clients?page=${page}&limit=${PAGE_SIZE}`);
+    const rows = d.items;
+    $("clients-list").innerHTML =
+      `<table><thead><tr><th>${t("company_name_en")}</th><th>${t("contact_person")}</th>
+        <th>${t("phone")}</th><th>${t("city")}</th><th>${t("status")}</th></tr></thead>
+      <tbody>${rows.map(c => `<tr class="clickable" data-id="${c.id}">
         <td><strong>${esc(localized(c, "name"))}</strong></td>
         <td>${esc(c.contact_person)}</td><td>${esc(c.phone)}</td>
         <td>${esc(c.city)}</td><td>${statusBadge(c.status)}</td></tr>`).join("") ||
-        `<tr><td colspan="5" class="empty">${t("none")}</td></tr>`}</tbody></table></div>`;
-  v.querySelectorAll("tr[data-id]").forEach(tr =>
-    tr.addEventListener("click", () => navigate("client", { id: tr.dataset.id })));
-  if ($("add-client")) $("add-client").addEventListener("click", () => clientForm());
+        `<tr><td colspan="5" class="empty">${t("none")}</td></tr>`}</tbody></table>` + pagerHTML(d);
+    $("clients-list").querySelectorAll("tr[data-id]").forEach(tr =>
+      tr.addEventListener("click", () => navigate("client", { id: tr.dataset.id })));
+    wirePager($("clients-list"), d, render);
+  };
+  render(1);
 }
 
 function clientForm(c) {
@@ -310,7 +331,7 @@ async function viewClientFolder(v, arg) {
     <div class="page-head"><h2>📁 ${esc(localized(c, "name"))}</h2>
       <div style="display:flex;gap:8px">
         <button class="btn sm" id="client-analytics-btn">📊 ${t("view_analytics")}</button>
-        ${isManager() ? `<button class="btn secondary sm" id="edit-client">${t("edit")}</button>` : ""}</div></div>
+        ${can("clients.edit") ? `<button class="btn secondary sm" id="edit-client">${t("edit")}</button>` : ""}</div></div>
     <div class="grid-2">
       <div class="panel"><h3>${t("company_folder")}</h3>
         <div class="kv">
@@ -332,17 +353,17 @@ async function viewClientFolder(v, arg) {
       </div>
     </div>
 
-    ${isManager() ? `<div class="panel"><div class="section-title"><h3>${t("sites")}</h3><button class="btn sm" id="add-site">+ ${t("add_site")}</button></div>
+    ${can("clients.edit") ? `<div class="panel"><div class="section-title"><h3>${t("sites")}</h3><button class="btn sm" id="add-site">+ ${t("add_site")}</button></div>
       <table><thead><tr><th>${t("site_name")}</th><th>${t("address_en")}</th><th>${t("area")}</th><th></th></tr></thead>
       <tbody id="sites-body">${(c.sites || []).map(s => `<tr><td>${esc(s.name)}</td><td>${esc(s.address)}</td><td>${esc(s.area)}</td>
         <td><button class="link-btn danger sm" data-rmsite="${s.id}">${t("delete")}</button></td></tr>`).join("") || `<tr><td colspan="4" class="empty">${t("none")}</td></tr>`}</tbody></table></div>` : ""}
 
     <div class="panel"><div class="section-title"><h3>${t("recent_visits")}</h3>
-      ${isManager() ? `<button class="btn sm" id="add-visit">+ ${t("new_visit")}</button>` : ""}</div>
+      ${can("visits.create") ? `<button class="btn sm" id="add-visit">+ ${t("new_visit")}</button>` : ""}</div>
       ${visitsTable(c.recent_visits)}</div>
 
     <div class="panel"><div class="section-title"><h3>🗺️ ${t("maps")}</h3>
-      ${isManager() ? `<button class="btn sm" id="add-map">📤 ${t("upload_map")}</button>` : ""}</div>
+      ${can("maps.create") ? `<button class="btn sm" id="add-map">📤 ${t("upload_map")}</button>` : ""}</div>
       <div id="maps-box">${t("loading")}</div></div>
 
     <div class="panel"><div class="section-title"><h3>${t("photos")}</h3>
@@ -432,27 +453,28 @@ function wireVisitRows(root) {
 async function viewSchedule(v) {
   const statuses = ["", "scheduled", "in_progress", "completed", "cancelled"];
   v.innerHTML = `<div class="page-head"><h2>${t("schedule_title")}</h2>
-    ${isManager() ? `<button class="btn" id="add-visit">+ ${t("new_visit")}</button>` : ""}</div>
+    ${can("visits.create") ? `<button class="btn" id="add-visit">+ ${t("new_visit")}</button>` : ""}</div>
     <div class="toolbar">
       <label>${t("status")}: <select id="f-status">${statuses.map(s => `<option value="${s}">${s ? t(statusKey(s)) : t("all")}</option>`).join("")}</select></label>
-      ${isManager() ? `<label>${t("agent")}: <select id="f-agent"><option value="">${t("all")}</option>${cache.agents.map(a => `<option value="${a.id}">${esc(a.full_name)}</option>`).join("")}</select></label>` : ""}
+      ${can("users.view") ? `<label>${t("agent")}: <select id="f-agent"><option value="">${t("all")}</option>${cache.agents.map(a => `<option value="${a.id}">${esc(a.full_name)}</option>`).join("")}</select></label>` : ""}
       <label>${t("from")}: <input type="date" id="f-from"></label>
       <label>${t("to")}: <input type="date" id="f-to"></label>
     </div>
     <div class="panel" id="visit-list">${t("loading")}</div>`;
-  async function refresh() {
-    const qp = [];
+  async function refresh(page = 1) {
+    const qp = [`page=${page}`, `limit=${PAGE_SIZE}`];
     if ($("f-status").value) qp.push("status=" + $("f-status").value);
     if ($("f-agent") && $("f-agent").value) qp.push("agent=" + $("f-agent").value);
     if ($("f-from").value) qp.push("from=" + $("f-from").value);
     if ($("f-to").value) qp.push("to=" + $("f-to").value);
-    const visits = await API.get("/visits" + (qp.length ? "?" + qp.join("&") : ""));
-    $("visit-list").innerHTML = visitsTable(visits);
+    const d = await API.get("/visits?" + qp.join("&"));
+    $("visit-list").innerHTML = visitsTable(d.items) + pagerHTML(d);
     wireVisitRows($("visit-list"));
+    wirePager($("visit-list"), d, refresh);
   }
-  ["f-status", "f-agent", "f-from", "f-to"].forEach(id => { if ($(id)) $(id).addEventListener("change", refresh); });
+  ["f-status", "f-agent", "f-from", "f-to"].forEach(id => { if ($(id)) $(id).addEventListener("change", () => refresh(1)); });
   if ($("add-visit")) $("add-visit").addEventListener("click", () => visitForm());
-  refresh();
+  refresh(1);
 }
 
 function visitForm(preset) {
@@ -485,7 +507,7 @@ function visitForm(preset) {
 async function viewVisit(v, arg) {
   const id = arg.id;
   const visit = await API.get("/visits/" + id);
-  const canEdit = isManager() || (role() === "agent");
+  const canEdit = can("visits.edit");
   const rep = visit.report || {};
   v.innerHTML = `
     <div class="breadcrumb" id="bc">← ${t("nav_schedule")}</div>
@@ -619,17 +641,17 @@ function usageForm(visitId) {
 async function viewChemicals(v) {
   const chems = await API.get("/chemicals");
   v.innerHTML = `<div class="page-head"><h2>${t("chemicals_title")}</h2>
-    ${isManager() ? `<button class="btn" id="add-chem">+ ${t("new_chemical")}</button>` : ""}</div>
+    ${can("chemicals.create") ? `<button class="btn" id="add-chem">+ ${t("new_chemical")}</button>` : ""}</div>
     <div class="panel"><table><thead><tr>
       <th>${t("name_en")}</th><th>${t("active_ingredient")}</th><th>${t("in_stock")}</th>
-      <th>${t("reorder_level")}</th><th>${t("hazard_class")}</th>${isManager() ? `<th>${t("actions")}</th>` : ""}</tr></thead>
+      <th>${t("reorder_level")}</th><th>${t("hazard_class")}</th>${can("chemicals.edit") ? `<th>${t("actions")}</th>` : ""}</tr></thead>
       <tbody>${chems.map(c => {
         const low = c.quantity_in_stock <= c.reorder_level;
         return `<tr><td><strong>${esc(localized(c, "name"))}</strong><div class="muted small">${esc(c.reg_no || "")}</div></td>
         <td>${esc(c.active_ingredient || "—")}</td>
         <td class="${low ? "lowstock" : ""}">${c.quantity_in_stock} ${esc(c.unit)} ${low ? `· ${t("low_stock_warn")}` : ""}</td>
         <td>${c.reorder_level} ${esc(c.unit)}</td><td>${esc(c.hazard_class || "—")}</td>
-        ${isManager() ? `<td><button class="link-btn sm" data-stock="${c.id}">${t("adjust_stock")}</button>
+        ${can("chemicals.edit") ? `<td><button class="link-btn sm" data-stock="${c.id}">${t("adjust_stock")}</button>
           · <button class="link-btn sm" data-edit="${c.id}">${t("edit")}</button></td>` : ""}</tr>`;
       }).join("") || `<tr><td colspan="6" class="empty">${t("none")}</td></tr>`}</tbody></table></div>`;
   if ($("add-chem")) $("add-chem").addEventListener("click", () => chemForm());
@@ -685,23 +707,29 @@ function stockForm(id) {
 let invoiceTab = "invoice";
 async function viewInvoices(v) {
   const dt = invoiceTab;
-  const invoices = await API.get("/invoices?doc_type=" + dt);
   const tab = (k, label) => `<button class="btn sm ${invoiceTab === k ? "" : "secondary"}" data-tab="${k}">${label}</button>`;
   v.innerHTML = `<div class="page-head"><h2>${t("invoices_title")}</h2>
     <div style="display:flex;gap:8px">
-      ${isManager() ? `<button class="btn secondary sm" id="exp-inv">⬇ ${t("export_csv")}</button>` : ""}
-      ${isManager() ? `<button class="btn" id="add-inv">+ ${dt === "quote" ? t("quote") : t("new_invoice")}</button>` : ""}</div></div>
+      ${can("invoices.view") ? `<button class="btn secondary sm" id="exp-inv">⬇ ${t("export_csv")}</button>` : ""}
+      ${can("invoices.create") ? `<button class="btn" id="add-inv">+ ${dt === "quote" ? t("quote") : t("new_invoice")}</button>` : ""}</div></div>
     <div class="toolbar">${tab("invoice", t("nav_invoices"))} ${tab("quote", t("nav_quotes"))}</div>
-    <div class="panel"><table><thead><tr><th>${t("invoice_no")}</th><th>${t("client")}</th>
-      <th>${t("issue_date")}</th><th>${t("total")}</th>${dt === "invoice" ? `<th>${t("paid")}</th>` : ""}<th>${t("status")}</th></tr></thead>
-      <tbody>${invoices.map(i => `<tr class="clickable" data-inv="${i.id}">
-        <td>${esc(i.number)}</td><td>${esc(localized(i, "client"))}</td>
-        <td>${fmtDate(i.issue_date)}</td><td>${money(i.total)}</td>${dt === "invoice" ? `<td>${money(i.paid)}</td>` : ""}
-        <td>${statusBadge(i.status)}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">${t("none")}</td></tr>`}</tbody></table></div>`;
+    <div class="panel" id="inv-list">${t("loading")}</div>`;
   v.querySelectorAll("[data-tab]").forEach(b => b.addEventListener("click", () => { invoiceTab = b.dataset.tab; navigate("invoices"); }));
-  v.querySelectorAll("tr[data-inv]").forEach(tr => tr.addEventListener("click", () => navigate("invoice", { id: tr.dataset.inv })));
   if ($("add-inv")) $("add-inv").addEventListener("click", () => invoiceForm({ doc_type: dt }));
   if ($("exp-inv")) $("exp-inv").addEventListener("click", () => downloadCsv("invoices"));
+  const render = async (page) => {
+    const d = await API.get(`/invoices?doc_type=${dt}&page=${page}&limit=${PAGE_SIZE}`);
+    $("inv-list").innerHTML =
+      `<table><thead><tr><th>${t("invoice_no")}</th><th>${t("client")}</th>
+        <th>${t("issue_date")}</th><th>${t("total")}</th>${dt === "invoice" ? `<th>${t("paid")}</th>` : ""}<th>${t("status")}</th></tr></thead>
+      <tbody>${d.items.map(i => `<tr class="clickable" data-inv="${i.id}">
+        <td>${esc(i.number)}</td><td>${esc(localized(i, "client"))}</td>
+        <td>${fmtDate(i.issue_date)}</td><td>${money(i.total)}</td>${dt === "invoice" ? `<td>${money(i.paid)}</td>` : ""}
+        <td>${statusBadge(i.status)}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">${t("none")}</td></tr>`}</tbody></table>` + pagerHTML(d);
+    $("inv-list").querySelectorAll("tr[data-inv]").forEach(tr => tr.addEventListener("click", () => navigate("invoice", { id: tr.dataset.inv })));
+    wirePager($("inv-list"), d, render);
+  };
+  render(1);
 }
 
 // Line-items editor used by the invoice/quote form.
@@ -803,8 +831,8 @@ async function viewInvoice(v, arg) {
   v.innerHTML = `<div class="breadcrumb" id="bc">← ${t("invoices_title")}</div>
     <div class="page-head"><h2>${esc(inv.number)} — ${esc(localized(inv, "client"))}</h2>
       <div>${statusBadge(inv.status)}
-        ${isManager() ? `<button class="btn secondary sm" id="edit-inv">✏️ ${t("edit")}</button>` : ""}
-        ${(inv.doc_type === "quote" && isManager() && inv.status !== "accepted") ? `<button class="btn sm" id="convert-inv">➡ ${t("convert_to_invoice")}</button>` : ""}
+        ${can("invoices.edit") ? `<button class="btn secondary sm" id="edit-inv">✏️ ${t("edit")}</button>` : ""}
+        ${(inv.doc_type === "quote" && can("invoices.edit") && inv.status !== "accepted") ? `<button class="btn sm" id="convert-inv">➡ ${t("convert_to_invoice")}</button>` : ""}
         <button class="btn sm" id="print-inv">🖨️ ${t("print_pdf")}</button></div></div>
     <div class="grid-2">
       <div class="panel"><h3>${inv.doc_type === "quote" ? t("quote") : t("invoice_no")}</h3><div class="kv">
@@ -821,7 +849,7 @@ async function viewInvoice(v, arg) {
         <tbody>${inv.items.map(it => `<tr><td>${esc(it.description)}</td><td>${it.quantity}</td><td class="num">${money(it.amount)}</td></tr>`).join("")}</tbody></table>` : ""}
       </div>
       ${inv.doc_type === "quote" ? "" : `<div class="panel"><div class="section-title"><h3>${t("add_payment")}</h3></div>
-        ${isManager() ? `<form id="pay-form" class="form-grid">
+        ${can("payments.create") ? `<form id="pay-form" class="form-grid">
           ${field(t("payment_amount"), "amount", { type: "number" })}
           ${field(t("payment_method"), "method", { options: [
             { v: "cash", l: "Cash / نقدي" }, { v: "bank_transfer", l: "Bank / تحويل" }, { v: "card", l: "Card / بطاقة" }] })}
@@ -1343,7 +1371,7 @@ async function downloadCsv(entity) {
 // ====================================================================
 let notifTimer = null;
 async function initNotifications() {
-  if (!isStaff()) { $("topbar-right").innerHTML = ""; return; }
+  if (role() === "client") { $("topbar-right").innerHTML = ""; return; }
   $("topbar-right").innerHTML = `<div class="bell-wrap">
     <button id="bell" class="icon-btn" style="font-size:20px;position:relative">🔔<span id="bell-count" class="bell-badge hidden">0</span></button>
     <div id="bell-menu" class="bell-menu hidden"></div></div>`;
@@ -1396,7 +1424,7 @@ async function viewCalendar(v, arg) {
   const visits = await API.get(`/visits?from=${y}-${String(m + 1).padStart(2, "0")}-01&to=${ymd(last)}`);
   const byDay = {};
   visits.forEach(vi => { const k = (vi.scheduled_start || "").slice(0, 10); (byDay[k] = byDay[k] || []).push(vi); });
-  const agentFilter = isManager() ? `<select id="cal-agent"><option value="">${t("all")} ${t("nav_agents")}</option>
+  const agentFilter = can("users.view") ? `<select id="cal-agent"><option value="">${t("all")} ${t("nav_agents")}</option>
     ${cache.agents.map(a => `<option value="${a.id}">${esc(a.full_name)}</option>`).join("")}</select>` : "";
   const monthName = base.toLocaleDateString(LANG === "ar" ? "ar" : "en-GB", { month: "long", year: "numeric" });
   let cells = "";
@@ -1442,14 +1470,14 @@ async function viewContracts(v) {
   const list = await API.get("/contracts");
   v.innerHTML = `<div class="page-head"><h2>${t("contracts_title")}</h2>
     <div style="display:flex;gap:8px">
-      ${isManager() ? `<button class="btn secondary" id="run-ct">⚙ ${t("run_now")}</button>` : ""}
-      ${isManager() ? `<button class="btn" id="add-ct">+ ${t("new_contract")}</button>` : ""}</div></div>
+      ${can("contracts.edit") ? `<button class="btn secondary" id="run-ct">⚙ ${t("run_now")}</button>` : ""}
+      ${can("contracts.create") ? `<button class="btn" id="add-ct">+ ${t("new_contract")}</button>` : ""}</div></div>
     <div class="panel"><table><thead><tr><th>${t("client")}</th><th>${t("service")}</th><th>${t("agent")}</th>
-      <th>${t("frequency")}</th><th>${t("next_run")}</th><th>${t("price")}</th><th>${t("contract_status")}</th>${isManager() ? `<th></th>` : ""}</tr></thead>
+      <th>${t("frequency")}</th><th>${t("next_run")}</th><th>${t("price")}</th><th>${t("contract_status")}</th>${(can("contracts.edit") || can("contracts.delete")) ? `<th></th>` : ""}</tr></thead>
       <tbody>${list.map(c => `<tr><td>${esc(localized(c, "client"))}</td><td>${esc(localized(c, "service") || "—")}</td>
         <td>${esc(c.agent_name || "—")}</td><td>${t("freq_" + c.frequency)}</td><td>${fmtDate(c.next_run_date)}</td>
         <td>${money(c.price)}</td><td><span class="badge b-${c.status === "active" ? "active" : "inactive"}">${t("ct_" + c.status)}</span></td>
-        ${isManager() ? `<td><button class="link-btn sm" data-edit="${c.id}">${t("edit")}</button> · <button class="link-btn danger sm" data-del="${c.id}">${t("delete")}</button></td>` : ""}</tr>`).join("")
+        ${(can("contracts.edit") || can("contracts.delete")) ? `<td>${can("contracts.edit") ? `<button class="link-btn sm" data-edit="${c.id}">${t("edit")}</button>` : ""}${(can("contracts.edit") && can("contracts.delete")) ? " · " : ""}${can("contracts.delete") ? `<button class="link-btn danger sm" data-del="${c.id}">${t("delete")}</button>` : ""}</td>` : ""}</tr>`).join("")
         || `<tr><td colspan="8" class="empty">${t("none")}</td></tr>`}</tbody></table></div>`;
   if ($("add-ct")) $("add-ct").addEventListener("click", () => contractForm());
   if ($("run-ct")) $("run-ct").addEventListener("click", async () => {
@@ -1945,7 +1973,7 @@ async function loadClientMaps(c) {
       <img src="/uploads/${esc(m.filename)}">
       <div class="mt-meta"><strong>${esc(m.name)}</strong>
         <span class="muted small">${m.site_name ? esc(m.site_name) + " · " : ""}${m.marker_count} ${t("devices")}</span></div>
-      ${isManager() ? `<button class="rm" data-rmmap="${m.id}">✕</button>` : ""}
+      ${can("maps.delete") ? `<button class="rm" data-rmmap="${m.id}">✕</button>` : ""}
     </div>`).join("")}</div>`;
   box.querySelectorAll("[data-map]").forEach(el => el.addEventListener("click", (e) => {
     if (e.target.dataset.rmmap !== undefined) return;

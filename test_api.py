@@ -124,8 +124,56 @@ def main():
         check("search finds client", len(sr["clients"]) >= 1)
         st, csv = call("GET", "/export/clients.csv", admin, raw=True)
         check("csv export works", st == 200 and b"name_en" in csv)
-        st, _ = call("GET", "/export/clients.csv", agent)
-        check("csv export blocked for agent (403)", st == 403)
+        # Agents have clients.view by default, so they may export clients;
+        # but they lack invoices.view, so invoice export is forbidden.
+        st, _ = call("GET", "/export/invoices.csv", agent)
+        check("invoice csv export blocked for agent (403)", st == 403)
+
+        print("RBAC PERMISSIONS")
+        manager = login("manager@pestcrm.com", "manager123")
+        # Visibility of the RBAC admin surface is admin-only.
+        st, _ = call("GET", "/permissions/catalog", manager)
+        check("manager blocked from permissions catalog (403)", st == 403)
+        st, cat = call("GET", "/permissions/catalog", admin)
+        check("admin reads permissions catalog", st == 200 and "catalog" in cat)
+        # admin role is immutable.
+        st, _ = call("PUT", "/permissions/roles/admin", admin, {"perms": {"invoices.view": False}})
+        check("admin role cannot be edited (400)", st == 400)
+
+        # agent lacks invoices.view by default.
+        st, _ = call("GET", "/invoices", agent)
+        check("agent invoices blocked by default (403)", st == 403)
+        # grant it at the role level -> enforcement is live (same token).
+        call("PUT", "/permissions/roles/agent", admin, {"perms": {"invoices.view": True}})
+        st, _ = call("GET", "/invoices", agent)
+        check("role grant enables agent invoices (200)", st == 200)
+        # resetting to the built-in default removes the override row.
+        call("PUT", "/permissions/roles/agent", admin, {"perms": {"invoices.view": False}})
+        _, cat2 = call("GET", "/permissions/catalog", admin)
+        check("resetting to default drops the role override",
+              "invoices.view" not in cat2["role_overrides"].get("agent", {}))
+        st, _ = call("GET", "/invoices", agent)
+        check("agent invoices blocked again after reset (403)", st == 403)
+
+        # per-user override beats the role default.
+        _, users = call("GET", "/users?role=agent", admin)
+        aid = next(u["id"] for u in users if u["email"] == "agent1@pestcrm.com")
+        call("PUT", f"/permissions/users/{aid}", admin, {"perms": {"invoices.view": True}})
+        st, _ = call("GET", "/invoices", agent)
+        check("per-user override grants agent invoices (200)", st == 200)
+        _, up = call("GET", f"/permissions/users/{aid}", admin)
+        check("user override recorded", up["overrides"].get("invoices.view") is True)
+        # clearing the override (null) reverts to inherited role default.
+        call("PUT", f"/permissions/users/{aid}", admin, {"perms": {"invoices.view": None}})
+        _, up2 = call("GET", f"/permissions/users/{aid}", admin)
+        check("clearing override reverts to inherit", "invoices.view" not in up2["overrides"])
+        st, _ = call("GET", "/invoices", agent)
+        check("agent invoices blocked after clearing override (403)", st == 403)
+
+        # the permission changes above were written to the audit trail.
+        _, audit = call("GET", "/audit", admin)
+        check("audit log records permission changes",
+              any(r["action"].startswith("permissions.") for r in audit))
 
     finally:
         proc.terminate()

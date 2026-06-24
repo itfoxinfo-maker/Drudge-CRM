@@ -9,6 +9,9 @@ import os
 import re
 import sys
 import uuid
+import time
+import threading
+import traceback
 import mimetypes
 from urllib.parse import urlparse, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,6 +24,38 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 ALLOWED_IMG = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+MAX_UPLOAD_BYTES = 8 * 1024 * 1024   # 8 MB per uploaded file
+
+
+def _sniff_image(data: bytes) -> bool:
+    """True if the bytes start with a known image signature (JPEG/PNG/GIF/WEBP)."""
+    if len(data) < 12:
+        return False
+    if data[:3] == b"\xff\xd8\xff":                      # JPEG
+        return True
+    if data[:8] == b"\x89PNG\r\n\x1a\n":                  # PNG
+        return True
+    if data[:6] in (b"GIF87a", b"GIF89a"):               # GIF
+        return True
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":    # WEBP
+        return True
+    return False
+
+
+def _validate_image_upload(f):
+    """Validate an uploaded file dict from parse_multipart: extension, size and
+    actual content signature. Raises ApiError on any problem."""
+    ext = os.path.splitext(f["filename"])[1].lower()
+    if ext not in ALLOWED_IMG:
+        raise ApiError(400, "Only image files are allowed")
+    data = f["data"]
+    if not data:
+        raise ApiError(400, "Empty file")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise ApiError(413, f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)")
+    if not _sniff_image(data):
+        raise ApiError(400, "File is not a valid image")
+    return ext
 
 
 class ApiError(Exception):
@@ -30,13 +65,14 @@ class ApiError(Exception):
 
 
 class Ctx:
-    def __init__(self, user, params, query, body, raw_body, content_type):
+    def __init__(self, user, params, query, body, raw_body, content_type, ip=None):
         self.user = user
         self.params = params          # regex path groups
         self.query = query            # dict of query string (single values)
         self.body = body              # parsed JSON dict (or {})
         self.raw_body = raw_body      # raw bytes (for uploads)
         self.content_type = content_type
+        self.ip = ip                  # client IP (for login throttling)
 
 
 ROUTES = []
@@ -54,19 +90,6 @@ def route(method, pattern, auth_required=True):
 # --------------------------------------------------------------------------
 # permission helpers
 # --------------------------------------------------------------------------
-def require(user, *roles):
-    if user["role"] not in roles:
-        raise ApiError(403, "You do not have permission for this action")
-
-
-def is_staff(user):
-    return user["role"] in ("admin", "manager", "agent")
-
-
-def is_manager(user):
-    return user["role"] in ("admin", "manager")
-
-
 def client_scope_id(user):
     """For client users, the client_id they are limited to."""
     return user.get("client_id") if user["role"] == "client" else None
@@ -178,6 +201,46 @@ def require_perm(user, perm):
         raise ApiError(403, "You do not have permission for this action")
 
 
+def audit(ctx, action, entity=None, entity_id=None, detail=None):
+    """Append an entry to the audit trail. Never raises (best-effort)."""
+    try:
+        u = ctx.user or {}
+        db.execute(
+            "INSERT INTO audit_log(user_id,user_name,action,entity,entity_id,detail,ip) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (u.get("id"), u.get("full_name"), action, entity,
+             None if entity_id is None else str(entity_id), detail, getattr(ctx, "ip", None)))
+    except Exception:
+        traceback.print_exc()
+
+
+def _paginate(ctx, base_sql, params, order_sql, default_limit=25, max_limit=200):
+    """Page a query when the request asks for it.
+
+    base_sql: a complete SELECT (with any WHERE) but no ORDER BY / LIMIT.
+    order_sql: the ORDER BY clause string.
+    Returns the plain row list when neither ?page nor ?limit is given (keeps
+    existing callers/dropdowns working); otherwise an envelope
+    {items, total, page, pages, limit}.
+    """
+    params = list(params)
+    q = ctx.query
+    if "page" not in q and "limit" not in q:
+        return db.query(f"{base_sql} {order_sql}", params)
+    try:
+        limit = min(max(int(q.get("limit", default_limit)), 1), max_limit)
+    except (TypeError, ValueError):
+        limit = default_limit
+    try:
+        page = max(int(q.get("page", 1)), 1)
+    except (TypeError, ValueError):
+        page = 1
+    total = db.query(f"SELECT COUNT(*) c FROM ({base_sql})", params, one=True)["c"]
+    rows = db.query(f"{base_sql} {order_sql} LIMIT ? OFFSET ?", params + [limit, (page - 1) * limit])
+    pages = (total + limit - 1) // limit if limit else 1
+    return {"items": rows, "total": total, "page": page, "pages": pages, "limit": limit}
+
+
 # A photo's required permission depends on the entity it is attached to.
 _PHOTO_ENTITY_PERM = {
     "client": "clients.edit", "report": "visits.edit",
@@ -188,20 +251,68 @@ _PHOTO_ENTITY_PERM = {
 # --------------------------------------------------------------------------
 # AUTH
 # --------------------------------------------------------------------------
+# In-memory login throttle: lock an (email|ip) key after repeated failures.
+LOGIN_MAX_FAILS = 5
+LOGIN_WINDOW = 300       # seconds to accumulate failures
+LOGIN_LOCK_SECS = 300    # lockout duration once the threshold is hit
+_login_lock = threading.Lock()
+_login_attempts = {}     # key -> [fail_count, window_start, locked_until]
+
+
+def _login_locked_for(key):
+    """Return seconds remaining if the key is currently locked, else 0."""
+    now = time.time()
+    with _login_lock:
+        rec = _login_attempts.get(key)
+        if rec and rec[2] > now:
+            return int(rec[2] - now) + 1
+    return 0
+
+
+def _login_register_fail(key):
+    now = time.time()
+    with _login_lock:
+        rec = _login_attempts.get(key)
+        if not rec or now - rec[1] > LOGIN_WINDOW:
+            rec = [0, now, 0]
+        rec[0] += 1
+        if rec[0] >= LOGIN_MAX_FAILS:
+            rec[2] = now + LOGIN_LOCK_SECS
+        _login_attempts[key] = rec
+
+
+def _login_register_ok(key):
+    with _login_lock:
+        _login_attempts.pop(key, None)
+
+
 @route("POST", r"/api/auth/login", auth_required=False)
 def login(ctx):
     email = (ctx.body.get("email") or "").strip().lower()
     password = ctx.body.get("password") or ""
+    key = f"{email}|{ctx.ip or '?'}"
+    locked = _login_locked_for(key)
+    if locked:
+        raise ApiError(429, f"Too many failed attempts. Try again in {locked} seconds.")
     user = db.query("SELECT * FROM users WHERE lower(email)=? AND active=1", (email,), one=True)
     if not user or not auth.verify_password(password, user["password_hash"]):
+        _login_register_fail(key)
         raise ApiError(401, "Invalid email or password")
-    token = auth.make_token(user["id"])
+    _login_register_ok(key)
+    token = auth.make_token(user["id"], user["token_version"] or 0)
     return {"token": token, "user": _me_payload(user)}
 
 
 @route("GET", r"/api/auth/me")
 def me(ctx):
     return _me_payload(ctx.user)
+
+
+@route("POST", r"/api/auth/logout")
+def logout(ctx):
+    # Bump token_version so every outstanding token for this user is rejected.
+    db.execute("UPDATE users SET token_version = token_version + 1 WHERE id=?", (ctx.user["id"],))
+    return {"ok": True}
 
 
 def _me_payload(u):
@@ -292,6 +403,7 @@ def create_user(ctx):
         (b["full_name"], b["email"], auth.hash_password(b["password"]), b["role"],
          b.get("phone"), b.get("client_id"), b.get("specialization"), b.get("hire_date"),
          b.get("lang", "en")))
+    audit(ctx, "user.create", "user", uid, f"{b['role']} {b['email']}")
     return _public_user(db.query("SELECT * FROM users WHERE id=?", (uid,), one=True))
 
 
@@ -308,17 +420,23 @@ def update_user(ctx):
     if b.get("password"):
         fields.append("password_hash=?")
         vals.append(auth.hash_password(b["password"]))
+        # Changing the password revokes the user's existing session tokens.
+        fields.append("token_version=token_version+1")
     if not fields:
         raise ApiError(400, "Nothing to update")
     vals.append(uid)
     db.execute(f"UPDATE users SET {','.join(fields)} WHERE id=?", vals)
+    audit(ctx, "user.update", "user", uid,
+          ("password reset; " if b.get("password") else "") + ", ".join(f for f in b if f != "password"))
     return _public_user(db.query("SELECT * FROM users WHERE id=?", (uid,), one=True))
 
 
 @route("DELETE", r"/api/users/(\d+)")
 def deactivate_user(ctx):
     require_perm(ctx.user, "users.delete")
-    db.execute("UPDATE users SET active=0 WHERE id=?", (int(ctx.params[0]),))
+    uid = int(ctx.params[0])
+    db.execute("UPDATE users SET active=0 WHERE id=?", (uid,))
+    audit(ctx, "user.delete", "user", uid, "deactivated")
     return {"ok": True}
 
 
@@ -361,6 +479,8 @@ def update_role_permissions(ctx):
                 "INSERT INTO role_permissions(role,perm,allowed) VALUES(?,?,?) "
                 "ON CONFLICT(role,perm) DO UPDATE SET allowed=excluded.allowed",
                 (role, perm, allowed))
+    audit(ctx, "permissions.role.update", "role", role,
+          f"set {len(perms)} permission(s) for role '{role}'")
     return {"role": role, "effective": effective_role_perms(role),
             "overrides": _role_overrides(role)}
 
@@ -403,8 +523,17 @@ def update_user_permissions(ctx):
                 "ON CONFLICT(user_id,perm) DO UPDATE SET allowed=excluded.allowed",
                 (uid, perm, 1 if val else 0))
     full = db.query("SELECT * FROM users WHERE id=?", (uid,), one=True)
+    audit(ctx, "permissions.user.update", "user", uid,
+          f"set {len(perms)} per-user override(s)")
     return {"user_id": uid, "effective": effective_user_perms(full),
             "overrides": _user_overrides(uid)}
+
+
+@route("GET", r"/api/audit")
+def list_audit(ctx):
+    require_perm(ctx.user, "permissions.view")
+    limit = min(int(ctx.query.get("limit", 100) or 100), 500)
+    return db.query("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,))
 
 
 # --------------------------------------------------------------------------
@@ -427,8 +556,7 @@ def list_clients(ctx):
         params += [f"%{q}%"] * 4
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY name_en"
-    return db.query(sql, params)
+    return _paginate(ctx, sql, params, "ORDER BY name_en")
 
 
 @route("GET", r"/api/clients/(\d+)")
@@ -566,8 +694,7 @@ def list_visits(ctx):
            "LEFT JOIN users u ON u.id=v.agent_id")
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY v.scheduled_start DESC"
-    return db.query(sql, params)
+    return _paginate(ctx, sql, params, "ORDER BY v.scheduled_start DESC")
 
 
 @route("GET", r"/api/visits/(\d+)")
@@ -758,9 +885,11 @@ def adjust_stock(ctx):
     reason = b.get("reason", "adjustment")
     if reason not in ("purchase", "adjustment"):
         raise ApiError(400, "Invalid reason")
-    db.execute("UPDATE chemicals SET quantity_in_stock = quantity_in_stock + ? WHERE id=?", (change, cid))
-    db.execute("INSERT INTO inventory_transactions(chemical_id,change,reason,note) VALUES(?,?,?,?)",
-               (cid, change, reason, b.get("note")))
+    with db.transaction() as cx:
+        cx.execute("UPDATE chemicals SET quantity_in_stock = quantity_in_stock + ? WHERE id=?", (change, cid))
+        cx.execute("INSERT INTO inventory_transactions(chemical_id,change,reason,note) VALUES(?,?,?,?)",
+                   (cid, change, reason, b.get("note")))
+    audit(ctx, "stock.adjust", "chemical", cid, f"{reason} {change:+g}")
     return db.query("SELECT * FROM chemicals WHERE id=?", (cid,), one=True)
 
 
@@ -786,11 +915,12 @@ def record_usage(ctx):
     qty = float(b.get("quantity", 0))
     if not chem_id or qty <= 0:
         raise ApiError(400, "Chemical and a positive quantity are required")
-    uid = db.execute("INSERT INTO chemical_usage(visit_id,chemical_id,quantity,area_treated) VALUES(?,?,?,?)",
-                     (vid, chem_id, qty, b.get("area_treated")))
-    db.execute("UPDATE chemicals SET quantity_in_stock = quantity_in_stock - ? WHERE id=?", (qty, chem_id))
-    db.execute("INSERT INTO inventory_transactions(chemical_id,change,reason,reference) VALUES(?,?,?,?)",
-               (chem_id, -qty, "usage", f"visit:{vid}"))
+    with db.transaction() as cx:
+        uid = cx.execute("INSERT INTO chemical_usage(visit_id,chemical_id,quantity,area_treated) VALUES(?,?,?,?)",
+                         (vid, chem_id, qty, b.get("area_treated"))).lastrowid
+        cx.execute("UPDATE chemicals SET quantity_in_stock = quantity_in_stock - ? WHERE id=?", (qty, chem_id))
+        cx.execute("INSERT INTO inventory_transactions(chemical_id,change,reason,reference) VALUES(?,?,?,?)",
+                   (chem_id, -qty, "usage", f"visit:{vid}"))
     return db.query(
         "SELECT cu.*, ch.name_en, ch.name_ar, ch.unit FROM chemical_usage cu "
         "JOIN chemicals ch ON ch.id=cu.chemical_id WHERE cu.id=?", (uid,), one=True)
@@ -803,11 +933,12 @@ def delete_usage(ctx):
     row = db.query("SELECT * FROM chemical_usage WHERE id=?", (uid,), one=True)
     if not row:
         raise ApiError(404, "Not found")
-    db.execute("UPDATE chemicals SET quantity_in_stock = quantity_in_stock + ? WHERE id=?",
-               (row["quantity"], row["chemical_id"]))
-    db.execute("INSERT INTO inventory_transactions(chemical_id,change,reason,reference) VALUES(?,?,?,?)",
-               (row["chemical_id"], row["quantity"], "adjustment", f"usage-reversal:{uid}"))
-    db.execute("DELETE FROM chemical_usage WHERE id=?", (uid,))
+    with db.transaction() as cx:
+        cx.execute("UPDATE chemicals SET quantity_in_stock = quantity_in_stock + ? WHERE id=?",
+                   (row["quantity"], row["chemical_id"]))
+        cx.execute("INSERT INTO inventory_transactions(chemical_id,change,reason,reference) VALUES(?,?,?,?)",
+                   (row["chemical_id"], row["quantity"], "adjustment", f"usage-reversal:{uid}"))
+        cx.execute("DELETE FROM chemical_usage WHERE id=?", (uid,))
     return {"ok": True}
 
 
@@ -838,8 +969,7 @@ def list_invoices(ctx):
            "FROM invoices i JOIN clients c ON c.id=i.client_id")
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY i.issue_date DESC"
-    return db.query(sql, params)
+    return _paginate(ctx, sql, params, "ORDER BY i.issue_date DESC")
 
 
 @route("GET", r"/api/invoices/(\d+)")
@@ -862,17 +992,19 @@ def get_invoice(ctx):
     return inv
 
 
-def _save_items(iid, items):
-    """Replace an invoice's line items; return (amount) computed from them."""
-    db.execute("DELETE FROM invoice_items WHERE invoice_id=?", (iid,))
+def _save_items(iid, items, cx=None):
+    """Replace an invoice's line items; return the amount computed from them.
+    Pass cx to run inside an existing transaction; otherwise it self-commits."""
+    ex = cx.execute if cx is not None else db.execute
+    ex("DELETE FROM invoice_items WHERE invoice_id=?", (iid,))
     total = 0.0
     for it in items or []:
         qty = float(it.get("quantity", 1) or 1)
         price = float(it.get("unit_price", 0) or 0)
         amt = round(qty * price, 2)
         total += amt
-        db.execute("INSERT INTO invoice_items(invoice_id,description,quantity,unit_price,amount) "
-                   "VALUES(?,?,?,?,?)", (iid, it.get("description", ""), qty, price, amt))
+        ex("INSERT INTO invoice_items(invoice_id,description,quantity,unit_price,amount) "
+           "VALUES(?,?,?,?,?)", (iid, it.get("description", ""), qty, price, amt))
     return round(total, 2)
 
 
@@ -885,19 +1017,21 @@ def create_invoice(ctx):
     doc_type = b.get("doc_type", "invoice")
     items = b.get("items")
     number = b.get("number") or _next_invoice_number(doc_type)
-    iid = db.execute(
-        "INSERT INTO invoices(client_id,visit_id,contract_id,doc_type,number,issue_date,due_date,"
-        "valid_until,amount,tax,total,status,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (b["client_id"], b.get("visit_id"), b.get("contract_id"), doc_type, number,
-         b["issue_date"], b.get("due_date"), b.get("valid_until"), 0, 0, 0,
-         b.get("status", "draft"), b.get("notes")))
-    # amount: from items if provided, else flat amount
-    amount = _save_items(iid, items) if items else float(b.get("amount", 0))
     tax = float(b.get("tax", 0))
-    if b.get("tax_rate"):  # percentage helper
-        tax = round(amount * float(b["tax_rate"]) / 100, 2)
-    db.execute("UPDATE invoices SET amount=?, tax=?, total=? WHERE id=?",
-               (amount, tax, amount + tax, iid))
+    with db.transaction() as cx:
+        iid = cx.execute(
+            "INSERT INTO invoices(client_id,visit_id,contract_id,doc_type,number,issue_date,due_date,"
+            "valid_until,amount,tax,total,status,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (b["client_id"], b.get("visit_id"), b.get("contract_id"), doc_type, number,
+             b["issue_date"], b.get("due_date"), b.get("valid_until"), 0, 0, 0,
+             b.get("status", "draft"), b.get("notes"))).lastrowid
+        # amount: from items if provided, else flat amount
+        amount = _save_items(iid, items, cx) if items else float(b.get("amount", 0))
+        if b.get("tax_rate"):  # percentage helper
+            tax = round(amount * float(b["tax_rate"]) / 100, 2)
+        cx.execute("UPDATE invoices SET amount=?, tax=?, total=? WHERE id=?",
+                   (amount, tax, amount + tax, iid))
+    audit(ctx, "invoice.create", "invoice", iid, f"{doc_type} {number} total {amount + tax:g}")
     return db.query("SELECT * FROM invoices WHERE id=?", (iid,), one=True)
 
 
@@ -909,26 +1043,30 @@ def update_invoice(ctx):
     cur = db.query("SELECT * FROM invoices WHERE id=?", (iid,), one=True)
     if not cur:
         raise ApiError(404, "Not found")
-    if "items" in b:                       # items drive the amount
-        b["amount"] = _save_items(iid, b["items"])
-    if "amount" in b or "tax" in b:
-        amount = float(b.get("amount", cur["amount"]))
-        tax = float(b.get("tax", cur["tax"]))
-        b["amount"], b["tax"], b["total"] = amount, tax, amount + tax
-    cols = ("visit_id", "issue_date", "due_date", "valid_until", "amount", "tax",
-            "total", "status", "notes", "number", "doc_type")
-    fields = [f"{c}=?" for c in cols if c in b]
-    vals = [b[c] for c in cols if c in b]
-    if fields:
-        vals.append(iid)
-        db.execute(f"UPDATE invoices SET {','.join(fields)} WHERE id=?", vals)
+    with db.transaction() as cx:
+        if "items" in b:                       # items drive the amount
+            b["amount"] = _save_items(iid, b["items"], cx)
+        if "amount" in b or "tax" in b:
+            amount = float(b.get("amount", cur["amount"]))
+            tax = float(b.get("tax", cur["tax"]))
+            b["amount"], b["tax"], b["total"] = amount, tax, amount + tax
+        cols = ("visit_id", "issue_date", "due_date", "valid_until", "amount", "tax",
+                "total", "status", "notes", "number", "doc_type")
+        fields = [f"{c}=?" for c in cols if c in b]
+        vals = [b[c] for c in cols if c in b]
+        if fields:
+            vals.append(iid)
+            cx.execute(f"UPDATE invoices SET {','.join(fields)} WHERE id=?", vals)
+    audit(ctx, "invoice.update", "invoice", iid, ", ".join(k for k in b if k != "items"))
     return db.query("SELECT * FROM invoices WHERE id=?", (iid,), one=True)
 
 
 @route("DELETE", r"/api/invoices/(\d+)")
 def delete_invoice(ctx):
     require_perm(ctx.user, "invoices.delete")
-    db.execute("DELETE FROM invoices WHERE id=?", (int(ctx.params[0]),))
+    iid = int(ctx.params[0])
+    db.execute("DELETE FROM invoices WHERE id=?", (iid,))
+    audit(ctx, "invoice.delete", "invoice", iid)
     return {"ok": True}
 
 
@@ -940,13 +1078,16 @@ def add_payment(ctx):
     amount = float(b.get("amount", 0))
     if amount <= 0:
         raise ApiError(400, "Payment amount must be positive")
-    db.execute("INSERT INTO payments(invoice_id,amount,method,note) VALUES(?,?,?,?)",
-               (iid, amount, b.get("method", "cash"), b.get("note")))
-    # auto-mark paid if fully covered
-    inv = db.query("SELECT * FROM invoices WHERE id=?", (iid,), one=True)
-    paid = db.query("SELECT COALESCE(SUM(amount),0) p FROM payments WHERE invoice_id=?", (iid,), one=True)["p"]
-    if paid >= inv["total"] and inv["status"] != "cancelled":
-        db.execute("UPDATE invoices SET status='paid' WHERE id=?", (iid,))
+    with db.transaction() as cx:
+        cx.execute("INSERT INTO payments(invoice_id,amount,method,note) VALUES(?,?,?,?)",
+                   (iid, amount, b.get("method", "cash"), b.get("note")))
+        # auto-mark paid if fully covered
+        inv = cx.execute("SELECT total, status FROM invoices WHERE id=?", (iid,)).fetchone()
+        paid = cx.execute("SELECT COALESCE(SUM(amount),0) p FROM payments WHERE invoice_id=?",
+                          (iid,)).fetchone()["p"]
+        if inv and paid >= inv["total"] and inv["status"] != "cancelled":
+            cx.execute("UPDATE invoices SET status='paid' WHERE id=?", (iid,))
+    audit(ctx, "payment.create", "invoice", iid, f"{amount:g} via {b.get('method', 'cash')}")
     return get_invoice(Ctx(ctx.user, [str(iid)], {}, {}, b"", ""))
 
 
@@ -965,15 +1106,17 @@ def convert_quote(ctx):
     q = db.query("SELECT * FROM invoices WHERE id=?", (qid,), one=True)
     if not q or q["doc_type"] != "quote":
         raise ApiError(400, "Not a quote")
-    iid = db.execute(
-        "INSERT INTO invoices(client_id,visit_id,contract_id,doc_type,number,issue_date,due_date,"
-        "amount,tax,total,status,notes) VALUES(?,?,?,?,?,date('now'),date('now','+15 days'),?,?,?,?,?)",
-        (q["client_id"], q["visit_id"], q["contract_id"], "invoice", _next_invoice_number("invoice"),
-         q["amount"], q["tax"], q["total"], "draft", q["notes"]))
-    for it in db.query("SELECT * FROM invoice_items WHERE invoice_id=?", (qid,)):
-        db.execute("INSERT INTO invoice_items(invoice_id,description,quantity,unit_price,amount) "
-                   "VALUES(?,?,?,?,?)", (iid, it["description"], it["quantity"], it["unit_price"], it["amount"]))
-    db.execute("UPDATE invoices SET status='accepted' WHERE id=?", (qid,))
+    items = db.query("SELECT * FROM invoice_items WHERE invoice_id=?", (qid,))
+    with db.transaction() as cx:
+        iid = cx.execute(
+            "INSERT INTO invoices(client_id,visit_id,contract_id,doc_type,number,issue_date,due_date,"
+            "amount,tax,total,status,notes) VALUES(?,?,?,?,?,date('now'),date('now','+15 days'),?,?,?,?,?)",
+            (q["client_id"], q["visit_id"], q["contract_id"], "invoice", _next_invoice_number("invoice"),
+             q["amount"], q["tax"], q["total"], "draft", q["notes"])).lastrowid
+        for it in items:
+            cx.execute("INSERT INTO invoice_items(invoice_id,description,quantity,unit_price,amount) "
+                       "VALUES(?,?,?,?,?)", (iid, it["description"], it["quantity"], it["unit_price"], it["amount"]))
+        cx.execute("UPDATE invoices SET status='accepted' WHERE id=?", (qid,))
     return db.query("SELECT * FROM invoices WHERE id=?", (iid,), one=True)
 
 
@@ -1026,9 +1169,7 @@ def upload_logo(ctx):
     if not files:
         raise ApiError(400, "No file uploaded")
     f = files[0]
-    ext = os.path.splitext(f["filename"])[1].lower()
-    if ext not in ALLOWED_IMG:
-        raise ApiError(400, "Only image files are allowed")
+    ext = _validate_image_upload(f)
     fname = f"logo_{uuid.uuid4().hex}{ext}"
     with open(os.path.join(UPLOAD_DIR, fname), "wb") as out:
         out.write(f["data"])
@@ -1475,9 +1616,7 @@ def upload_photo(ctx):
         raise ApiError(400, "Valid entity_type and entity_id required")
     require_perm(ctx.user, _PHOTO_ENTITY_PERM[et])
     f = files[0]
-    ext = os.path.splitext(f["filename"])[1].lower()
-    if ext not in ALLOWED_IMG:
-        raise ApiError(400, "Only image files are allowed")
+    ext = _validate_image_upload(f)
     fname = f"{uuid.uuid4().hex}{ext}"
     with open(os.path.join(UPLOAD_DIR, fname), "wb") as out:
         out.write(f["data"])
@@ -1543,9 +1682,7 @@ def upload_map(ctx):
     if not cid:
         raise ApiError(400, "client_id required")
     f = files[0]
-    ext = os.path.splitext(f["filename"])[1].lower()
-    if ext not in ALLOWED_IMG:
-        raise ApiError(400, "Only image files are allowed")
+    ext = _validate_image_upload(f)
     fname = f"map_{uuid.uuid4().hex}{ext}"
     with open(os.path.join(UPLOAD_DIR, fname), "wb") as out:
         out.write(f["data"])
@@ -1661,12 +1798,12 @@ def search(ctx):
         vsql += " AND v.agent_id=?"
         vparams.append(u["id"])
     res["visits"] = db.query(vsql + " LIMIT 20", vparams)
-    if is_manager(u) or u["role"] == "agent":
+    if has_perm(u, "chemicals.view"):
         res["chemicals"] = db.query(
             "SELECT id,name_en,name_ar,quantity_in_stock,unit FROM chemicals "
             "WHERE name_en LIKE ? OR name_ar LIKE ? OR active_ingredient LIKE ? LIMIT 20",
             (like, like, like))
-    if is_manager(u):
+    if has_perm(u, "invoices.view"):
         res["invoices"] = db.query(
             "SELECT i.id,i.number,i.total,i.status,c.name_en client_en FROM invoices i "
             "JOIN clients c ON c.id=i.client_id WHERE i.number LIKE ? OR c.name_en LIKE ? LIMIT 20",
@@ -1735,6 +1872,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._serve_static(path)
 
         length = int(self.headers.get("Content-Length", 0) or 0)
+        # Reject oversized bodies before reading them into memory (multipart
+        # overhead allowed on top of the per-file image cap).
+        if length > MAX_UPLOAD_BYTES + 1024 * 1024:
+            return self._json(413, {"error": "Request body too large"})
         raw_body = self.rfile.read(length) if length else b""
         content_type = self.headers.get("Content-Type", "")
         body = {}
@@ -1757,7 +1898,8 @@ class Handler(BaseHTTPRequestHandler):
                 user = self._current_user()
                 if not user:
                     return self._json(401, {"error": "Authentication required"})
-            ctx = Ctx(user, list(match.groups()), query, body, raw_body, content_type)
+            client_ip = self.client_address[0] if self.client_address else None
+            ctx = Ctx(user, list(match.groups()), query, body, raw_body, content_type, ip=client_ip)
             try:
                 result = fn(ctx)
                 if isinstance(result, dict) and "_csv" in result:
@@ -1765,8 +1907,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, result)
             except ApiError as e:
                 return self._json(e.status, {"error": e.message})
-            except Exception as e:
-                return self._json(500, {"error": f"Server error: {e}"})
+            except Exception:
+                # Log the full traceback server-side; return only a reference id
+                # to the client so internals (SQL, paths) are never exposed.
+                err_id = uuid.uuid4().hex[:8]
+                print(f"[error {err_id}] {method} {path}", file=sys.stderr)
+                traceback.print_exc()
+                return self._json(500, {"error": "Internal server error", "error_id": err_id})
         return self._json(404, {"error": "Not found"})
 
     def do_GET(self):
@@ -1786,10 +1933,16 @@ class Handler(BaseHTTPRequestHandler):
         hdr = self.headers.get("Authorization", "")
         if not hdr.startswith("Bearer "):
             return None
-        uid = auth.verify_token(hdr[7:])
-        if not uid:
+        payload = auth.verify_token(hdr[7:])
+        if not payload:
             return None
-        return db.query("SELECT * FROM users WHERE id=? AND active=1", (uid,), one=True)
+        user = db.query("SELECT * FROM users WHERE id=? AND active=1", (payload["uid"],), one=True)
+        if not user:
+            return None
+        # Reject tokens issued before the user's token_version was bumped.
+        if (user["token_version"] or 0) != payload.get("tv", 0):
+            return None
+        return user
 
     def _json(self, status, payload):
         data = json.dumps(payload, default=str).encode()

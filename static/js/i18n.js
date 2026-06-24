@@ -158,6 +158,8 @@ const TRANSLATIONS = {
     mod_payments: "Payments", mod_contracts: "Contracts", mod_analytics: "Analytics",
     mod_certificates: "Certificates", mod_maps: "Site Maps & Devices", mod_users: "Users & Agents",
     mod_settings: "Settings", mod_permissions: "Permissions (RBAC)",
+    // pagination
+    prev: "Prev", next: "Next", page: "Page",
   },
   ar: {
     app_name: "نظام إدارة مكافحة الآفات",
@@ -299,6 +301,8 @@ const TRANSLATIONS = {
     mod_payments: "المدفوعات", mod_contracts: "العقود", mod_analytics: "التحليلات",
     mod_certificates: "الشهادات", mod_maps: "خرائط المواقع والأجهزة", mod_users: "المستخدمون والفنيون",
     mod_settings: "الإعدادات", mod_permissions: "الصلاحيات (RBAC)",
+    // pagination
+    prev: "السابق", next: "التالي", page: "صفحة",
   },
 };
 
