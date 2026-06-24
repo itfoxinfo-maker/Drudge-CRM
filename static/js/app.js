@@ -15,6 +15,22 @@ function role() { return API.user ? API.user.role : null; }
 function isManager() { return ["admin", "manager"].includes(role()); }
 function isStaff() { return ["admin", "manager", "agent"].includes(role()); }
 
+// ---- RBAC: permission checks driven by API.user.permissions ----
+// admin is always allowed; otherwise consult the resolved permission map.
+function can(perm) {
+  if (!API.user) return false;
+  if (API.user.role === "admin") return true;
+  const p = API.user.permissions || {};
+  return !!p[perm];
+}
+// True if the user has any action within a module (e.g. "invoices").
+function canModule(mod) {
+  if (!API.user) return false;
+  if (API.user.role === "admin") return true;
+  const p = API.user.permissions || {};
+  return Object.keys(p).some(k => k.startsWith(mod + ".") && p[k]);
+}
+
 // ---- caches for dropdowns ----
 const cache = { services: [], agents: [], clients: [], chemicals: [] };
 let SETTINGS = {};
@@ -52,7 +68,8 @@ async function boot() {
   setLang(LANG);
   applyStaticLabels();
   if (API.token && API.user) {
-    try { await API.get("/auth/me"); showApp(); }
+    // Refresh the profile so the resolved permission map is always current.
+    try { const me = await API.get("/auth/me"); API.setAuth(API.token, me); showApp(); }
     catch (e) { API.clearAuth(); showLogin(); }
   } else showLogin();
 }
@@ -104,21 +121,22 @@ $("quick-search").addEventListener("keydown", (e) => {
 function navItems() {
   const items = [{ k: "dashboard", i: "📊", t: "nav_dashboard" }];
   if (role() === "client") {
-    items.push({ k: "visits", i: "🗓️", t: "nav_visits" });
-    items.push({ k: "contracts", i: "🔁", t: "nav_contracts" });
-    items.push({ k: "invoices", i: "💳", t: "nav_invoices" });
-    items.push({ k: "certificates", i: "📄", t: "nav_certificates" });
+    if (can("visits.view")) items.push({ k: "visits", i: "🗓️", t: "nav_visits" });
+    if (can("contracts.view")) items.push({ k: "contracts", i: "🔁", t: "nav_contracts" });
+    if (can("invoices.view")) items.push({ k: "invoices", i: "💳", t: "nav_invoices" });
+    if (can("certificates.view")) items.push({ k: "certificates", i: "📄", t: "nav_certificates" });
     items.push({ k: "folder", i: "📁", t: "company_folder" });
   } else {
-    items.push({ k: "clients", i: "🏢", t: "nav_clients" });
-    items.push({ k: "schedule", i: "🗓️", t: "nav_schedule" });
-    items.push({ k: "calendar", i: "📅", t: "nav_calendar" });
-    if (isManager()) items.push({ k: "contracts", i: "🔁", t: "nav_contracts" });
-    if (isStaff()) items.push({ k: "chemicals", i: "🧪", t: "nav_chemicals" });
-    if (isManager()) items.push({ k: "invoices", i: "💳", t: "nav_invoices" });
-    if (isManager()) items.push({ k: "analytics", i: "📈", t: "nav_analytics" });
-    if (isManager()) items.push({ k: "agents", i: "👷", t: "nav_agents" });
-    if (isManager()) items.push({ k: "settings", i: "⚙️", t: "nav_settings" });
+    if (can("clients.view")) items.push({ k: "clients", i: "🏢", t: "nav_clients" });
+    if (can("visits.view")) items.push({ k: "schedule", i: "🗓️", t: "nav_schedule" });
+    if (can("calendar.view")) items.push({ k: "calendar", i: "📅", t: "nav_calendar" });
+    if (can("contracts.view")) items.push({ k: "contracts", i: "🔁", t: "nav_contracts" });
+    if (can("chemicals.view")) items.push({ k: "chemicals", i: "🧪", t: "nav_chemicals" });
+    if (can("invoices.view")) items.push({ k: "invoices", i: "💳", t: "nav_invoices" });
+    if (can("analytics.view")) items.push({ k: "analytics", i: "📈", t: "nav_analytics" });
+    if (can("users.view")) items.push({ k: "agents", i: "👷", t: "nav_agents" });
+    if (can("settings.view")) items.push({ k: "settings", i: "⚙️", t: "nav_settings" });
+    if (can("permissions.view")) items.push({ k: "permissions", i: "🛡️", t: "nav_permissions" });
   }
   items.push({ k: "search", i: "🔍", t: "nav_search" });
   return items;
@@ -153,6 +171,7 @@ async function navigate(view, arg) {
     else if (view === "contracts") await viewContracts(v);
     else if (view === "analytics") await viewAnalytics(v);
     else if (view === "settings") await viewSettings(v);
+    else if (view === "permissions") await viewPermissions(v, arg);
     else if (view === "certificates") await viewCertificates(v);
     else if (view === "search") await viewSearch(v, arg);
   } catch (e) {
@@ -1082,16 +1101,20 @@ async function viewCertificates(v) {
 // ====================================================================
 async function viewAgents(v) {
   const users = await API.get("/users");
+  const canPerms = can("permissions.edit");
   v.innerHTML = `<div class="page-head"><h2>${t("agents_title")}</h2>
-    <button class="btn" id="add-user">+ ${t("new_user")}</button></div>
+    ${can("users.create") ? `<button class="btn" id="add-user">+ ${t("new_user")}</button>` : ""}</div>
     <div class="panel"><table><thead><tr><th>${t("full_name")}</th><th>${t("email")}</th>
       <th>${t("role")}</th><th>${t("phone")}</th><th>${t("specialization")}</th><th>${t("actions")}</th></tr></thead>
       <tbody>${users.map(u => `<tr><td><strong>${esc(u.full_name)}</strong></td><td>${esc(u.email)}</td>
         <td>${t("role_" + u.role)}</td><td>${esc(u.phone || "—")}</td><td>${esc(u.specialization || "—")}</td>
-        <td><button class="link-btn sm" data-edit="${u.id}">${t("edit")}</button></td></tr>`).join("")}</tbody></table></div>`;
-  $("add-user").addEventListener("click", () => userForm());
+        <td>${can("users.edit") ? `<button class="link-btn sm" data-edit="${u.id}">${t("edit")}</button>` : ""}
+          ${canPerms && u.role !== "admin" ? `<button class="link-btn sm" data-perms="${u.id}">🛡️ ${t("permissions_title")}</button>` : ""}</td></tr>`).join("")}</tbody></table></div>`;
+  if ($("add-user")) $("add-user").addEventListener("click", () => userForm());
   v.querySelectorAll("[data-edit]").forEach(b => b.addEventListener("click", () =>
     userForm(users.find(u => u.id == b.dataset.edit))));
+  v.querySelectorAll("[data-perms]").forEach(b => b.addEventListener("click", () =>
+    navigate("permissions", { tab: "user", userId: b.dataset.perms })));
 }
 
 function userForm(u) {
@@ -1120,6 +1143,154 @@ function userForm(u) {
         closeModal(); cache.clients = await API.get("/clients"); navigate("agents"); }
       catch (err) { alert(err.message); }
     });
+  });
+}
+
+// ====================================================================
+// Permissions (RBAC) — role defaults + per-user overrides
+// ====================================================================
+const PERM_COLS = ["view", "create", "edit", "delete"];
+let _permCatalog = null;
+
+async function loadPermCatalog() {
+  if (!_permCatalog) _permCatalog = await API.get("/permissions/catalog");
+  return _permCatalog;
+}
+
+// Re-fetch my own profile so nav reflects any change to my role/user perms.
+async function refreshMyPerms() {
+  try { const me = await API.get("/auth/me"); API.setAuth(API.token, me); renderNav(); } catch (e) {}
+}
+
+function permMatrixHTML(catalog, effective, opts) {
+  const ovr = opts.overrides || {};
+  const rows = catalog.map(m => {
+    const cells = PERM_COLS.map(act => {
+      if (!m.actions.includes(act)) return `<td class="pcell na"></td>`;
+      const perm = m.module + "." + act;
+      const checked = effective[perm] ? "checked" : "";
+      const over = (perm in ovr) ? " overridden" : "";
+      const dis = opts.editable ? "" : "disabled";
+      return `<td class="pcell${over}" title="${over ? t('perms_overridden') : ''}">
+        <input type="checkbox" data-perm="${perm}" ${checked} ${dis}></td>`;
+    }).join("");
+    const rowToggle = opts.editable
+      ? `<input type="checkbox" class="prow" data-mod="${m.module}" title="${t('perms_all')}"> ` : "";
+    return `<tr><td class="pmod">${rowToggle}${t("mod_" + m.module)}</td>${cells}</tr>`;
+  }).join("");
+  return `<table class="perm-table"><thead><tr><th>${t("perms_feature")}</th>
+    ${PERM_COLS.map(c => `<th>${t("col_" + c)}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function collectPerms(wrap) {
+  const o = {};
+  wrap.querySelectorAll("input[data-perm]").forEach(c => { o[c.dataset.perm] = c.checked; });
+  return o;
+}
+
+// Module master checkbox toggles every action in its row, and stays in sync.
+function wirePermRowToggles(wrap) {
+  wrap.querySelectorAll("input.prow").forEach(rc => {
+    const mod = rc.dataset.mod;
+    const cells = () => [...wrap.querySelectorAll(`input[data-perm^="${mod}."]`)];
+    const sync = () => { const cs = cells(); rc.checked = cs.length > 0 && cs.every(c => c.checked); };
+    sync();
+    rc.addEventListener("change", () => cells().forEach(c => { c.checked = rc.checked; }));
+    cells().forEach(c => c.addEventListener("change", sync));
+  });
+}
+
+async function viewPermissions(v, arg) {
+  if (!can("permissions.view")) { v.innerHTML = `<div class="empty">${t("perms_admin_note")}</div>`; return; }
+  const cat = await loadPermCatalog();
+  const tab = (arg && arg.tab) || "roles";
+  v.innerHTML = `<div class="page-head"><h2>🛡️ ${t("permissions_title")}</h2></div>
+    <div class="tabs">
+      <button class="tab ${tab === "roles" ? "active" : ""}" data-tab="roles">${t("perms_roles_tab")}</button>
+      <button class="tab ${tab === "user" ? "active" : ""}" data-tab="user">${t("perms_users_tab")}</button>
+    </div><div id="perm-body">${t("loading")}</div>`;
+  v.querySelectorAll(".tab").forEach(b =>
+    b.addEventListener("click", () => navigate("permissions", { tab: b.dataset.tab })));
+  if (tab === "user") await permUsersTab(cat, arg);
+  else await permRolesTab(cat, arg);
+}
+
+async function permRolesTab(cat, arg) {
+  const sel = (arg && arg.role) || "manager";
+  $("perm-body").innerHTML = `<div class="panel">
+    <div class="toolbar"><label>${t("perms_role_label")}:
+      <select id="perm-role">${cat.roles.map(r =>
+        `<option value="${r}" ${r === sel ? "selected" : ""}>${t("role_" + r)}</option>`).join("")}</select></label></div>
+    <div id="perm-matrix"></div></div>`;
+  $("perm-role").addEventListener("change", e =>
+    navigate("permissions", { tab: "roles", role: e.target.value }));
+  renderRoleMatrix(cat, sel);
+}
+
+function renderRoleMatrix(cat, roleName) {
+  const wrap = $("perm-matrix");
+  const eff = cat.roles_effective[roleName];
+  const editable = can("permissions.edit") && roleName !== "admin";
+  const intro = roleName === "admin" ? t("perms_admin_note") : t("perms_role_intro");
+  wrap.innerHTML = `<p class="muted">${intro}</p>` +
+    permMatrixHTML(cat.catalog, eff, { editable, overrides: cat.role_overrides[roleName] }) +
+    (editable ? `<div class="form-actions"><button class="btn" id="perm-save">${t("perms_save")}</button></div>` : "");
+  wirePermRowToggles(wrap);
+  if (editable) $("perm-save").addEventListener("click", async () => {
+    try {
+      await API.put("/permissions/roles/" + roleName, { perms: collectPerms(wrap) });
+      _permCatalog = null;
+      toast(t("perms_saved"));
+      await refreshMyPerms();
+    } catch (err) { alert(err.message); }
+  });
+}
+
+async function permUsersTab(cat, arg) {
+  const users = (await API.get("/users")).filter(u => u.role !== "admin");
+  const selId = (arg && arg.userId) || "";
+  $("perm-body").innerHTML = `<div class="panel">
+    <div class="toolbar"><label>${t("perms_user_label")}:
+      <select id="perm-user"><option value="">${t("perms_select_user")}</option>
+        ${users.map(u => `<option value="${u.id}" ${String(u.id) === String(selId) ? "selected" : ""}>${esc(u.full_name)} — ${t("role_" + u.role)}</option>`).join("")}</select></label></div>
+    <div id="perm-matrix"></div></div>`;
+  $("perm-user").addEventListener("change", e =>
+    navigate("permissions", { tab: "user", userId: e.target.value }));
+  if (selId) await renderUserMatrix(cat, selId);
+}
+
+async function renderUserMatrix(cat, userId) {
+  const wrap = $("perm-matrix");
+  const data = await API.get("/permissions/users/" + userId);
+  const editable = can("permissions.edit");
+  wrap.innerHTML = `<p class="muted">${t("perms_user_intro")}</p>` +
+    permMatrixHTML(cat.catalog, data.effective, { editable, overrides: data.overrides }) +
+    (editable ? `<div class="form-actions">
+      <button class="btn secondary" id="perm-reset">${t("perms_reset_user")}</button>
+      <button class="btn" id="perm-save">${t("perms_save")}</button></div>` : "");
+  wirePermRowToggles(wrap);
+  if (!editable) return;
+  $("perm-save").addEventListener("click", async () => {
+    // Store an override only where the chosen value differs from the role default;
+    // anything matching the role is sent as null to clear/inherit.
+    const cur = collectPerms(wrap), base = data.role_effective, perms = {};
+    Object.keys(cur).forEach(p => { perms[p] = (cur[p] === !!base[p]) ? null : cur[p]; });
+    try {
+      await API.put("/permissions/users/" + userId, { perms });
+      toast(t("perms_saved"));
+      await refreshMyPerms();
+      navigate("permissions", { tab: "user", userId });
+    } catch (err) { alert(err.message); }
+  });
+  $("perm-reset").addEventListener("click", async () => {
+    const perms = {};
+    Object.keys(data.effective).forEach(p => { perms[p] = null; });
+    try {
+      await API.put("/permissions/users/" + userId, { perms });
+      toast(t("perms_saved"));
+      await refreshMyPerms();
+      navigate("permissions", { tab: "user", userId });
+    } catch (err) { alert(err.message); }
   });
 }
 
