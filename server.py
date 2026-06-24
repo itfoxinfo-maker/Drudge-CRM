@@ -758,9 +758,10 @@ def adjust_stock(ctx):
     reason = b.get("reason", "adjustment")
     if reason not in ("purchase", "adjustment"):
         raise ApiError(400, "Invalid reason")
-    db.execute("UPDATE chemicals SET quantity_in_stock = quantity_in_stock + ? WHERE id=?", (change, cid))
-    db.execute("INSERT INTO inventory_transactions(chemical_id,change,reason,note) VALUES(?,?,?,?)",
-               (cid, change, reason, b.get("note")))
+    with db.transaction() as cx:
+        cx.execute("UPDATE chemicals SET quantity_in_stock = quantity_in_stock + ? WHERE id=?", (change, cid))
+        cx.execute("INSERT INTO inventory_transactions(chemical_id,change,reason,note) VALUES(?,?,?,?)",
+                   (cid, change, reason, b.get("note")))
     return db.query("SELECT * FROM chemicals WHERE id=?", (cid,), one=True)
 
 
@@ -786,11 +787,12 @@ def record_usage(ctx):
     qty = float(b.get("quantity", 0))
     if not chem_id or qty <= 0:
         raise ApiError(400, "Chemical and a positive quantity are required")
-    uid = db.execute("INSERT INTO chemical_usage(visit_id,chemical_id,quantity,area_treated) VALUES(?,?,?,?)",
-                     (vid, chem_id, qty, b.get("area_treated")))
-    db.execute("UPDATE chemicals SET quantity_in_stock = quantity_in_stock - ? WHERE id=?", (qty, chem_id))
-    db.execute("INSERT INTO inventory_transactions(chemical_id,change,reason,reference) VALUES(?,?,?,?)",
-               (chem_id, -qty, "usage", f"visit:{vid}"))
+    with db.transaction() as cx:
+        uid = cx.execute("INSERT INTO chemical_usage(visit_id,chemical_id,quantity,area_treated) VALUES(?,?,?,?)",
+                         (vid, chem_id, qty, b.get("area_treated"))).lastrowid
+        cx.execute("UPDATE chemicals SET quantity_in_stock = quantity_in_stock - ? WHERE id=?", (qty, chem_id))
+        cx.execute("INSERT INTO inventory_transactions(chemical_id,change,reason,reference) VALUES(?,?,?,?)",
+                   (chem_id, -qty, "usage", f"visit:{vid}"))
     return db.query(
         "SELECT cu.*, ch.name_en, ch.name_ar, ch.unit FROM chemical_usage cu "
         "JOIN chemicals ch ON ch.id=cu.chemical_id WHERE cu.id=?", (uid,), one=True)
@@ -803,11 +805,12 @@ def delete_usage(ctx):
     row = db.query("SELECT * FROM chemical_usage WHERE id=?", (uid,), one=True)
     if not row:
         raise ApiError(404, "Not found")
-    db.execute("UPDATE chemicals SET quantity_in_stock = quantity_in_stock + ? WHERE id=?",
-               (row["quantity"], row["chemical_id"]))
-    db.execute("INSERT INTO inventory_transactions(chemical_id,change,reason,reference) VALUES(?,?,?,?)",
-               (row["chemical_id"], row["quantity"], "adjustment", f"usage-reversal:{uid}"))
-    db.execute("DELETE FROM chemical_usage WHERE id=?", (uid,))
+    with db.transaction() as cx:
+        cx.execute("UPDATE chemicals SET quantity_in_stock = quantity_in_stock + ? WHERE id=?",
+                   (row["quantity"], row["chemical_id"]))
+        cx.execute("INSERT INTO inventory_transactions(chemical_id,change,reason,reference) VALUES(?,?,?,?)",
+                   (row["chemical_id"], row["quantity"], "adjustment", f"usage-reversal:{uid}"))
+        cx.execute("DELETE FROM chemical_usage WHERE id=?", (uid,))
     return {"ok": True}
 
 
@@ -862,17 +865,19 @@ def get_invoice(ctx):
     return inv
 
 
-def _save_items(iid, items):
-    """Replace an invoice's line items; return (amount) computed from them."""
-    db.execute("DELETE FROM invoice_items WHERE invoice_id=?", (iid,))
+def _save_items(iid, items, cx=None):
+    """Replace an invoice's line items; return the amount computed from them.
+    Pass cx to run inside an existing transaction; otherwise it self-commits."""
+    ex = cx.execute if cx is not None else db.execute
+    ex("DELETE FROM invoice_items WHERE invoice_id=?", (iid,))
     total = 0.0
     for it in items or []:
         qty = float(it.get("quantity", 1) or 1)
         price = float(it.get("unit_price", 0) or 0)
         amt = round(qty * price, 2)
         total += amt
-        db.execute("INSERT INTO invoice_items(invoice_id,description,quantity,unit_price,amount) "
-                   "VALUES(?,?,?,?,?)", (iid, it.get("description", ""), qty, price, amt))
+        ex("INSERT INTO invoice_items(invoice_id,description,quantity,unit_price,amount) "
+           "VALUES(?,?,?,?,?)", (iid, it.get("description", ""), qty, price, amt))
     return round(total, 2)
 
 
@@ -885,19 +890,20 @@ def create_invoice(ctx):
     doc_type = b.get("doc_type", "invoice")
     items = b.get("items")
     number = b.get("number") or _next_invoice_number(doc_type)
-    iid = db.execute(
-        "INSERT INTO invoices(client_id,visit_id,contract_id,doc_type,number,issue_date,due_date,"
-        "valid_until,amount,tax,total,status,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (b["client_id"], b.get("visit_id"), b.get("contract_id"), doc_type, number,
-         b["issue_date"], b.get("due_date"), b.get("valid_until"), 0, 0, 0,
-         b.get("status", "draft"), b.get("notes")))
-    # amount: from items if provided, else flat amount
-    amount = _save_items(iid, items) if items else float(b.get("amount", 0))
     tax = float(b.get("tax", 0))
-    if b.get("tax_rate"):  # percentage helper
-        tax = round(amount * float(b["tax_rate"]) / 100, 2)
-    db.execute("UPDATE invoices SET amount=?, tax=?, total=? WHERE id=?",
-               (amount, tax, amount + tax, iid))
+    with db.transaction() as cx:
+        iid = cx.execute(
+            "INSERT INTO invoices(client_id,visit_id,contract_id,doc_type,number,issue_date,due_date,"
+            "valid_until,amount,tax,total,status,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (b["client_id"], b.get("visit_id"), b.get("contract_id"), doc_type, number,
+             b["issue_date"], b.get("due_date"), b.get("valid_until"), 0, 0, 0,
+             b.get("status", "draft"), b.get("notes"))).lastrowid
+        # amount: from items if provided, else flat amount
+        amount = _save_items(iid, items, cx) if items else float(b.get("amount", 0))
+        if b.get("tax_rate"):  # percentage helper
+            tax = round(amount * float(b["tax_rate"]) / 100, 2)
+        cx.execute("UPDATE invoices SET amount=?, tax=?, total=? WHERE id=?",
+                   (amount, tax, amount + tax, iid))
     return db.query("SELECT * FROM invoices WHERE id=?", (iid,), one=True)
 
 
@@ -909,19 +915,20 @@ def update_invoice(ctx):
     cur = db.query("SELECT * FROM invoices WHERE id=?", (iid,), one=True)
     if not cur:
         raise ApiError(404, "Not found")
-    if "items" in b:                       # items drive the amount
-        b["amount"] = _save_items(iid, b["items"])
-    if "amount" in b or "tax" in b:
-        amount = float(b.get("amount", cur["amount"]))
-        tax = float(b.get("tax", cur["tax"]))
-        b["amount"], b["tax"], b["total"] = amount, tax, amount + tax
-    cols = ("visit_id", "issue_date", "due_date", "valid_until", "amount", "tax",
-            "total", "status", "notes", "number", "doc_type")
-    fields = [f"{c}=?" for c in cols if c in b]
-    vals = [b[c] for c in cols if c in b]
-    if fields:
-        vals.append(iid)
-        db.execute(f"UPDATE invoices SET {','.join(fields)} WHERE id=?", vals)
+    with db.transaction() as cx:
+        if "items" in b:                       # items drive the amount
+            b["amount"] = _save_items(iid, b["items"], cx)
+        if "amount" in b or "tax" in b:
+            amount = float(b.get("amount", cur["amount"]))
+            tax = float(b.get("tax", cur["tax"]))
+            b["amount"], b["tax"], b["total"] = amount, tax, amount + tax
+        cols = ("visit_id", "issue_date", "due_date", "valid_until", "amount", "tax",
+                "total", "status", "notes", "number", "doc_type")
+        fields = [f"{c}=?" for c in cols if c in b]
+        vals = [b[c] for c in cols if c in b]
+        if fields:
+            vals.append(iid)
+            cx.execute(f"UPDATE invoices SET {','.join(fields)} WHERE id=?", vals)
     return db.query("SELECT * FROM invoices WHERE id=?", (iid,), one=True)
 
 
@@ -940,13 +947,15 @@ def add_payment(ctx):
     amount = float(b.get("amount", 0))
     if amount <= 0:
         raise ApiError(400, "Payment amount must be positive")
-    db.execute("INSERT INTO payments(invoice_id,amount,method,note) VALUES(?,?,?,?)",
-               (iid, amount, b.get("method", "cash"), b.get("note")))
-    # auto-mark paid if fully covered
-    inv = db.query("SELECT * FROM invoices WHERE id=?", (iid,), one=True)
-    paid = db.query("SELECT COALESCE(SUM(amount),0) p FROM payments WHERE invoice_id=?", (iid,), one=True)["p"]
-    if paid >= inv["total"] and inv["status"] != "cancelled":
-        db.execute("UPDATE invoices SET status='paid' WHERE id=?", (iid,))
+    with db.transaction() as cx:
+        cx.execute("INSERT INTO payments(invoice_id,amount,method,note) VALUES(?,?,?,?)",
+                   (iid, amount, b.get("method", "cash"), b.get("note")))
+        # auto-mark paid if fully covered
+        inv = cx.execute("SELECT total, status FROM invoices WHERE id=?", (iid,)).fetchone()
+        paid = cx.execute("SELECT COALESCE(SUM(amount),0) p FROM payments WHERE invoice_id=?",
+                          (iid,)).fetchone()["p"]
+        if inv and paid >= inv["total"] and inv["status"] != "cancelled":
+            cx.execute("UPDATE invoices SET status='paid' WHERE id=?", (iid,))
     return get_invoice(Ctx(ctx.user, [str(iid)], {}, {}, b"", ""))
 
 
@@ -965,15 +974,17 @@ def convert_quote(ctx):
     q = db.query("SELECT * FROM invoices WHERE id=?", (qid,), one=True)
     if not q or q["doc_type"] != "quote":
         raise ApiError(400, "Not a quote")
-    iid = db.execute(
-        "INSERT INTO invoices(client_id,visit_id,contract_id,doc_type,number,issue_date,due_date,"
-        "amount,tax,total,status,notes) VALUES(?,?,?,?,?,date('now'),date('now','+15 days'),?,?,?,?,?)",
-        (q["client_id"], q["visit_id"], q["contract_id"], "invoice", _next_invoice_number("invoice"),
-         q["amount"], q["tax"], q["total"], "draft", q["notes"]))
-    for it in db.query("SELECT * FROM invoice_items WHERE invoice_id=?", (qid,)):
-        db.execute("INSERT INTO invoice_items(invoice_id,description,quantity,unit_price,amount) "
-                   "VALUES(?,?,?,?,?)", (iid, it["description"], it["quantity"], it["unit_price"], it["amount"]))
-    db.execute("UPDATE invoices SET status='accepted' WHERE id=?", (qid,))
+    items = db.query("SELECT * FROM invoice_items WHERE invoice_id=?", (qid,))
+    with db.transaction() as cx:
+        iid = cx.execute(
+            "INSERT INTO invoices(client_id,visit_id,contract_id,doc_type,number,issue_date,due_date,"
+            "amount,tax,total,status,notes) VALUES(?,?,?,?,?,date('now'),date('now','+15 days'),?,?,?,?,?)",
+            (q["client_id"], q["visit_id"], q["contract_id"], "invoice", _next_invoice_number("invoice"),
+             q["amount"], q["tax"], q["total"], "draft", q["notes"])).lastrowid
+        for it in items:
+            cx.execute("INSERT INTO invoice_items(invoice_id,description,quantity,unit_price,amount) "
+                       "VALUES(?,?,?,?,?)", (iid, it["description"], it["quantity"], it["unit_price"], it["amount"]))
+        cx.execute("UPDATE invoices SET status='accepted' WHERE id=?", (qid,))
     return db.query("SELECT * FROM invoices WHERE id=?", (iid,), one=True)
 
 

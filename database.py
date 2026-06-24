@@ -5,6 +5,7 @@ demo data is seeded by seed.py.
 """
 import sqlite3
 import os
+import contextlib
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("PESTCRM_DATA_DIR", os.path.join(BASE_DIR, "data"))
@@ -358,10 +359,36 @@ def _migrate(conn):
 
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
+    # timeout lets a writer wait instead of failing instantly on a locked DB.
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # WAL allows concurrent readers alongside a writer (ThreadingHTTPServer);
+    # busy_timeout makes contending writers wait up to 5s rather than erroring.
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
+
+
+@contextlib.contextmanager
+def transaction():
+    """Run several statements on one connection, committed atomically.
+
+    Usage:
+        with db.transaction() as cx:
+            cx.execute(...); cx.execute(...)
+    On any exception the whole block is rolled back. cx.execute returns the
+    cursor, so cx.execute(...).lastrowid gives the new id.
+    """
+    conn = get_conn()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def _backfill_marker_events(conn):

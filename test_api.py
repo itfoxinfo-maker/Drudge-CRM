@@ -124,8 +124,10 @@ def main():
         check("search finds client", len(sr["clients"]) >= 1)
         st, csv = call("GET", "/export/clients.csv", admin, raw=True)
         check("csv export works", st == 200 and b"name_en" in csv)
-        st, _ = call("GET", "/export/clients.csv", agent)
-        check("csv export blocked for agent (403)", st == 403)
+        # Agents have clients.view by default, so they may export clients;
+        # but they lack invoices.view, so invoice export is forbidden.
+        st, _ = call("GET", "/export/invoices.csv", agent)
+        check("invoice csv export blocked for agent (403)", st == 403)
 
     finally:
         proc.terminate()
