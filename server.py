@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import uuid
+import traceback
 import mimetypes
 from urllib.parse import urlparse, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1776,8 +1777,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, result)
             except ApiError as e:
                 return self._json(e.status, {"error": e.message})
-            except Exception as e:
-                return self._json(500, {"error": f"Server error: {e}"})
+            except Exception:
+                # Log the full traceback server-side; return only a reference id
+                # to the client so internals (SQL, paths) are never exposed.
+                err_id = uuid.uuid4().hex[:8]
+                print(f"[error {err_id}] {method} {path}", file=sys.stderr)
+                traceback.print_exc()
+                return self._json(500, {"error": "Internal server error", "error_id": err_id})
         return self._json(404, {"error": "Not found"})
 
     def do_GET(self):
