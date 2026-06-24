@@ -286,6 +286,24 @@ CREATE INDEX IF NOT EXISTS idx_items_invoice ON invoice_items(invoice_id);
 CREATE INDEX IF NOT EXISTS idx_contracts_client ON contracts(client_id);
 CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications(user_id, is_read);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_notif_dedup ON notifications(dedup_key);
+
+-- RBAC: per-role default permissions. A row overrides the code default for
+-- (role, perm). Absence of a row means "use the built-in default".
+CREATE TABLE IF NOT EXISTS role_permissions (
+    role    TEXT NOT NULL CHECK (role IN ('admin','manager','agent','client')),
+    perm    TEXT NOT NULL,
+    allowed INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (role, perm)
+);
+
+-- RBAC: per-user overrides. A row overrides whatever the user's role resolves
+-- to for (user_id, perm). Absence of a row means "inherit from role".
+CREATE TABLE IF NOT EXISTS user_permissions (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    perm    TEXT NOT NULL,
+    allowed INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, perm)
+);
 """
 
 # Additive migrations for databases created by an earlier version.

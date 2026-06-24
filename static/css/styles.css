@@ -328,3 +328,21 @@ tr.clickable:hover { background: var(--green-l); }
 }
 .login-screen::before { background: #38bdf8; }
 .login-screen::after { background: #22d3ee; }
+
+/* ---- RBAC permissions matrix ---- */
+.tabs { display: flex; gap: 6px; margin-bottom: 16px; border-bottom: 2px solid var(--line); }
+.tabs .tab {
+  padding: 9px 16px; border: none; background: none; font: inherit; cursor: pointer;
+  color: var(--muted); font-weight: 600; border-bottom: 2px solid transparent; margin-bottom: -2px;
+}
+.tabs .tab.active { color: var(--green); border-bottom-color: var(--green); }
+.perm-table { width: 100%; border-collapse: collapse; }
+.perm-table th, .perm-table td { padding: 9px 10px; border-bottom: 1px solid var(--line); text-align: center; }
+.perm-table th:first-child, .perm-table td.pmod { text-align: start; }
+.perm-table thead th { font-size: 12px; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); }
+.perm-table td.pmod { font-weight: 600; white-space: nowrap; }
+.perm-table input[type="checkbox"] { width: 17px; height: 17px; cursor: pointer; accent-color: var(--green); }
+.perm-table input.prow { width: 14px; height: 14px; accent-color: var(--muted); vertical-align: middle; }
+.perm-table tbody tr:hover { background: #f7fafc; }
+.pcell.overridden { background: var(--amber-l); border-radius: 6px; }
+.pcell.na { background: repeating-linear-gradient(45deg, transparent, transparent 4px, #f1f5f9 4px, #f1f5f9 8px); }

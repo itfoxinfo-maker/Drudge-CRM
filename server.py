@@ -73,6 +73,119 @@ def client_scope_id(user):
 
 
 # --------------------------------------------------------------------------
+# RBAC: feature catalog, role defaults and permission resolution
+# --------------------------------------------------------------------------
+# The catalog drives both the admin matrix UI and backend enforcement.
+# Each module exposes a set of actions; a permission key is "module.action".
+PERMISSION_CATALOG = [
+    {"module": "dashboard",    "actions": ["view"]},
+    {"module": "clients",      "actions": ["view", "create", "edit", "delete"]},
+    {"module": "visits",       "actions": ["view", "create", "edit", "delete"]},
+    {"module": "calendar",     "actions": ["view"]},
+    {"module": "chemicals",    "actions": ["view", "create", "edit", "delete"]},
+    {"module": "invoices",     "actions": ["view", "create", "edit", "delete"]},
+    {"module": "payments",     "actions": ["view", "create", "delete"]},
+    {"module": "contracts",    "actions": ["view", "create", "edit", "delete"]},
+    {"module": "analytics",    "actions": ["view"]},
+    {"module": "certificates", "actions": ["view"]},
+    {"module": "maps",         "actions": ["view", "create", "edit", "delete"]},
+    {"module": "users",        "actions": ["view", "create", "edit", "delete"]},
+    {"module": "settings",     "actions": ["view", "edit"]},
+    {"module": "permissions",  "actions": ["view", "edit"]},
+]
+
+ROLES = ["admin", "manager", "agent", "client"]
+
+
+def all_perms():
+    return [f"{m['module']}.{a}" for m in PERMISSION_CATALOG for a in m["actions"]]
+
+
+def _expand(spec):
+    """Build a {perm: bool} map for a role from a compact spec.
+    spec maps module -> True (all actions) | False (none) | list-of-actions.
+    Any module not mentioned defaults to no access.
+    """
+    out = {}
+    for m in PERMISSION_CATALOG:
+        rule = spec.get(m["module"], False)
+        for a in m["actions"]:
+            if rule is True:
+                out[f"{m['module']}.{a}"] = True
+            elif rule is False:
+                out[f"{m['module']}.{a}"] = False
+            else:
+                out[f"{m['module']}.{a}"] = a in rule
+    return out
+
+
+# Built-in per-role defaults. admin is a superuser (also hard-bypassed below).
+ROLE_DEFAULTS = {
+    "admin": _expand({m["module"]: True for m in PERMISSION_CATALOG}),
+    "manager": _expand({
+        "dashboard": True, "clients": True, "visits": True, "calendar": True,
+        "chemicals": True, "invoices": True, "payments": True, "contracts": True,
+        "analytics": True, "certificates": True, "maps": True, "users": True,
+        "settings": True, "permissions": False,
+    }),
+    "agent": _expand({
+        "dashboard": ["view"], "clients": ["view"], "visits": ["view", "edit"],
+        "calendar": ["view"], "chemicals": ["view"], "certificates": ["view"],
+        "maps": ["view", "create", "edit"],
+    }),
+    "client": _expand({
+        "dashboard": ["view"], "visits": ["view"], "invoices": ["view"],
+        "contracts": ["view"], "certificates": ["view"],
+    }),
+}
+
+
+def _role_overrides(role):
+    return {r["perm"]: bool(r["allowed"])
+            for r in db.query("SELECT perm, allowed FROM role_permissions WHERE role=?", (role,))}
+
+
+def _user_overrides(user_id):
+    return {r["perm"]: bool(r["allowed"])
+            for r in db.query("SELECT perm, allowed FROM user_permissions WHERE user_id=?", (user_id,))}
+
+
+def effective_role_perms(role):
+    """Resolved {perm: bool} for a role = defaults overlaid with role overrides."""
+    perms = dict(ROLE_DEFAULTS.get(role, {}))
+    perms.update(_role_overrides(role))
+    return perms
+
+
+def effective_user_perms(user):
+    """Resolved {perm: bool} for a specific user = role perms + user overrides.
+    admin is always granted everything."""
+    if user["role"] == "admin":
+        return {p: True for p in all_perms()}
+    perms = effective_role_perms(user["role"])
+    perms.update(_user_overrides(user["id"]))
+    return perms
+
+
+def has_perm(user, perm):
+    if user["role"] == "admin":
+        return True
+    return effective_user_perms(user).get(perm, False)
+
+
+def require_perm(user, perm):
+    if not has_perm(user, perm):
+        raise ApiError(403, "You do not have permission for this action")
+
+
+# A photo's required permission depends on the entity it is attached to.
+_PHOTO_ENTITY_PERM = {
+    "client": "clients.edit", "report": "visits.edit",
+    "visit": "visits.edit", "chemical": "chemicals.edit",
+}
+
+
+# --------------------------------------------------------------------------
 # AUTH
 # --------------------------------------------------------------------------
 @route("POST", r"/api/auth/login", auth_required=False)
@@ -83,12 +196,17 @@ def login(ctx):
     if not user or not auth.verify_password(password, user["password_hash"]):
         raise ApiError(401, "Invalid email or password")
     token = auth.make_token(user["id"])
-    return {"token": token, "user": _public_user(user)}
+    return {"token": token, "user": _me_payload(user)}
 
 
 @route("GET", r"/api/auth/me")
 def me(ctx):
-    return _public_user(ctx.user)
+    return _me_payload(ctx.user)
+
+
+def _me_payload(u):
+    """Public profile plus the user's resolved permission map (for UI gating)."""
+    return _public_user(u) | {"permissions": effective_user_perms(u)}
 
 
 def _public_user(u):
@@ -142,7 +260,7 @@ def dashboard(ctx):
 # --------------------------------------------------------------------------
 @route("GET", r"/api/users")
 def list_users(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "users.view")
     role = ctx.query.get("role")
     if role:
         rows = db.query("SELECT * FROM users WHERE role=? ORDER BY full_name", (role,))
@@ -153,14 +271,14 @@ def list_users(ctx):
 
 @route("GET", r"/api/agents")
 def list_agents(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "users.view")
     rows = db.query("SELECT * FROM users WHERE role='agent' AND active=1 ORDER BY full_name")
     return [_public_user(r) | {"hire_date": r["hire_date"]} for r in rows]
 
 
 @route("POST", r"/api/users")
 def create_user(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "users.create")
     b = ctx.body
     if not b.get("email") or not b.get("password") or not b.get("full_name"):
         raise ApiError(400, "Name, email and password are required")
@@ -179,7 +297,7 @@ def create_user(ctx):
 
 @route("PUT", r"/api/users/(\d+)")
 def update_user(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "users.edit")
     uid = int(ctx.params[0])
     b = ctx.body
     fields, vals = [], []
@@ -199,9 +317,94 @@ def update_user(ctx):
 
 @route("DELETE", r"/api/users/(\d+)")
 def deactivate_user(ctx):
-    require(ctx.user, "admin")
+    require_perm(ctx.user, "users.delete")
     db.execute("UPDATE users SET active=0 WHERE id=?", (int(ctx.params[0]),))
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------
+# RBAC — roles & per-user permission management (admin only)
+# --------------------------------------------------------------------------
+@route("GET", r"/api/permissions/catalog")
+def permissions_catalog(ctx):
+    require_perm(ctx.user, "permissions.view")
+    return {
+        "catalog": PERMISSION_CATALOG,
+        "roles": ROLES,
+        "defaults": ROLE_DEFAULTS,
+        # Effective (defaults + saved overrides) matrix for every role.
+        "roles_effective": {r: effective_role_perms(r) for r in ROLES},
+        "role_overrides": {r: _role_overrides(r) for r in ROLES},
+    }
+
+
+@route("PUT", r"/api/permissions/roles/(\w+)")
+def update_role_permissions(ctx):
+    require_perm(ctx.user, "permissions.edit")
+    role = ctx.params[0]
+    if role not in ROLES:
+        raise ApiError(400, "Invalid role")
+    if role == "admin":
+        raise ApiError(400, "The admin role always has full access and cannot be edited")
+    valid = set(all_perms())
+    perms = ctx.body.get("perms") or {}
+    defaults = ROLE_DEFAULTS.get(role, {})
+    for perm, val in perms.items():
+        if perm not in valid:
+            continue
+        allowed = 1 if val else 0
+        # Store only true overrides; if it matches the built-in default, drop it.
+        if (perm in defaults) and (bool(allowed) == defaults[perm]):
+            db.execute("DELETE FROM role_permissions WHERE role=? AND perm=?", (role, perm))
+        else:
+            db.execute(
+                "INSERT INTO role_permissions(role,perm,allowed) VALUES(?,?,?) "
+                "ON CONFLICT(role,perm) DO UPDATE SET allowed=excluded.allowed",
+                (role, perm, allowed))
+    return {"role": role, "effective": effective_role_perms(role),
+            "overrides": _role_overrides(role)}
+
+
+@route("GET", r"/api/permissions/users/(\d+)")
+def get_user_permissions(ctx):
+    require_perm(ctx.user, "permissions.view")
+    uid = int(ctx.params[0])
+    u = db.query("SELECT id, full_name, role FROM users WHERE id=?", (uid,), one=True)
+    if not u:
+        raise ApiError(404, "User not found")
+    return {
+        "user": u,
+        "role_effective": effective_role_perms(u["role"]),  # what they inherit
+        "effective": effective_user_perms(u),               # final resolved
+        "overrides": _user_overrides(uid),                  # per-user only
+    }
+
+
+@route("PUT", r"/api/permissions/users/(\d+)")
+def update_user_permissions(ctx):
+    require_perm(ctx.user, "permissions.edit")
+    uid = int(ctx.params[0])
+    u = db.query("SELECT id, role FROM users WHERE id=?", (uid,), one=True)
+    if not u:
+        raise ApiError(404, "User not found")
+    if u["role"] == "admin":
+        raise ApiError(400, "Admin users always have full access and cannot be edited")
+    valid = set(all_perms())
+    # perms maps perm -> true | false | null. null clears the override (inherit).
+    perms = ctx.body.get("perms") or {}
+    for perm, val in perms.items():
+        if perm not in valid:
+            continue
+        if val is None:
+            db.execute("DELETE FROM user_permissions WHERE user_id=? AND perm=?", (uid, perm))
+        else:
+            db.execute(
+                "INSERT INTO user_permissions(user_id,perm,allowed) VALUES(?,?,?) "
+                "ON CONFLICT(user_id,perm) DO UPDATE SET allowed=excluded.allowed",
+                (uid, perm, 1 if val else 0))
+    full = db.query("SELECT * FROM users WHERE id=?", (uid,), one=True)
+    return {"user_id": uid, "effective": effective_user_perms(full),
+            "overrides": _user_overrides(uid)}
 
 
 # --------------------------------------------------------------------------
@@ -209,6 +412,8 @@ def deactivate_user(ctx):
 # --------------------------------------------------------------------------
 @route("GET", r"/api/clients")
 def list_clients(ctx):
+    if ctx.user["role"] != "client":
+        require_perm(ctx.user, "clients.view")
     cid = client_scope_id(ctx.user)
     q = ctx.query.get("q", "").strip()
     sql = "SELECT * FROM clients"
@@ -229,6 +434,8 @@ def list_clients(ctx):
 @route("GET", r"/api/clients/(\d+)")
 def get_client(ctx):
     cid = int(ctx.params[0])
+    if ctx.user["role"] != "client":
+        require_perm(ctx.user, "clients.view")
     _assert_client_access(ctx.user, cid)
     client = db.query("SELECT * FROM clients WHERE id=?", (cid,), one=True)
     if not client:
@@ -252,7 +459,7 @@ def get_client(ctx):
 
 @route("POST", r"/api/clients")
 def create_client(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "clients.create")
     b = ctx.body
     if not b.get("name_en"):
         raise ApiError(400, "Company name (English) is required")
@@ -267,7 +474,7 @@ def create_client(ctx):
 
 @route("PUT", r"/api/clients/(\d+)")
 def update_client(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "clients.edit")
     cid = int(ctx.params[0])
     b = ctx.body
     cols = ("name_en", "name_ar", "contact_person", "phone", "email",
@@ -283,14 +490,14 @@ def update_client(ctx):
 
 @route("DELETE", r"/api/clients/(\d+)")
 def delete_client(ctx):
-    require(ctx.user, "admin")
+    require_perm(ctx.user, "clients.delete")
     db.execute("DELETE FROM clients WHERE id=?", (int(ctx.params[0]),))
     return {"ok": True}
 
 
 @route("POST", r"/api/clients/(\d+)/sites")
 def add_site(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "clients.edit")
     cid = int(ctx.params[0])
     b = ctx.body
     if not b.get("name"):
@@ -302,7 +509,7 @@ def add_site(ctx):
 
 @route("DELETE", r"/api/sites/(\d+)")
 def delete_site(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "clients.edit")
     db.execute("DELETE FROM sites WHERE id=?", (int(ctx.params[0]),))
     return {"ok": True}
 
@@ -317,7 +524,7 @@ def list_service_types(ctx):
 
 @route("POST", r"/api/service-types")
 def create_service_type(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "settings.edit")
     b = ctx.body
     if not b.get("name_en"):
         raise ApiError(400, "Name is required")
@@ -332,6 +539,7 @@ def create_service_type(ctx):
 @route("GET", r"/api/visits")
 def list_visits(ctx):
     u = ctx.user
+    require_perm(u, "visits.view")
     where, params = [], []
     if u["role"] == "client":
         where.append("v.client_id=?")
@@ -374,6 +582,7 @@ def get_visit(ctx):
         "LEFT JOIN sites st ON st.id=v.site_id WHERE v.id=?", (vid,), one=True)
     if not v:
         raise ApiError(404, "Visit not found")
+    require_perm(ctx.user, "visits.view")
     _assert_visit_access(ctx.user, v)
     v["report"] = db.query("SELECT * FROM reports WHERE visit_id=?", (vid,), one=True)
     v["chemicals"] = db.query(
@@ -392,7 +601,7 @@ def get_visit(ctx):
 
 @route("POST", r"/api/visits")
 def create_visit(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "visits.create")
     b = ctx.body
     if not b.get("client_id") or not b.get("scheduled_start"):
         raise ApiError(400, "Client and scheduled date are required")
@@ -413,14 +622,13 @@ def update_visit(ctx):
         raise ApiError(404, "Visit not found")
     u = ctx.user
     b = ctx.body
+    require_perm(u, "visits.edit")
     # Agents may only update status of their own visits; managers update everything.
     if u["role"] == "agent":
         if v["agent_id"] != u["id"]:
             raise ApiError(403, "Not your visit")
         allowed = {"status", "notes", "completed_at"}
         b = {k: val for k, val in b.items() if k in allowed}
-    elif not is_manager(u):
-        raise ApiError(403, "No permission")
     cols = ("client_id", "site_id", "agent_id", "service_type_id", "scheduled_start",
             "scheduled_end", "status", "location", "notes", "completed_at")
     fields = [f"{c}=?" for c in cols if c in b]
@@ -436,7 +644,7 @@ def update_visit(ctx):
 
 @route("DELETE", r"/api/visits/(\d+)")
 def delete_visit(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "visits.delete")
     db.execute("DELETE FROM visits WHERE id=?", (int(ctx.params[0]),))
     return {"ok": True}
 
@@ -451,10 +659,9 @@ def upsert_report(ctx):
     if not v:
         raise ApiError(404, "Visit not found")
     u = ctx.user
+    require_perm(u, "visits.edit")
     if u["role"] == "agent" and v["agent_id"] != u["id"]:
         raise ApiError(403, "Not your visit")
-    if u["role"] == "client":
-        raise ApiError(403, "No permission")
     b = ctx.body
     existing = db.query("SELECT * FROM reports WHERE visit_id=?", (vid,), one=True)
     text_cols = ("summary", "pests_found", "findings", "recommendations", "severity",
@@ -495,7 +702,7 @@ def upsert_report(ctx):
 # --------------------------------------------------------------------------
 @route("GET", r"/api/chemicals")
 def list_chemicals(ctx):
-    require(ctx.user, "admin", "manager", "agent")
+    require_perm(ctx.user, "chemicals.view")
     q = ctx.query.get("q", "").strip()
     if q:
         return db.query(
@@ -506,7 +713,7 @@ def list_chemicals(ctx):
 
 @route("POST", r"/api/chemicals")
 def create_chemical(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "chemicals.create")
     b = ctx.body
     if not b.get("name_en"):
         raise ApiError(400, "Name is required")
@@ -521,7 +728,7 @@ def create_chemical(ctx):
 
 @route("PUT", r"/api/chemicals/(\d+)")
 def update_chemical(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "chemicals.edit")
     cid = int(ctx.params[0])
     b = ctx.body
     cols = ("name_en", "name_ar", "active_ingredient", "unit", "reorder_level",
@@ -537,14 +744,14 @@ def update_chemical(ctx):
 
 @route("DELETE", r"/api/chemicals/(\d+)")
 def delete_chemical(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "chemicals.delete")
     db.execute("DELETE FROM chemicals WHERE id=?", (int(ctx.params[0]),))
     return {"ok": True}
 
 
 @route("POST", r"/api/chemicals/(\d+)/stock")
 def adjust_stock(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "chemicals.edit")
     cid = int(ctx.params[0])
     b = ctx.body
     change = float(b.get("change", 0))
@@ -559,7 +766,7 @@ def adjust_stock(ctx):
 
 @route("GET", r"/api/chemicals/(\d+)/transactions")
 def chemical_transactions(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "chemicals.view")
     return db.query("SELECT * FROM inventory_transactions WHERE chemical_id=? ORDER BY created_at DESC",
                     (int(ctx.params[0]),))
 
@@ -571,10 +778,9 @@ def record_usage(ctx):
     if not v:
         raise ApiError(404, "Visit not found")
     u = ctx.user
+    require_perm(u, "visits.edit")
     if u["role"] == "agent" and v["agent_id"] != u["id"]:
         raise ApiError(403, "Not your visit")
-    if u["role"] == "client":
-        raise ApiError(403, "No permission")
     b = ctx.body
     chem_id = b.get("chemical_id")
     qty = float(b.get("quantity", 0))
@@ -592,7 +798,7 @@ def record_usage(ctx):
 
 @route("DELETE", r"/api/usage/(\d+)")
 def delete_usage(ctx):
-    require(ctx.user, "admin", "manager", "agent")
+    require_perm(ctx.user, "visits.edit")
     uid = int(ctx.params[0])
     row = db.query("SELECT * FROM chemical_usage WHERE id=?", (uid,), one=True)
     if not row:
@@ -611,12 +817,12 @@ def delete_usage(ctx):
 @route("GET", r"/api/invoices")
 def list_invoices(ctx):
     u = ctx.user
+    if u["role"] != "client":
+        require_perm(u, "invoices.view")
     where, params = [], []
     if u["role"] == "client":
         where.append("i.client_id=?")
         params.append(u["client_id"])
-    elif u["role"] == "agent":
-        raise ApiError(403, "No permission")
     if ctx.query.get("client"):
         where.append("i.client_id=?")
         params.append(ctx.query["client"])
@@ -645,10 +851,11 @@ def get_invoice(ctx):
                    "FROM invoices i JOIN clients c ON c.id=i.client_id WHERE i.id=?", (iid,), one=True)
     if not inv:
         raise ApiError(404, "Invoice not found")
-    if ctx.user["role"] == "client" and inv["client_id"] != ctx.user["client_id"]:
-        raise ApiError(403, "No permission")
-    if ctx.user["role"] == "agent":
-        raise ApiError(403, "No permission")
+    if ctx.user["role"] == "client":
+        if inv["client_id"] != ctx.user["client_id"]:
+            raise ApiError(403, "No permission")
+    else:
+        require_perm(ctx.user, "invoices.view")
     inv["payments"] = db.query("SELECT * FROM payments WHERE invoice_id=? ORDER BY paid_at DESC", (iid,))
     inv["paid"] = sum(p["amount"] for p in inv["payments"])
     inv["items"] = db.query("SELECT * FROM invoice_items WHERE invoice_id=? ORDER BY id", (iid,))
@@ -671,7 +878,7 @@ def _save_items(iid, items):
 
 @route("POST", r"/api/invoices")
 def create_invoice(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "invoices.create")
     b = ctx.body
     if not b.get("client_id") or not b.get("issue_date"):
         raise ApiError(400, "Client and issue date are required")
@@ -696,7 +903,7 @@ def create_invoice(ctx):
 
 @route("PUT", r"/api/invoices/(\d+)")
 def update_invoice(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "invoices.edit")
     iid = int(ctx.params[0])
     b = ctx.body
     cur = db.query("SELECT * FROM invoices WHERE id=?", (iid,), one=True)
@@ -720,14 +927,14 @@ def update_invoice(ctx):
 
 @route("DELETE", r"/api/invoices/(\d+)")
 def delete_invoice(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "invoices.delete")
     db.execute("DELETE FROM invoices WHERE id=?", (int(ctx.params[0]),))
     return {"ok": True}
 
 
 @route("POST", r"/api/invoices/(\d+)/payments")
 def add_payment(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "payments.create")
     iid = int(ctx.params[0])
     b = ctx.body
     amount = float(b.get("amount", 0))
@@ -753,7 +960,7 @@ def client_finance(ctx):
 @route("POST", r"/api/invoices/(\d+)/convert")
 def convert_quote(ctx):
     """Convert an accepted quote into a draft invoice (copies line items)."""
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "invoices.edit")
     qid = int(ctx.params[0])
     q = db.query("SELECT * FROM invoices WHERE id=?", (qid,), one=True)
     if not q or q["doc_type"] != "quote":
@@ -805,7 +1012,7 @@ def read_settings(ctx):
 
 @route("PUT", r"/api/settings")
 def write_settings(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "settings.edit")
     for k, v in ctx.body.items():
         db.execute("INSERT INTO settings(key,value) VALUES(?,?) "
                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (k, str(v)))
@@ -814,7 +1021,7 @@ def write_settings(ctx):
 
 @route("POST", r"/api/settings/logo")
 def upload_logo(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "settings.edit")
     _fields, files = parse_multipart(ctx.raw_body, ctx.content_type)
     if not files:
         raise ApiError(400, "No file uploaded")
@@ -840,6 +1047,8 @@ FREQ_DAYS = {"weekly": 7, "biweekly": 14, "monthly": 30, "quarterly": 91,
 @route("GET", r"/api/contracts")
 def list_contracts(ctx):
     u = ctx.user
+    if u["role"] != "client":
+        require_perm(u, "contracts.view")
     where, params = [], []
     if u["role"] == "client":
         where.append("ct.client_id=?")
@@ -863,7 +1072,7 @@ def list_contracts(ctx):
 
 @route("POST", r"/api/contracts")
 def create_contract(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "contracts.create")
     b = ctx.body
     if not b.get("client_id") or not b.get("start_date") or not b.get("frequency"):
         raise ApiError(400, "Client, start date and frequency are required")
@@ -878,7 +1087,7 @@ def create_contract(ctx):
 
 @route("PUT", r"/api/contracts/(\d+)")
 def update_contract(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "contracts.edit")
     cid = int(ctx.params[0])
     b = ctx.body
     cols = ("site_id", "service_type_id", "agent_id", "frequency", "start_date",
@@ -894,7 +1103,7 @@ def update_contract(ctx):
 
 @route("DELETE", r"/api/contracts/(\d+)")
 def delete_contract(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "contracts.delete")
     db.execute("DELETE FROM contracts WHERE id=?", (int(ctx.params[0]),))
     return {"ok": True}
 
@@ -902,7 +1111,7 @@ def delete_contract(ctx):
 @route("POST", r"/api/contracts/run")
 def run_contracts(ctx):
     """Generate visits for all active contracts due within the look-ahead window."""
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "contracts.edit")
     created = _generate_due_visits()
     return {"created": created}
 
@@ -972,7 +1181,7 @@ def mark_notifications_read(ctx):
 
 @route("POST", r"/api/notifications/generate")
 def gen_notifications(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "visits.view")
     return {"created": _generate_reminders()}
 
 
@@ -1045,7 +1254,7 @@ def _generate_reminders():
 # --------------------------------------------------------------------------
 @route("GET", r"/api/analytics")
 def analytics(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "analytics.view")
     months = db.query(
         "SELECT strftime('%Y-%m', issue_date) m, SUM(total) total, "
         "SUM((SELECT COALESCE(SUM(amount),0) FROM payments p WHERE p.invoice_id=i.id)) paid "
@@ -1094,8 +1303,8 @@ def client_analytics(ctx):
     """Everything we know about one client, shaped for curve + 3D charts."""
     cid = int(ctx.params[0])
     _assert_client_access(ctx.user, cid)
-    if ctx.user["role"] == "agent":
-        raise ApiError(403, "No permission")
+    if ctx.user["role"] != "client":
+        require_perm(ctx.user, "analytics.view")
     labels = _month_labels(12)
     # build continuous 12-month series (fill gaps with zero) for smooth curves
     inv_by = {r["m"]: r["v"] for r in db.query(
@@ -1147,8 +1356,8 @@ def client_pest_trends(ctx):
     audit/compliance reporting (e.g. HACCP)."""
     cid = int(ctx.params[0])
     _assert_client_access(ctx.user, cid)
-    if ctx.user["role"] == "agent":
-        raise ApiError(403, "No permission")
+    if ctx.user["role"] != "client":
+        require_perm(ctx.user, "analytics.view")
     labels = _month_labels(12)
     insp_by = {r["m"]: r["v"] for r in db.query(
         "SELECT strftime('%Y-%m',recorded_at) m, COUNT(*) v FROM marker_events "
@@ -1197,8 +1406,7 @@ def save_signature(ctx):
     if not v:
         raise ApiError(404, "Visit not found")
     u = ctx.user
-    if u["role"] == "client":
-        raise ApiError(403, "No permission")
+    require_perm(u, "visits.edit")
     if u["role"] == "agent" and v["agent_id"] != u["id"]:
         raise ApiError(403, "Not your visit")
     b = ctx.body
@@ -1227,8 +1435,8 @@ def save_signature(ctx):
 # --------------------------------------------------------------------------
 @route("GET", r"/api/export/(clients|visits|invoices|chemicals|payments)\.csv")
 def export_csv(ctx):
-    require(ctx.user, "admin", "manager")
     entity = ctx.params[0]
+    require_perm(ctx.user, entity + ".view")
     queries = {
         "clients": "SELECT id,name_en,name_ar,contact_person,phone,email,city,status,created_at FROM clients",
         "visits": "SELECT v.id,c.name_en client,v.scheduled_start,v.status,u.full_name agent "
@@ -1258,8 +1466,6 @@ def list_photos(ctx):
 
 @route("POST", r"/api/photos")
 def upload_photo(ctx):
-    if ctx.user["role"] == "client":
-        raise ApiError(403, "No permission")
     fields, files = parse_multipart(ctx.raw_body, ctx.content_type)
     if not files:
         raise ApiError(400, "No file uploaded")
@@ -1267,6 +1473,7 @@ def upload_photo(ctx):
     eid = fields.get("entity_id")
     if et not in ("client", "report", "visit", "chemical") or not eid:
         raise ApiError(400, "Valid entity_type and entity_id required")
+    require_perm(ctx.user, _PHOTO_ENTITY_PERM[et])
     f = files[0]
     ext = os.path.splitext(f["filename"])[1].lower()
     if ext not in ALLOWED_IMG:
@@ -1283,10 +1490,10 @@ def upload_photo(ctx):
 
 @route("DELETE", r"/api/photos/(\d+)")
 def delete_photo(ctx):
-    require(ctx.user, "admin", "manager", "agent")
     pid = int(ctx.params[0])
     row = db.query("SELECT * FROM photos WHERE id=?", (pid,), one=True)
     if row:
+        require_perm(ctx.user, _PHOTO_ENTITY_PERM.get(row["entity_type"], "clients.edit"))
         try:
             os.remove(os.path.join(UPLOAD_DIR, row["filename"]))
         except OSError:
@@ -1302,6 +1509,8 @@ def delete_photo(ctx):
 def list_maps(ctx):
     cid = int(ctx.params[0])
     _assert_client_access(ctx.user, cid)
+    if ctx.user["role"] != "client":
+        require_perm(ctx.user, "maps.view")
     return db.query(
         "SELECT m.*, s.name site_name, "
         "(SELECT COUNT(*) FROM map_markers k WHERE k.map_id=m.id) marker_count "
@@ -1318,13 +1527,15 @@ def get_map(ctx):
     if not m:
         raise ApiError(404, "Map not found")
     _assert_client_access(ctx.user, m["client_id"])
+    if ctx.user["role"] != "client":
+        require_perm(ctx.user, "maps.view")
     m["markers"] = db.query("SELECT * FROM map_markers WHERE map_id=? ORDER BY id", (mid,))
     return m
 
 
 @route("POST", r"/api/maps")
 def upload_map(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "maps.create")
     fields, files = parse_multipart(ctx.raw_body, ctx.content_type)
     if not files:
         raise ApiError(400, "No map image uploaded")
@@ -1347,7 +1558,7 @@ def upload_map(ctx):
 
 @route("DELETE", r"/api/maps/(\d+)")
 def delete_map(ctx):
-    require(ctx.user, "admin", "manager")
+    require_perm(ctx.user, "maps.delete")
     mid = int(ctx.params[0])
     row = db.query("SELECT * FROM maps WHERE id=?", (mid,), one=True)
     if row:
@@ -1372,7 +1583,7 @@ def _log_marker_event(marker_id, map_id, status, note, user_id):
 
 @route("POST", r"/api/maps/(\d+)/markers")
 def add_marker(ctx):
-    require(ctx.user, "admin", "manager", "agent")
+    require_perm(ctx.user, "maps.create")
     mid = int(ctx.params[0])
     if not db.query("SELECT id FROM maps WHERE id=?", (mid,), one=True):
         raise ApiError(404, "Map not found")
@@ -1388,7 +1599,7 @@ def add_marker(ctx):
 
 @route("PUT", r"/api/markers/(\d+)")
 def update_marker(ctx):
-    require(ctx.user, "admin", "manager", "agent")
+    require_perm(ctx.user, "maps.edit")
     nid = int(ctx.params[0])
     b = ctx.body
     existing = db.query("SELECT * FROM map_markers WHERE id=?", (nid,), one=True)
@@ -1411,7 +1622,7 @@ def update_marker(ctx):
 
 @route("DELETE", r"/api/markers/(\d+)")
 def delete_marker(ctx):
-    require(ctx.user, "admin", "manager", "agent")
+    require_perm(ctx.user, "maps.delete")
     db.execute("DELETE FROM map_markers WHERE id=?", (int(ctx.params[0]),))
     return {"ok": True}
 

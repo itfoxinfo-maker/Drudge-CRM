@@ -30,7 +30,10 @@ The database (`data/crm.db`) is created and seeded with demo data on first launc
 ## Features
 
 - **Bilingual UI** — full English & Arabic with automatic **RTL** layout; toggle anytime.
-- **Roles & permissions** — Admin, Manager, Agent, Client portal — each sees only what it should.
+- **Roles & permissions (RBAC)** — Admin, Manager, Agent, Client portal — each sees only what it
+  should. Admins get a **Permissions** screen to set the default access **per role** and override
+  it **per user**, with view / create / edit / delete check-marks for every feature. Permissions are
+  enforced on the server (not just hidden in the UI) and drive the navigation each user sees.
 - **Client company folders** — every client is a folder you open: details, sites/locations,
   finance summary, recent visits and a **photo gallery** (upload from the browser).
 - **Visit scheduling** — assign agents, service type, date/time, status workflow
