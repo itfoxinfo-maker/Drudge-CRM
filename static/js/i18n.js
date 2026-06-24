@@ -175,6 +175,9 @@ const TRANSLATIONS = {
     materials: "Materials", material: "Material", add_material: "Add material",
     engineer: "Engineer", items_n: "item(s)",
     need_one_material: "Add at least one material with a quantity.",
+    issue_history: "Issue history", materials_on_hand: "Materials on hand",
+    materials_on_hand_hint: "Issued to the engineer, minus what was used on their visits.",
+    issued: "Issued", used: "Used", remaining: "Remaining",
   },
   ar: {
     app_name: "نظام إدارة مكافحة الآفات",
@@ -333,6 +336,9 @@ const TRANSLATIONS = {
     materials: "المواد", material: "المادة", add_material: "إضافة مادة",
     engineer: "المهندس", items_n: "صنف",
     need_one_material: "أضف مادة واحدة على الأقل مع الكمية.",
+    issue_history: "سجل الصرف", materials_on_hand: "المواد المتوفرة",
+    materials_on_hand_hint: "المصروف للمهندس، ناقص ما استُخدم في زياراته.",
+    issued: "المصروف", used: "المستخدم", remaining: "المتبقي",
   },
 };
 

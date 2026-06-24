@@ -155,6 +155,24 @@ def main():
         check("agent visits export excludes other agent",
               st == 200 and b"Omar Saeed" not in avis)
 
+        print("ENGINEER ISSUE BALANCE (issued - used = remaining)")
+        _, agusers = call("GET", "/users?role=agent", admin)
+        a1 = next(u["id"] for u in agusers if u["email"] == "agent1@pestcrm.com")
+        # issue 5 units of chemical 1 to agent1, then log 2 used on agent1's own visit
+        _, iss = call("POST", "/issues", admin, {"agent_id": a1,
+                      "items": [{"chemical_id": 1, "quantity": 5}]})
+        check("issue created for agent1", bool(iss and iss.get("id")))
+        call("POST", "/visits/1/usage", admin, {"chemical_id": 1, "quantity": 2})
+        _, bal = call("GET", f"/issues/balance?agent_id={a1}", admin)
+        eng = next((e for e in bal["engineers"] if e["agent_id"] == a1), None)
+        mat = next((m for m in eng["materials"] if m["chemical_id"] == 1), None) if eng else None
+        check("balance shows issued total", mat and mat["issued"] == 5)
+        check("balance deducts visit usage", mat and mat["used"] == 2)
+        check("balance remaining = issued - used", mat and mat["remaining"] == 3)
+        # an agent sees only their own balance
+        _, abal = call("GET", "/issues/balance", agent)
+        check("agent balance scoped to self", all(e["agent_id"] == a1 for e in abal["engineers"]))
+
         print("RBAC PERMISSIONS")
         manager = login("manager@pestcrm.com", "manager123")
         # Visibility of the RBAC admin surface is admin-only.

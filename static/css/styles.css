@@ -360,3 +360,5 @@ tr.clickable:hover { background: var(--green-l); }
 .offline-status.off { background: var(--red-l); color: var(--red); }
 .offline-status.pend { background: var(--amber-l); color: var(--amber); }
 .offline-status.hidden { display: none !important; }
+/* Engineer materials balance: a depleted / over-used line. */
+tr.bal-empty td { background: var(--red-l); color: var(--red); }

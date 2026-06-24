@@ -1015,6 +1015,56 @@ def list_issues(ctx):
     return db.query(sql, tuple(params))
 
 
+@route("GET", r"/api/issues/balance")
+def issues_balance(ctx):
+    """Per-engineer materials balance: what each engineer was ISSUED minus what
+    they USED (chemicals consumed on their own visits) = what's left on hand.
+    Derived live from existing data, so 'remaining' drops as visits log usage.
+    Agents see only their own; managers/admins can filter with ?agent_id=."""
+    u = ctx.user
+    require_perm(u, "issues.view")
+    agent_filter = u["id"] if u["role"] == "agent" else (
+        int(ctx.query["agent_id"]) if ctx.query.get("agent_id") else None)
+    iss_where, iss_params = "", []
+    use_where, use_params = "", []
+    if agent_filter is not None:
+        iss_where = " WHERE ei.agent_id=?"; iss_params = [agent_filter]
+        use_where = " AND v.agent_id=?"; use_params = [agent_filter]
+    issued = db.query(
+        "SELECT ei.agent_id, it.chemical_id, SUM(it.quantity) qty "
+        "FROM engineer_issues ei JOIN engineer_issue_items it ON it.issue_id=ei.id"
+        + iss_where + " GROUP BY ei.agent_id, it.chemical_id", iss_params)
+    used = db.query(
+        "SELECT v.agent_id, cu.chemical_id, SUM(cu.quantity) qty "
+        "FROM chemical_usage cu JOIN visits v ON v.id=cu.visit_id "
+        "WHERE v.agent_id IS NOT NULL" + use_where
+        + " GROUP BY v.agent_id, cu.chemical_id", use_params)
+    chems = {c["id"]: c for c in db.query("SELECT id,name_en,name_ar,unit FROM chemicals")}
+    names = {a["id"]: a["full_name"] for a in db.query("SELECT id,full_name FROM users")}
+    eng = {}  # agent_id -> {chemical_id -> {"issued":x, "used":y}}
+    for r in issued:
+        eng.setdefault(r["agent_id"], {}).setdefault(
+            r["chemical_id"], {"issued": 0.0, "used": 0.0})["issued"] = r["qty"] or 0
+    for r in used:
+        eng.setdefault(r["agent_id"], {}).setdefault(
+            r["chemical_id"], {"issued": 0.0, "used": 0.0})["used"] = r["qty"] or 0
+    out = []
+    for aid, mats in eng.items():
+        materials = []
+        for cid, bal in mats.items():
+            ch = chems.get(cid, {})
+            issued_q, used_q = round(bal["issued"], 3), round(bal["used"], 3)
+            materials.append({
+                "chemical_id": cid, "name_en": ch.get("name_en"),
+                "name_ar": ch.get("name_ar"), "unit": ch.get("unit"),
+                "issued": issued_q, "used": used_q,
+                "remaining": round(issued_q - used_q, 3)})
+        materials.sort(key=lambda m: (m["name_en"] or "").lower())
+        out.append({"agent_id": aid, "agent_name": names.get(aid, "?"), "materials": materials})
+    out.sort(key=lambda e: (e["agent_name"] or "").lower())
+    return {"engineers": out}
+
+
 @route("GET", r"/api/issues/(\d+)")
 def get_issue(ctx):
     require_perm(ctx.user, "issues.view")

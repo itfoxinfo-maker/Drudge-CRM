@@ -807,12 +807,39 @@ function stockForm(id) {
 // ====================================================================
 // Engineer material issues (stock checked out of inventory by an engineer)
 // ====================================================================
+// Per-engineer materials balance: issued − used (on their visits) = remaining.
+function renderIssueBalance(balance, mine) {
+  const engineers = (balance && balance.engineers) || [];
+  if (!engineers.length) return "";
+  const qty = (n, unit) => `${(+n || 0).toLocaleString()} ${esc(unit || "")}`.trim();
+  const block = (e) => {
+    if (!e.materials.length) return "";
+    const rows = e.materials.map(m => {
+      const low = m.remaining <= 0;
+      return `<tr${low ? ` class="bal-empty"` : ""}>
+        <td>${esc(localized(m, "name") || ("#" + m.chemical_id))}</td>
+        <td>${qty(m.issued, m.unit)}</td>
+        <td>${qty(m.used, m.unit)}</td>
+        <td><strong>${qty(m.remaining, m.unit)}</strong></td></tr>`;
+    }).join("");
+    return `${mine ? "" : `<div style="font-weight:600;margin:10px 0 4px">${esc(e.agent_name)}</div>`}
+      <table><thead><tr><th>${t("material")}</th><th>${t("issued")}</th>
+        <th>${t("used")}</th><th>${t("remaining")}</th></tr></thead><tbody>${rows}</tbody></table>`;
+  };
+  const body = engineers.map(block).join("");
+  if (!body.trim()) return "";
+  return `<div class="panel"><h3 style="margin:0 0 8px">📊 ${t("materials_on_hand")}</h3>
+    <p class="muted" style="margin:0 0 10px">${t("materials_on_hand_hint")}</p>${body}</div>`;
+}
+
 async function viewIssues(v) {
   const mine = role() === "agent";
-  const issues = await API.get("/issues");
+  const [issues, balance] = await Promise.all([API.get("/issues"), API.get("/issues/balance")]);
   const canDelete = can("issues.delete");
   v.innerHTML = `<div class="page-head"><h2>📦 ${t("nav_issues")}</h2>
     ${can("issues.create") ? `<button class="btn" id="add-issue">+ ${t("new_issue")}</button>` : ""}</div>
+    ${renderIssueBalance(balance, mine)}
+    <h3 style="margin:18px 0 8px">${t("issue_history")}</h3>
     <div class="panel"><table><thead><tr>
       <th>${t("date")}</th>${mine ? "" : `<th>${t("engineer")}</th>`}<th>${t("materials")}</th><th>${t("notes")}</th>${canDelete ? "<th></th>" : ""}</tr></thead>
       <tbody>${issues.map(i => `<tr class="clickable" data-issue="${i.id}">
