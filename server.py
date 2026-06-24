@@ -90,19 +90,6 @@ def route(method, pattern, auth_required=True):
 # --------------------------------------------------------------------------
 # permission helpers
 # --------------------------------------------------------------------------
-def require(user, *roles):
-    if user["role"] not in roles:
-        raise ApiError(403, "You do not have permission for this action")
-
-
-def is_staff(user):
-    return user["role"] in ("admin", "manager", "agent")
-
-
-def is_manager(user):
-    return user["role"] in ("admin", "manager")
-
-
 def client_scope_id(user):
     """For client users, the client_id they are limited to."""
     return user.get("client_id") if user["role"] == "client" else None
@@ -1811,12 +1798,12 @@ def search(ctx):
         vsql += " AND v.agent_id=?"
         vparams.append(u["id"])
     res["visits"] = db.query(vsql + " LIMIT 20", vparams)
-    if is_manager(u) or u["role"] == "agent":
+    if has_perm(u, "chemicals.view"):
         res["chemicals"] = db.query(
             "SELECT id,name_en,name_ar,quantity_in_stock,unit FROM chemicals "
             "WHERE name_en LIKE ? OR name_ar LIKE ? OR active_ingredient LIKE ? LIMIT 20",
             (like, like, like))
-    if is_manager(u):
+    if has_perm(u, "invoices.view"):
         res["invoices"] = db.query(
             "SELECT i.id,i.number,i.total,i.status,c.name_en client_en FROM invoices i "
             "JOIN clients c ON c.id=i.client_id WHERE i.number LIKE ? OR c.name_en LIKE ? LIMIT 20",
