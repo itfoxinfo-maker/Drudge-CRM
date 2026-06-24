@@ -11,6 +11,16 @@ function fmtDate(s) { if (!s) return "—"; const d = new Date(s.replace(" ", "T
 function fmtDateTime(s) { if (!s) return "—"; const d = new Date(s.replace(" ", "T")); return isNaN(d) ? s : d.toLocaleString(LANG === "ar" ? "ar" : "en-GB", { dateStyle: "medium", timeStyle: "short" }); }
 function toast(msg) { const e = $("toast"); e.textContent = msg; e.classList.remove("hidden"); setTimeout(() => e.classList.add("hidden"), 2200); }
 
+// A write that was queued offline returns {__queued:true} instead of the saved
+// record — it has no server id yet, and the usual follow-up (refresh GET +
+// navigate to the new/updated record) would fail offline and mask the success.
+// In that case just close the form; the oq-queued toast ("saved offline — will
+// sync") already confirms it. Returns true when the caller should stop here.
+function handledOffline(saved) {
+  if (saved && saved.__queued) { closeModal(); return true; }
+  return false;
+}
+
 function role() { return API.user ? API.user.role : null; }
 
 // ---- RBAC: permission checks driven by API.user.permissions ----
@@ -354,6 +364,7 @@ function clientForm(c) {
       const d = formData(root);
       try {
         const saved = isEdit ? await API.put("/clients/" + c.id, d) : await API.post("/clients", d);
+        if (handledOffline(saved)) return;
         closeModal(); toast(t("saved"));
         cache.clients = await API.get("/clients");
         navigate("client", { id: saved.id });
@@ -438,7 +449,8 @@ function siteForm(clientId) {
     $("sf-x").addEventListener("click", closeModal);
     root.querySelector("#sf").addEventListener("submit", async (e) => {
       e.preventDefault();
-      await API.post(`/clients/${clientId}/sites`, formData(root));
+      const saved = await API.post(`/clients/${clientId}/sites`, formData(root));
+      if (handledOffline(saved)) return;
       closeModal(); navigate("client", { id: clientId });
     });
   });
@@ -468,7 +480,8 @@ function uploadPhotoDialog(entityType, entityId, after) {
       e.preventDefault();
       const file = root.querySelector("[name=file]").files[0];
       if (!file) return;
-      try { await API.uploadPhoto(entityType, entityId, file, root.querySelector("[name=caption]").value);
+      try { const saved = await API.uploadPhoto(entityType, entityId, file, root.querySelector("[name=caption]").value);
+        if (handledOffline(saved)) return;
         closeModal(); toast(t("saved")); after && after(); }
       catch (err) { alert(err.message); }
     });
@@ -541,7 +554,7 @@ function visitForm(preset) {
       e.preventDefault();
       const d = formData(root);
       Object.keys(d).forEach(k => { if (d[k] === "") delete d[k]; });
-      try { const saved = await API.post("/visits", d); closeModal(); navigate("visit", { id: saved.id }); }
+      try { const saved = await API.post("/visits", d); if (handledOffline(saved)) return; closeModal(); navigate("visit", { id: saved.id }); }
       catch (err) { alert(err.message); }
     });
   });
@@ -600,11 +613,11 @@ async function viewVisit(v, arg) {
   });
   v.querySelectorAll("[data-sign]").forEach(b => b.addEventListener("click", () => signatureDialog(id, b.dataset.sign)));
   if ($("v-status-btn")) $("v-status-btn").addEventListener("click", async () => {
-    await API.put("/visits/" + id, { status: $("v-status").value }); toast(t("saved")); navigate("visit", { id });
+    const saved = await API.put("/visits/" + id, { status: $("v-status").value }); if (handledOffline(saved)) return; toast(t("saved")); navigate("visit", { id });
   });
   if ($("report-form")) $("report-form").addEventListener("submit", async (e) => {
     e.preventDefault();
-    await API.post(`/visits/${id}/report`, formData($("report-form"))); toast(t("saved"));
+    const saved = await API.post(`/visits/${id}/report`, formData($("report-form"))); if (handledOffline(saved)) return; toast(t("saved"));
   });
   if ($("add-chem")) $("add-chem").addEventListener("click", () => usageForm(id));
   v.querySelectorAll("[data-rmuse]").forEach(b => b.addEventListener("click", async () => {
@@ -673,7 +686,7 @@ function usageForm(visitId) {
     $("uf-x").addEventListener("click", closeModal);
     root.querySelector("#uf").addEventListener("submit", async (e) => {
       e.preventDefault();
-      try { await API.post(`/visits/${visitId}/usage`, formData(root)); closeModal(); navigate("visit", { id: visitId }); }
+      try { const saved = await API.post(`/visits/${visitId}/usage`, formData(root)); if (handledOffline(saved)) return; closeModal(); navigate("visit", { id: visitId }); }
       catch (err) { alert(err.message); }
     });
   });
@@ -722,7 +735,8 @@ function chemForm(c) {
     $("chf-x").addEventListener("click", closeModal);
     root.querySelector("#chf").addEventListener("submit", async (e) => {
       e.preventDefault();
-      try { if (isEdit) await API.put("/chemicals/" + c.id, formData(root)); else await API.post("/chemicals", formData(root));
+      try { const saved = isEdit ? await API.put("/chemicals/" + c.id, formData(root)) : await API.post("/chemicals", formData(root));
+        if (handledOffline(saved)) return;
         closeModal(); cache.chemicals = await API.get("/chemicals"); navigate("chemicals"); }
       catch (err) { alert(err.message); }
     });
@@ -739,7 +753,9 @@ function stockForm(id) {
     $("sf-x").addEventListener("click", closeModal);
     root.querySelector("#sf").addEventListener("submit", async (e) => {
       e.preventDefault();
-      await API.post(`/chemicals/${id}/stock`, formData(root)); closeModal();
+      const saved = await API.post(`/chemicals/${id}/stock`, formData(root));
+      if (handledOffline(saved)) return;
+      closeModal();
       cache.chemicals = await API.get("/chemicals"); navigate("chemicals");
     });
   });
@@ -864,6 +880,7 @@ function invoiceForm(preset) {
         let saved;
         if (isEdit) { saved = await API.put("/invoices/" + preset.id, d); }
         else { d.doc_type = preset.doc_type || "invoice"; saved = await API.post("/invoices", d); }
+        if (handledOffline(saved)) return;
         closeModal(); toast(t("saved")); navigate("invoice", { id: saved.id });
       } catch (err) { alert(err.message); }
     });
@@ -906,12 +923,12 @@ async function viewInvoice(v, arg) {
   $("print-inv").addEventListener("click", () => printInvoice(inv));
   if ($("edit-inv")) $("edit-inv").addEventListener("click", () => invoiceForm(inv));
   if ($("convert-inv")) $("convert-inv").addEventListener("click", async () => {
-    try { const ni = await API.post(`/invoices/${inv.id}/convert`); toast(t("saved")); invoiceTab = "invoice"; navigate("invoice", { id: ni.id }); }
+    try { const ni = await API.post(`/invoices/${inv.id}/convert`); if (handledOffline(ni)) return; toast(t("saved")); invoiceTab = "invoice"; navigate("invoice", { id: ni.id }); }
     catch (err) { alert(err.message); }
   });
   if ($("pay-form")) $("pay-form").addEventListener("submit", async (e) => {
     e.preventDefault();
-    try { await API.post(`/invoices/${inv.id}/payments`, formData($("pay-form"))); toast(t("saved")); navigate("invoice", { id: inv.id }); }
+    try { const saved = await API.post(`/invoices/${inv.id}/payments`, formData($("pay-form"))); if (handledOffline(saved)) return; toast(t("saved")); navigate("invoice", { id: inv.id }); }
     catch (err) { alert(err.message); }
   });
 }
@@ -1211,7 +1228,8 @@ function userForm(u) {
       const d = formData(root);
       if (d.client_id === "") delete d.client_id;
       if (isEdit && !d.password) delete d.password;
-      try { if (isEdit) await API.put("/users/" + u.id, d); else await API.post("/users", d);
+      try { const saved = isEdit ? await API.put("/users/" + u.id, d) : await API.post("/users", d);
+        if (handledOffline(saved)) return;
         closeModal(); cache.clients = await API.get("/clients"); navigate("agents"); }
       catch (err) { alert(err.message); }
     });
@@ -1556,7 +1574,8 @@ function contractForm(c) {
       e.preventDefault();
       const d = formData(root);
       Object.keys(d).forEach(k => { if (d[k] === "") delete d[k]; });
-      try { if (isEdit) await API.put("/contracts/" + c.id, d); else await API.post("/contracts", d);
+      try { const saved = isEdit ? await API.put("/contracts/" + c.id, d) : await API.post("/contracts", d);
+        if (handledOffline(saved)) return;
         closeModal(); navigate("contracts"); } catch (err) { alert(err.message); }
     });
   });
@@ -1730,7 +1749,7 @@ function signatureDialog(visitId, which) {
       const body = { which, data };
       const nameEl = root.querySelector("[name=sig_name]");
       if (nameEl) body.customer_name = nameEl.value;
-      try { await API.post(`/visits/${visitId}/signature`, body); closeModal(); toast(t("saved")); navigate("visit", { id: visitId }); }
+      try { const saved = await API.post(`/visits/${visitId}/signature`, body); if (handledOffline(saved)) return; closeModal(); toast(t("saved")); navigate("visit", { id: visitId }); }
       catch (err) { alert(err.message); }
     });
   });
@@ -2124,8 +2143,9 @@ function markerForm(mapId, mk, isEdit) {
       e.preventDefault();
       const d = formData(root);
       try {
-        if (isEdit) await API.put("/markers/" + mk.id, d);
-        else await API.post(`/maps/${mapId}/markers`, { ...d, x: mk.x, y: mk.y });
+        const saved = isEdit ? await API.put("/markers/" + mk.id, d)
+          : await API.post(`/maps/${mapId}/markers`, { ...d, x: mk.x, y: mk.y });
+        if (handledOffline(saved)) return;
         closeModal(); navigate("map", { id: mapId });
       } catch (err) { alert(err.message); }
     });
