@@ -1,7 +1,11 @@
 // Thin fetch wrapper that injects the auth token and parses JSON.
+function _readStoredUser() {
+  try { return JSON.parse(localStorage.getItem("user") || "null"); }
+  catch (e) { return null; }
+}
 const API = {
   token: localStorage.getItem("token") || null,
-  user: JSON.parse(localStorage.getItem("user") || "null"),
+  user: _readStoredUser(),
 
   setAuth(token, user) {
     this.token = token;
@@ -24,7 +28,18 @@ const API = {
       headers["Content-Type"] = "application/json";
       opts.body = JSON.stringify(body);
     }
-    const res = await fetch("/api" + path, opts);
+    const mutating = method !== "GET";
+    let res;
+    try {
+      res = await fetch("/api" + path, opts);
+    } catch (e) {
+      // Network failure: queue mutations for later sync; reads just fail.
+      if (mutating && window.OfflineQueue) {
+        await window.OfflineQueue.enqueue({ kind: "json", method, path, body: body || {} });
+        return { __queued: true };
+      }
+      throw new Error("offline");
+    }
     if (res.status === 401 && this.token) {
       this.clearAuth();
       location.reload();
@@ -49,7 +64,21 @@ const API = {
     fd.append("file", file);
     const headers = {};
     if (this.token) headers["Authorization"] = "Bearer " + this.token;
-    const res = await fetch("/api/photos", { method: "POST", headers, body: fd });
+    let res;
+    try {
+      res = await fetch("/api/photos", { method: "POST", headers, body: fd });
+    } catch (e) {
+      // Offline: queue the photo (Blob is stored in IndexedDB) for later sync.
+      if (window.OfflineQueue) {
+        await window.OfflineQueue.enqueue({
+          kind: "photo", method: "POST", path: "/photos",
+          entity_type: entityType, entity_id: entityId, caption: caption || "",
+          file, filename: file.name || "photo.jpg",
+        });
+        return { __queued: true };
+      }
+      throw new Error("offline");
+    }
     const data = await res.json().catch(() => null);
     if (!res.ok) throw new Error((data && data.error) || "Upload failed");
     return data;

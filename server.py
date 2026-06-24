@@ -23,6 +23,7 @@ from multipart import parse_multipart
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+mimetypes.add_type("application/manifest+json", ".webmanifest")  # PWA manifest
 ALLOWED_IMG = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024   # 8 MB per uploaded file
 

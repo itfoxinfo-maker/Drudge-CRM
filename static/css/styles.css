@@ -350,3 +350,9 @@ tr.clickable:hover { background: var(--green-l); }
 /* ---- list pagination ---- */
 .pager { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 14px; }
 .pager .btn[disabled] { opacity: .45; cursor: default; }
+
+/* ---- offline / sync status pill ---- */
+.offline-status { font-size: 12px; font-weight: 700; padding: 5px 11px; border-radius: 999px; cursor: pointer; white-space: nowrap; }
+.offline-status.off { background: var(--red-l); color: var(--red); }
+.offline-status.pend { background: var(--amber-l); color: var(--amber); }
+.offline-status.hidden { display: none !important; }

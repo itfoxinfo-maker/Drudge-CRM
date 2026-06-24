@@ -160,6 +160,9 @@ const TRANSLATIONS = {
     mod_settings: "Settings", mod_permissions: "Permissions (RBAC)",
     // pagination
     prev: "Prev", next: "Next", page: "Page",
+    // offline / PWA
+    offline: "Offline", to_sync: "to sync", saved_offline: "Saved offline — will sync",
+    synced_ok: "synced",
   },
   ar: {
     app_name: "نظام إدارة مكافحة الآفات",
@@ -303,6 +306,9 @@ const TRANSLATIONS = {
     mod_settings: "الإعدادات", mod_permissions: "الصلاحيات (RBAC)",
     // pagination
     prev: "السابق", next: "التالي", page: "صفحة",
+    // offline / PWA
+    offline: "غير متصل", to_sync: "للمزامنة", saved_offline: "حُفظ دون اتصال — ستتم المزامنة",
+    synced_ok: "تمت المزامنة",
   },
 };
 

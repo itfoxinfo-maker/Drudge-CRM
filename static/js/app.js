@@ -81,8 +81,16 @@ async function boot() {
   applyStaticLabels();
   if (API.token && API.user) {
     // Refresh the profile so the resolved permission map is always current.
-    try { const me = await API.get("/auth/me"); API.setAuth(API.token, me); showApp(); }
-    catch (e) { API.clearAuth(); showLogin(); }
+    try {
+      const me = await API.get("/auth/me");
+      if (me) API.setAuth(API.token, me);
+      showApp();
+    } catch (e) {
+      // Offline / network error: keep the cached session so field agents can
+      // keep working. A real 401 clears auth + reloads inside API.request.
+      if (API.token && API.user) showApp();
+      else { API.clearAuth(); showLogin(); }
+    }
   } else showLogin();
 }
 
@@ -100,7 +108,43 @@ async function showApp() {
   await loadCaches();
   renderNav();
   initNotifications();
+  initOfflineUI();
   navigate("dashboard");
+}
+
+// ---- offline status pill + pending-sync badge ----
+function initOfflineUI() {
+  const el = $("offline-status");
+  if (!el || el.dataset.wired) {
+    if (el) renderOfflineStatus();
+    if (navigator.onLine && window.OfflineQueue) window.OfflineQueue.flush();
+    return;
+  }
+  el.dataset.wired = "1";
+  el.addEventListener("click", () => { if (window.OfflineQueue) window.OfflineQueue.flush(); });
+  window.addEventListener("online", renderOfflineStatus);
+  window.addEventListener("offline", renderOfflineStatus);
+  window.addEventListener("oq-change", renderOfflineStatus);
+  window.addEventListener("oq-queued", () => toast(t("saved_offline")));
+  window.addEventListener("oq-synced", (e) => { toast(`${e.detail.synced} ${t("synced_ok")}`); renderOfflineStatus(); });
+  renderOfflineStatus();
+  if (navigator.onLine && window.OfflineQueue) window.OfflineQueue.flush();
+}
+
+async function renderOfflineStatus() {
+  const el = $("offline-status");
+  if (!el) return;
+  let count = 0;
+  try { count = window.OfflineQueue ? await window.OfflineQueue.count() : 0; } catch (e) {}
+  if (!navigator.onLine) {
+    el.className = "offline-status off";
+    el.textContent = "⚠ " + t("offline") + (count ? ` · ${count}` : "");
+  } else if (count > 0) {
+    el.className = "offline-status pend";
+    el.textContent = `⟳ ${count} ${t("to_sync")}`;
+  } else {
+    el.className = "offline-status hidden";
+  }
 }
 
 // login form
@@ -2098,4 +2142,11 @@ function showMarkerInfo(mk) {
 }
 
 // ====================================================================
+// PWA: register the service worker for offline app-shell loading.
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch((e) => console.warn("SW registration failed", e));
+  });
+}
+
 boot();
