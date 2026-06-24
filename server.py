@@ -227,6 +227,33 @@ def audit(ctx, action, entity=None, entity_id=None, detail=None):
         traceback.print_exc()
 
 
+def _paginate(ctx, base_sql, params, order_sql, default_limit=25, max_limit=200):
+    """Page a query when the request asks for it.
+
+    base_sql: a complete SELECT (with any WHERE) but no ORDER BY / LIMIT.
+    order_sql: the ORDER BY clause string.
+    Returns the plain row list when neither ?page nor ?limit is given (keeps
+    existing callers/dropdowns working); otherwise an envelope
+    {items, total, page, pages, limit}.
+    """
+    params = list(params)
+    q = ctx.query
+    if "page" not in q and "limit" not in q:
+        return db.query(f"{base_sql} {order_sql}", params)
+    try:
+        limit = min(max(int(q.get("limit", default_limit)), 1), max_limit)
+    except (TypeError, ValueError):
+        limit = default_limit
+    try:
+        page = max(int(q.get("page", 1)), 1)
+    except (TypeError, ValueError):
+        page = 1
+    total = db.query(f"SELECT COUNT(*) c FROM ({base_sql})", params, one=True)["c"]
+    rows = db.query(f"{base_sql} {order_sql} LIMIT ? OFFSET ?", params + [limit, (page - 1) * limit])
+    pages = (total + limit - 1) // limit if limit else 1
+    return {"items": rows, "total": total, "page": page, "pages": pages, "limit": limit}
+
+
 # A photo's required permission depends on the entity it is attached to.
 _PHOTO_ENTITY_PERM = {
     "client": "clients.edit", "report": "visits.edit",
@@ -542,8 +569,7 @@ def list_clients(ctx):
         params += [f"%{q}%"] * 4
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY name_en"
-    return db.query(sql, params)
+    return _paginate(ctx, sql, params, "ORDER BY name_en")
 
 
 @route("GET", r"/api/clients/(\d+)")
@@ -681,8 +707,7 @@ def list_visits(ctx):
            "LEFT JOIN users u ON u.id=v.agent_id")
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY v.scheduled_start DESC"
-    return db.query(sql, params)
+    return _paginate(ctx, sql, params, "ORDER BY v.scheduled_start DESC")
 
 
 @route("GET", r"/api/visits/(\d+)")
@@ -957,8 +982,7 @@ def list_invoices(ctx):
            "FROM invoices i JOIN clients c ON c.id=i.client_id")
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY i.issue_date DESC"
-    return db.query(sql, params)
+    return _paginate(ctx, sql, params, "ORDER BY i.issue_date DESC")
 
 
 @route("GET", r"/api/invoices/(\d+)")

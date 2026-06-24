@@ -31,6 +31,22 @@ function canModule(mod) {
   return Object.keys(p).some(k => k.startsWith(mod + ".") && p[k]);
 }
 
+// ---- pagination helper for list views ----
+const PAGE_SIZE = 25;
+function pagerHTML(d) {
+  if (!d || (d.pages || 1) <= 1) return "";
+  return `<div class="pager">
+    <button class="btn sm secondary" data-pg="prev" ${d.page <= 1 ? "disabled" : ""}>‹ ${t("prev")}</button>
+    <span class="muted small">${t("page")} ${d.page} / ${d.pages} · ${d.total}</span>
+    <button class="btn sm secondary" data-pg="next" ${d.page >= d.pages ? "disabled" : ""}>${t("next")} ›</button></div>`;
+}
+function wirePager(scope, d, go) {
+  scope.querySelectorAll("[data-pg]").forEach(b => b.addEventListener("click", () => {
+    if (b.dataset.pg === "prev" && d.page > 1) go(d.page - 1);
+    else if (b.dataset.pg === "next" && d.page < d.pages) go(d.page + 1);
+  }));
+}
+
 // ---- caches for dropdowns ----
 const cache = { services: [], agents: [], clients: [], chemicals: [] };
 let SETTINGS = {};
@@ -256,20 +272,26 @@ async function viewDashboard(v) {
 // Clients list
 // ====================================================================
 async function viewClients(v) {
-  const clients = await API.get("/clients");
   v.innerHTML = `<div class="page-head"><h2>${t("clients_title")}</h2>
     ${isManager() ? `<button class="btn" id="add-client">+ ${t("new_client")}</button>` : ""}</div>
-    <div class="panel">
-      <table><thead><tr><th>${t("company_name_en")}</th><th>${t("contact_person")}</th>
-      <th>${t("phone")}</th><th>${t("city")}</th><th>${t("status")}</th></tr></thead>
-      <tbody>${clients.map(c => `<tr class="clickable" data-id="${c.id}">
+    <div class="panel" id="clients-list">${t("loading")}</div>`;
+  if ($("add-client")) $("add-client").addEventListener("click", () => clientForm());
+  const render = async (page) => {
+    const d = await API.get(`/clients?page=${page}&limit=${PAGE_SIZE}`);
+    const rows = d.items;
+    $("clients-list").innerHTML =
+      `<table><thead><tr><th>${t("company_name_en")}</th><th>${t("contact_person")}</th>
+        <th>${t("phone")}</th><th>${t("city")}</th><th>${t("status")}</th></tr></thead>
+      <tbody>${rows.map(c => `<tr class="clickable" data-id="${c.id}">
         <td><strong>${esc(localized(c, "name"))}</strong></td>
         <td>${esc(c.contact_person)}</td><td>${esc(c.phone)}</td>
         <td>${esc(c.city)}</td><td>${statusBadge(c.status)}</td></tr>`).join("") ||
-        `<tr><td colspan="5" class="empty">${t("none")}</td></tr>`}</tbody></table></div>`;
-  v.querySelectorAll("tr[data-id]").forEach(tr =>
-    tr.addEventListener("click", () => navigate("client", { id: tr.dataset.id })));
-  if ($("add-client")) $("add-client").addEventListener("click", () => clientForm());
+        `<tr><td colspan="5" class="empty">${t("none")}</td></tr>`}</tbody></table>` + pagerHTML(d);
+    $("clients-list").querySelectorAll("tr[data-id]").forEach(tr =>
+      tr.addEventListener("click", () => navigate("client", { id: tr.dataset.id })));
+    wirePager($("clients-list"), d, render);
+  };
+  render(1);
 }
 
 function clientForm(c) {
@@ -443,19 +465,20 @@ async function viewSchedule(v) {
       <label>${t("to")}: <input type="date" id="f-to"></label>
     </div>
     <div class="panel" id="visit-list">${t("loading")}</div>`;
-  async function refresh() {
-    const qp = [];
+  async function refresh(page = 1) {
+    const qp = [`page=${page}`, `limit=${PAGE_SIZE}`];
     if ($("f-status").value) qp.push("status=" + $("f-status").value);
     if ($("f-agent") && $("f-agent").value) qp.push("agent=" + $("f-agent").value);
     if ($("f-from").value) qp.push("from=" + $("f-from").value);
     if ($("f-to").value) qp.push("to=" + $("f-to").value);
-    const visits = await API.get("/visits" + (qp.length ? "?" + qp.join("&") : ""));
-    $("visit-list").innerHTML = visitsTable(visits);
+    const d = await API.get("/visits?" + qp.join("&"));
+    $("visit-list").innerHTML = visitsTable(d.items) + pagerHTML(d);
     wireVisitRows($("visit-list"));
+    wirePager($("visit-list"), d, refresh);
   }
-  ["f-status", "f-agent", "f-from", "f-to"].forEach(id => { if ($(id)) $(id).addEventListener("change", refresh); });
+  ["f-status", "f-agent", "f-from", "f-to"].forEach(id => { if ($(id)) $(id).addEventListener("change", () => refresh(1)); });
   if ($("add-visit")) $("add-visit").addEventListener("click", () => visitForm());
-  refresh();
+  refresh(1);
 }
 
 function visitForm(preset) {
@@ -688,23 +711,29 @@ function stockForm(id) {
 let invoiceTab = "invoice";
 async function viewInvoices(v) {
   const dt = invoiceTab;
-  const invoices = await API.get("/invoices?doc_type=" + dt);
   const tab = (k, label) => `<button class="btn sm ${invoiceTab === k ? "" : "secondary"}" data-tab="${k}">${label}</button>`;
   v.innerHTML = `<div class="page-head"><h2>${t("invoices_title")}</h2>
     <div style="display:flex;gap:8px">
       ${isManager() ? `<button class="btn secondary sm" id="exp-inv">⬇ ${t("export_csv")}</button>` : ""}
       ${isManager() ? `<button class="btn" id="add-inv">+ ${dt === "quote" ? t("quote") : t("new_invoice")}</button>` : ""}</div></div>
     <div class="toolbar">${tab("invoice", t("nav_invoices"))} ${tab("quote", t("nav_quotes"))}</div>
-    <div class="panel"><table><thead><tr><th>${t("invoice_no")}</th><th>${t("client")}</th>
-      <th>${t("issue_date")}</th><th>${t("total")}</th>${dt === "invoice" ? `<th>${t("paid")}</th>` : ""}<th>${t("status")}</th></tr></thead>
-      <tbody>${invoices.map(i => `<tr class="clickable" data-inv="${i.id}">
-        <td>${esc(i.number)}</td><td>${esc(localized(i, "client"))}</td>
-        <td>${fmtDate(i.issue_date)}</td><td>${money(i.total)}</td>${dt === "invoice" ? `<td>${money(i.paid)}</td>` : ""}
-        <td>${statusBadge(i.status)}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">${t("none")}</td></tr>`}</tbody></table></div>`;
+    <div class="panel" id="inv-list">${t("loading")}</div>`;
   v.querySelectorAll("[data-tab]").forEach(b => b.addEventListener("click", () => { invoiceTab = b.dataset.tab; navigate("invoices"); }));
-  v.querySelectorAll("tr[data-inv]").forEach(tr => tr.addEventListener("click", () => navigate("invoice", { id: tr.dataset.inv })));
   if ($("add-inv")) $("add-inv").addEventListener("click", () => invoiceForm({ doc_type: dt }));
   if ($("exp-inv")) $("exp-inv").addEventListener("click", () => downloadCsv("invoices"));
+  const render = async (page) => {
+    const d = await API.get(`/invoices?doc_type=${dt}&page=${page}&limit=${PAGE_SIZE}`);
+    $("inv-list").innerHTML =
+      `<table><thead><tr><th>${t("invoice_no")}</th><th>${t("client")}</th>
+        <th>${t("issue_date")}</th><th>${t("total")}</th>${dt === "invoice" ? `<th>${t("paid")}</th>` : ""}<th>${t("status")}</th></tr></thead>
+      <tbody>${d.items.map(i => `<tr class="clickable" data-inv="${i.id}">
+        <td>${esc(i.number)}</td><td>${esc(localized(i, "client"))}</td>
+        <td>${fmtDate(i.issue_date)}</td><td>${money(i.total)}</td>${dt === "invoice" ? `<td>${money(i.paid)}</td>` : ""}
+        <td>${statusBadge(i.status)}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">${t("none")}</td></tr>`}</tbody></table>` + pagerHTML(d);
+    $("inv-list").querySelectorAll("tr[data-inv]").forEach(tr => tr.addEventListener("click", () => navigate("invoice", { id: tr.dataset.inv })));
+    wirePager($("inv-list"), d, render);
+  };
+  render(1);
 }
 
 // Line-items editor used by the invoice/quote form.
