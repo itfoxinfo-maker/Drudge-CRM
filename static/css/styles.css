@@ -181,6 +181,10 @@ tr.clickable:hover { background: var(--green-l); }
 .photo-item img { width: 100%; height: 124px; object-fit: cover; display: block; }
 .photo-item .cap { padding: 7px 9px; font-size: 12px; color: var(--muted); }
 .photo-item .rm { position: absolute; top: 7px; inset-inline-end: 7px; background: rgba(0,0,0,.6); color: #fff; border: none; border-radius: 50%; width: 26px; height: 26px; cursor: pointer; }
+/* non-image attachments (PDF / Excel / other) render as a download card */
+.photo-item.file-item .file-link { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; height: 124px; padding: 10px; text-align: center; text-decoration: none; color: var(--ink, #1f2937); background: var(--green-l, #f1f5f9); }
+.photo-item.file-item .file-icon { font-size: 38px; line-height: 1; }
+.photo-item.file-item .file-name { font-size: 12px; font-weight: 600; word-break: break-word; max-height: 32px; overflow: hidden; }
 
 .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
 .toolbar input, .toolbar select { padding: 9px 12px; border: 1.5px solid var(--line); border-radius: 10px; font-family: inherit; background: #fff; }

@@ -164,6 +164,11 @@ const TRANSLATIONS = {
     offline: "Offline", to_sync: "to sync", saved_offline: "Saved offline — will sync",
     deleted_offline: "Deleted offline — will sync",
     synced_ok: "synced",
+    // attachments (images / PDF / Excel)
+    attachments: "Attachments", add_attachment: "Add attachment", files: "Files",
+    upload: "Upload", comment: "Comment",
+    attach_hint: "Images, PDF or Excel — up to 25 MB. You can select several.",
+    attach_after_save: "Save the report first, then you can attach files.",
   },
   ar: {
     app_name: "نظام إدارة مكافحة الآفات",
@@ -311,6 +316,11 @@ const TRANSLATIONS = {
     offline: "غير متصل", to_sync: "للمزامنة", saved_offline: "حُفظ دون اتصال — ستتم المزامنة",
     deleted_offline: "حُذف دون اتصال — ستتم المزامنة",
     synced_ok: "تمت المزامنة",
+    // attachments (images / PDF / Excel)
+    attachments: "المرفقات", add_attachment: "إضافة مرفق", files: "الملفات",
+    upload: "رفع", comment: "تعليق",
+    attach_hint: "صور أو PDF أو Excel — حتى 25 ميجابايت. يمكن اختيار عدة ملفات.",
+    attach_after_save: "احفظ التقرير أولاً لتتمكن من إرفاق الملفات.",
   },
 };
 

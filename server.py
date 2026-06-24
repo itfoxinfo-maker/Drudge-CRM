@@ -24,8 +24,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 mimetypes.add_type("application/manifest+json", ".webmanifest")  # PWA manifest
+mimetypes.add_type("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx")
+mimetypes.add_type("application/vnd.ms-excel", ".xls")
 ALLOWED_IMG = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
-MAX_UPLOAD_BYTES = 8 * 1024 * 1024   # 8 MB per uploaded file
+ALLOWED_DOC = {".pdf", ".xls", ".xlsx"}          # report attachments
+ALLOWED_UPLOAD = ALLOWED_IMG | ALLOWED_DOC
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024   # 25 MB per uploaded file
 
 
 def _sniff_image(data: bytes) -> bool:
@@ -43,8 +47,19 @@ def _sniff_image(data: bytes) -> bool:
     return False
 
 
+def _sniff_doc(ext: str, data: bytes) -> bool:
+    """True if the bytes match the expected signature for a PDF or Excel file."""
+    if ext == ".pdf":
+        return data[:5] == b"%PDF-"
+    if ext == ".xlsx":                              # OOXML = zip container
+        return data[:4] == b"PK\x03\x04"
+    if ext == ".xls":                               # legacy OLE2 compound file
+        return data[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+    return False
+
+
 def _validate_image_upload(f):
-    """Validate an uploaded file dict from parse_multipart: extension, size and
+    """Validate an uploaded image dict from parse_multipart: extension, size and
     actual content signature. Raises ApiError on any problem."""
     ext = os.path.splitext(f["filename"])[1].lower()
     if ext not in ALLOWED_IMG:
@@ -56,6 +71,23 @@ def _validate_image_upload(f):
         raise ApiError(413, f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)")
     if not _sniff_image(data):
         raise ApiError(400, "File is not a valid image")
+    return ext
+
+
+def _validate_upload(f):
+    """Validate an attachment: image, PDF or Excel. Checks extension, size and the
+    actual content signature so a renamed/forged file can't slip through."""
+    ext = os.path.splitext(f["filename"])[1].lower()
+    if ext not in ALLOWED_UPLOAD:
+        raise ApiError(400, "Only image, PDF or Excel files are allowed")
+    data = f["data"]
+    if not data:
+        raise ApiError(400, "Empty file")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise ApiError(413, f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)")
+    ok = _sniff_image(data) if ext in ALLOWED_IMG else _sniff_doc(ext, data)
+    if not ok:
+        raise ApiError(400, "File content does not match its type")
     return ext
 
 
@@ -1617,7 +1649,7 @@ def upload_photo(ctx):
         raise ApiError(400, "Valid entity_type and entity_id required")
     require_perm(ctx.user, _PHOTO_ENTITY_PERM[et])
     f = files[0]
-    ext = _validate_image_upload(f)
+    ext = _validate_upload(f)
     fname = f"{uuid.uuid4().hex}{ext}"
     with open(os.path.join(UPLOAD_DIR, fname), "wb") as out:
         out.write(f["data"])

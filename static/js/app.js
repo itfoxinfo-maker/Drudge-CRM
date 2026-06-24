@@ -427,8 +427,8 @@ async function viewClientFolder(v, arg) {
       ${can("maps.create") ? `<button class="btn sm" id="add-map">📤 ${t("upload_map")}</button>` : ""}</div>
       <div id="maps-box">${t("loading")}</div></div>
 
-    <div class="panel"><div class="section-title"><h3>${t("photos")}</h3>
-      ${role() !== "client" ? `<button class="btn sm" id="add-photo">📷 ${t("upload_photo")}</button>` : ""}</div>
+    <div class="panel"><div class="section-title"><h3>${t("attachments")}</h3>
+      ${role() !== "client" ? `<button class="btn sm" id="add-photo">📎 ${t("add_attachment")}</button>` : ""}</div>
       <div id="photos" class="photo-grid"></div></div>`;
 
   if ($("bc")) $("bc").addEventListener("click", () => navigate("clients"));
@@ -463,33 +463,61 @@ function siteForm(clientId) {
 }
 
 // ---- photos ----
-function renderPhotos(entityType, entityId, photos) {
-  const box = $("photos");
+// Classify an attachment by its file extension so non-images render as a
+// download link rather than a broken <img>.
+function attachKind(name) {
+  const ext = (name || "").toLowerCase().split(".").pop();
+  if (["jpg", "jpeg", "png", "gif", "webp"].includes(ext)) return "image";
+  if (ext === "pdf") return "pdf";
+  if (ext === "xls" || ext === "xlsx") return "excel";
+  return "file";
+}
+// Render images + document attachments into a grid (defaults to #photos; pass
+// containerId to target another grid, e.g. report attachments).
+function renderPhotos(entityType, entityId, photos, containerId) {
+  const box = $(containerId || "photos");
   if (!box) return;
   if (!photos || !photos.length) { box.innerHTML = `<div class="empty">${t("no_photos")}</div>`; return; }
-  box.innerHTML = photos.map(p => `<div class="photo-item">
-    <img src="/uploads/${esc(p.filename)}" alt="${esc(p.caption)}" />
-    ${role() !== "client" ? `<button class="rm" data-rmphoto="${p.id}">✕</button>` : ""}
-    <div class="cap">${esc(p.caption || p.original_name || "")}</div></div>`).join("");
+  const canRemove = role() !== "client";
+  box.innerHTML = photos.map(p => {
+    const rm = canRemove ? `<button class="rm" data-rmphoto="${p.id}">✕</button>` : "";
+    const cap = `<div class="cap">${esc(p.caption || p.original_name || "")}</div>`;
+    if (attachKind(p.filename) === "image") {
+      return `<div class="photo-item"><img src="/uploads/${esc(p.filename)}" alt="${esc(p.caption || "")}" />${rm}${cap}</div>`;
+    }
+    const icon = attachKind(p.filename) === "pdf" ? "📄" : attachKind(p.filename) === "excel" ? "📊" : "📎";
+    return `<div class="photo-item file-item">
+      <a class="file-link" href="/uploads/${esc(p.filename)}" target="_blank" rel="noopener" download="${esc(p.original_name || "")}">
+        <span class="file-icon">${icon}</span><span class="file-name">${esc(p.original_name || p.filename)}</span></a>${rm}${cap}</div>`;
+  }).join("");
   box.querySelectorAll("[data-rmphoto]").forEach(b => b.addEventListener("click", async () => {
     if (confirm(t("confirm_delete"))) { const r = await API.del("/photos/" + b.dataset.rmphoto); if (handledOffline(r, b.closest(".photo-item"))) return; navigate(currentView, { id: entityId }); }
   }));
 }
 function uploadPhotoDialog(entityType, entityId, after) {
-  openModal(t("upload_photo"), `<form id="pf">
-    <div class="field"><label>${t("photos")}</label><input type="file" name="file" accept="image/*" required /></div>
-    ${field(t("caption"), "caption")}
+  openModal(t("add_attachment"), `<form id="pf">
+    <div class="field"><label>${t("files")}</label>
+      <input type="file" name="file" accept="image/*,.pdf,.xls,.xlsx" multiple required />
+      <div class="muted small">${t("attach_hint")}</div></div>
+    ${field(t("comment"), "caption")}
     <div class="form-actions"><button type="button" class="btn secondary" id="pf-x">${t("cancel")}</button>
-    <button class="btn" type="submit">${t("upload_photo")}</button></div></form>`, (root) => {
+    <button class="btn" type="submit">${t("upload")}</button></div></form>`, (root) => {
     $("pf-x").addEventListener("click", closeModal);
     root.querySelector("#pf").addEventListener("submit", async (e) => {
       e.preventDefault();
-      const file = root.querySelector("[name=file]").files[0];
-      if (!file) return;
-      try { const saved = await API.uploadPhoto(entityType, entityId, file, root.querySelector("[name=caption]").value);
-        if (handledOffline(saved)) return;
-        closeModal(); toast(t("saved")); after && after(); }
-      catch (err) { alert(err.message); }
+      const files = Array.from(root.querySelector("[name=file]").files);
+      if (!files.length) return;
+      const caption = root.querySelector("[name=caption]").value;
+      try {
+        let queued = false;
+        for (const file of files) {
+          const saved = await API.uploadPhoto(entityType, entityId, file, caption);
+          if (saved && saved.__queued) queued = true;
+        }
+        closeModal();
+        if (queued) return;  // queued offline; oq-queued toast already shown, can't refresh
+        toast(t("saved")); after && after();
+      } catch (err) { alert(err.message); }
     });
   });
 }
@@ -606,8 +634,8 @@ async function viewVisit(v, arg) {
     <div class="panel"><div class="section-title"><h3>${t("signatures")}</h3></div>
       <div class="grid-2">${sigBlock("customer", visit, id, canEdit)}${sigBlock("technician", visit, id, canEdit)}</div></div>
 
-    <div class="panel"><div class="section-title"><h3>${t("photos")}</h3>
-      ${role() !== "client" ? `<button class="btn sm" id="add-photo">📷 ${t("upload_photo")}</button>` : ""}</div>
+    <div class="panel"><div class="section-title"><h3>${t("attachments")}</h3>
+      ${role() !== "client" ? `<button class="btn sm" id="add-photo">📎 ${t("add_attachment")}</button>` : ""}</div>
       <div id="photos" class="photo-grid"></div></div>`;
 
   $("bc").addEventListener("click", () => navigate(role() === "client" ? "visits" : "schedule"));
@@ -629,9 +657,11 @@ async function viewVisit(v, arg) {
   v.querySelectorAll("[data-rmuse]").forEach(b => b.addEventListener("click", async () => {
     const r = await API.del("/usage/" + b.dataset.rmuse); if (handledOffline(r, b.closest("tr"))) return; navigate("visit", { id });
   }));
-  const allPhotos = (visit.photos || []).concat(visit.report_photos || []);
-  renderPhotos("visit", id, allPhotos);
+  renderPhotos("visit", id, visit.photos);
   if ($("add-photo")) $("add-photo").addEventListener("click", () => uploadPhotoDialog("visit", id, () => navigate("visit", { id })));
+  // report-level attachments (images / PDF / Excel) live under the report panel
+  if (rep.id) renderPhotos("report", rep.id, visit.report_photos, "report-files");
+  if ($("add-report-file")) $("add-report-file").addEventListener("click", () => uploadPhotoDialog("report", rep.id, () => navigate("visit", { id })));
 }
 
 function reportForm(rep, visitId, canEdit) {
@@ -661,7 +691,10 @@ function reportForm(rep, visitId, canEdit) {
     </div>
     ${field(t("branch_issue"), "branch_issue", { value: rep.branch_issue, textarea: true })}
     ${canEdit ? `<div class="form-actions"><button class="btn" type="submit">${t("save_report")}</button></div>` : ""}
-    </form>${!canEdit ? "<script>document.querySelectorAll('#report-form [name]').forEach(e=>e.disabled=true)</script>" : ""}`;
+    </form>${!canEdit ? "<script>document.querySelectorAll('#report-form [name]').forEach(e=>e.disabled=true)</script>" : ""}
+    ${rep.id ? `<div class="section-title" style="margin:18px 0 8px"><h3>📎 ${t("attachments")}</h3>
+      ${canEdit ? `<button type="button" class="btn sm" id="add-report-file">📎 ${t("add_attachment")}</button>` : ""}</div>
+      <div id="report-files" class="photo-grid"></div>` : `<div class="muted small" style="margin-top:12px">${t("attach_after_save")}</div>`}`;
 }
 function clientReportView(rep) {
   if (!rep || !rep.id) return `<div class="empty">${t("none")}</div>`;
@@ -679,7 +712,9 @@ function clientReportView(rep) {
     <div>${t("next_visit_due")}</div><div>${fmtDate(rep.next_visit_due)}</div>
     ${rep.spare_parts_changed ? `<div>${t("spare_parts_changed")}</div><div>${esc(rep.spare_parts_changed)}</div>` : ""}
     ${mat}
-    ${rep.branch_issue ? `<div>${t("branch_issue")}</div><div>${esc(rep.branch_issue)}</div>` : ""}</div>`;
+    ${rep.branch_issue ? `<div>${t("branch_issue")}</div><div>${esc(rep.branch_issue)}</div>` : ""}</div>
+    <div class="section-title" style="margin:18px 0 8px"><h3>📎 ${t("attachments")}</h3></div>
+    <div id="report-files" class="photo-grid"></div>`;
 }
 function usageForm(visitId) {
   const opts = cache.chemicals.map(c => ({ v: c.id, l: `${localized(c, "name")} (${c.quantity_in_stock} ${c.unit})` }));
