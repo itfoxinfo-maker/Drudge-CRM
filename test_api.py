@@ -129,6 +129,32 @@ def main():
         st, _ = call("GET", "/export/invoices.csv", agent)
         check("invoice csv export blocked for agent (403)", st == 403)
 
+        print("DATA ISOLATION (photos + scoped exports)")
+        # photos: a client may read its own visit's photos but not another company's.
+        st, _ = call("GET", "/photos?entity_type=visit&entity_id=1", client)
+        check("client reads own visit photos (200)", st == 200)
+        st, _ = call("GET", "/photos?entity_type=visit&entity_id=2", client)
+        check("client blocked from other company's visit photos (403)", st == 403)
+        # an agent may read its own visit's photos but not another agent's.
+        st, _ = call("GET", "/photos?entity_type=visit&entity_id=1", agent)
+        check("agent reads own visit photos (200)", st == 200)
+        st, _ = call("GET", "/photos?entity_type=visit&entity_id=2", agent)
+        check("agent blocked from other agent's visit photos (403)", st == 403)
+        # CSV exports are row-scoped: a client gets only its own company's visits;
+        # agent2 ("Omar Saeed") only appears on other companies' visits.
+        st, cvis = call("GET", "/export/visits.csv", client, raw=True)
+        check("client visits export scoped to own company",
+              st == 200 and b"Omar Saeed" not in cvis)
+        st, cinv = call("GET", "/export/invoices.csv", client, raw=True)
+        check("client invoices export scoped to own company",
+              st == 200 and b"INV-00002" not in cinv)
+        st, _ = call("GET", "/export/chemicals.csv", client)
+        check("client blocked from chemicals export (403)", st == 403)
+        # an agent's visits export excludes the other agent's visits.
+        st, avis = call("GET", "/export/visits.csv", agent, raw=True)
+        check("agent visits export excludes other agent",
+              st == 200 and b"Omar Saeed" not in avis)
+
         print("RBAC PERMISSIONS")
         manager = login("manager@pestcrm.com", "manager123")
         # Visibility of the RBAC admin surface is admin-only.

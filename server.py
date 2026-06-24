@@ -1718,7 +1718,13 @@ def save_signature(ctx):
 @route("GET", r"/api/export/(clients|visits|invoices|chemicals|payments)\.csv")
 def export_csv(ctx):
     entity = ctx.params[0]
-    require_perm(ctx.user, entity + ".view")
+    u = ctx.user
+    # Clients may only export their own visits & invoices; staff need the perm.
+    if u["role"] == "client":
+        if entity not in ("visits", "invoices"):
+            raise ApiError(403, "You do not have permission for this action")
+    else:
+        require_perm(u, entity + ".view")
     queries = {
         "clients": "SELECT id,name_en,name_ar,contact_person,phone,email,city,status,created_at FROM clients",
         "visits": "SELECT v.id,c.name_en client,v.scheduled_start,v.status,u.full_name agent "
@@ -1729,7 +1735,24 @@ def export_csv(ctx):
         "payments": "SELECT p.id,i.number invoice,p.amount,p.method,p.paid_at FROM payments p "
                     "JOIN invoices i ON i.id=p.invoice_id",
     }
-    rows = db.query(queries[entity])
+    # Row-scope the export to match what each role may see in the app:
+    # clients -> only their own company; agents -> only their own visits.
+    where, params = [], []
+    if entity == "visits":
+        if u["role"] == "client":
+            where.append("v.client_id=?"); params.append(u["client_id"])
+        elif u["role"] == "agent":
+            where.append("v.agent_id=?"); params.append(u["id"])
+    elif entity == "invoices" and u["role"] == "client":
+        where.append("i.client_id=?"); params.append(u["client_id"])
+    elif entity == "payments" and u["role"] == "client":
+        where.append("i.client_id=?"); params.append(u["client_id"])
+    elif entity == "clients" and u["role"] == "client":
+        where.append("id=?"); params.append(u["client_id"])
+    sql = queries[entity]
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    rows = db.query(sql, params)
     return {"_csv": rows, "_filename": entity + ".csv"}
 
 
@@ -1742,6 +1765,13 @@ def list_photos(ctx):
     eid = ctx.query.get("entity_id")
     if not et or not eid:
         raise ApiError(400, "entity_type and entity_id required")
+    try:
+        eid = int(eid)
+    except (TypeError, ValueError):
+        raise ApiError(400, "entity_id must be numeric")
+    # Enforce the same per-company / per-agent isolation as the parent record,
+    # so users can't enumerate other tenants' photos by id.
+    _assert_photo_access(ctx.user, et, eid)
     return db.query("SELECT * FROM photos WHERE entity_type=? AND entity_id=? ORDER BY uploaded_at DESC",
                     (et, eid))
 
@@ -1965,6 +1995,32 @@ def _assert_visit_access(user, visit):
         raise ApiError(403, "No permission")
     if user["role"] == "agent" and visit["agent_id"] != user["id"]:
         raise ApiError(403, "No permission")
+
+
+def _assert_photo_access(user, entity_type, entity_id):
+    """Authorize reading photos/attachments for an entity, enforcing per-company
+    (client) and per-agent isolation the same way the parent records do."""
+    if entity_type == "client":
+        if user["role"] != "client":
+            require_perm(user, "clients.view")
+        _assert_client_access(user, entity_id)
+    elif entity_type in ("visit", "report"):
+        if entity_type == "report":
+            rep = db.query("SELECT visit_id FROM reports WHERE id=?", (entity_id,), one=True)
+            if not rep:
+                raise ApiError(404, "Not found")
+            entity_id = rep["visit_id"]
+        v = db.query("SELECT client_id, agent_id FROM visits WHERE id=?", (entity_id,), one=True)
+        if not v:
+            raise ApiError(404, "Not found")
+        if user["role"] != "client":
+            require_perm(user, "visits.view")
+        _assert_visit_access(user, v)
+    elif entity_type == "chemical":
+        # not company data; clients have no chemicals.view so this 403s for them.
+        require_perm(user, "chemicals.view")
+    else:
+        raise ApiError(400, "Invalid entity_type")
 
 
 def _client_outstanding(cid):
