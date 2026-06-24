@@ -435,7 +435,7 @@ async function viewClientFolder(v, arg) {
   v.querySelectorAll("tr[data-inv]").forEach(tr => tr.addEventListener("click", () => navigate("invoice", { id: tr.dataset.inv })));
   if ($("add-site")) $("add-site").addEventListener("click", () => siteForm(c.id));
   v.querySelectorAll("[data-rmsite]").forEach(b => b.addEventListener("click", async () => {
-    if (confirm(t("confirm_delete"))) { await API.del("/sites/" + b.dataset.rmsite); navigate("client", { id: c.id }); }
+    if (confirm(t("confirm_delete"))) { const r = await API.del("/sites/" + b.dataset.rmsite); if (handledOffline(r)) return; navigate("client", { id: c.id }); }
   }));
   renderPhotos("client", c.id, c.photos);
   if ($("add-photo")) $("add-photo").addEventListener("click", () => uploadPhotoDialog("client", c.id, () => navigate("client", { id: c.id })));
@@ -466,7 +466,7 @@ function renderPhotos(entityType, entityId, photos) {
     ${role() !== "client" ? `<button class="rm" data-rmphoto="${p.id}">✕</button>` : ""}
     <div class="cap">${esc(p.caption || p.original_name || "")}</div></div>`).join("");
   box.querySelectorAll("[data-rmphoto]").forEach(b => b.addEventListener("click", async () => {
-    if (confirm(t("confirm_delete"))) { await API.del("/photos/" + b.dataset.rmphoto); navigate(currentView, { id: entityId }); }
+    if (confirm(t("confirm_delete"))) { const r = await API.del("/photos/" + b.dataset.rmphoto); if (handledOffline(r)) return; navigate(currentView, { id: entityId }); }
   }));
 }
 function uploadPhotoDialog(entityType, entityId, after) {
@@ -621,7 +621,7 @@ async function viewVisit(v, arg) {
   });
   if ($("add-chem")) $("add-chem").addEventListener("click", () => usageForm(id));
   v.querySelectorAll("[data-rmuse]").forEach(b => b.addEventListener("click", async () => {
-    await API.del("/usage/" + b.dataset.rmuse); navigate("visit", { id });
+    const r = await API.del("/usage/" + b.dataset.rmuse); if (handledOffline(r)) return; navigate("visit", { id });
   }));
   const allPhotos = (visit.photos || []).concat(visit.report_photos || []);
   renderPhotos("visit", id, allPhotos);
@@ -1547,7 +1547,7 @@ async function viewContracts(v) {
   });
   v.querySelectorAll("[data-edit]").forEach(b => b.addEventListener("click", () => contractForm(list.find(c => c.id == b.dataset.edit))));
   v.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", async () => {
-    if (confirm(t("confirm_delete"))) { await API.del("/contracts/" + b.dataset.del); navigate("contracts"); }
+    if (confirm(t("confirm_delete"))) { const r = await API.del("/contracts/" + b.dataset.del); if (handledOffline(r)) return; navigate("contracts"); }
   }));
 }
 function contractForm(c) {
@@ -2044,7 +2044,7 @@ async function loadClientMaps(c) {
   }));
   box.querySelectorAll("[data-rmmap]").forEach(b => b.addEventListener("click", async (e) => {
     e.stopPropagation();
-    if (confirm(t("confirm_delete"))) { await API.del("/maps/" + b.dataset.rmmap); loadClientMaps(c); }
+    if (confirm(t("confirm_delete"))) { const r = await API.del("/maps/" + b.dataset.rmmap); if (handledOffline(r)) return; loadClientMaps(c); }
   }));
 }
 
@@ -2137,7 +2137,7 @@ function markerForm(mapId, mk, isEdit) {
       <button class="btn" type="submit">${t("save_device")}</button></div></form>`, (root) => {
     $("mk-x").addEventListener("click", closeModal);
     if ($("mk-del")) $("mk-del").addEventListener("click", async () => {
-      await API.del("/markers/" + mk.id); closeModal(); navigate("map", { id: mapId });
+      const r = await API.del("/markers/" + mk.id); if (handledOffline(r)) return; closeModal(); navigate("map", { id: mapId });
     });
     root.querySelector("#mkf").addEventListener("submit", async (e) => {
       e.preventDefault();
