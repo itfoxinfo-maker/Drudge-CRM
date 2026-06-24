@@ -1,0 +1,43 @@
+<svg viewBox="0 0 520 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Home protected from pests">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#eafaf0"/><stop offset="1" stop-color="#ffffff"/>
+    </linearGradient>
+    <linearGradient id="dome" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#16a34a" stop-opacity=".22"/><stop offset="1" stop-color="#16a34a" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="roof" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1a1d24"/><stop offset="1" stop-color="#2b313c"/>
+    </linearGradient>
+  </defs>
+  <rect width="520" height="420" rx="24" fill="url(#sky)"/>
+  <!-- protective dome -->
+  <path d="M70 300 A190 190 0 0 1 450 300 Z" fill="url(#dome)"/>
+  <path d="M70 300 A190 190 0 0 1 450 300" fill="none" stroke="#16a34a" stroke-width="3" stroke-dasharray="2 10" stroke-linecap="round" opacity=".7"/>
+  <!-- ground -->
+  <rect x="40" y="300" width="440" height="8" rx="4" fill="#d6e6dc"/>
+  <!-- house -->
+  <g>
+    <rect x="170" y="200" width="180" height="100" rx="6" fill="#ffffff" stroke="#e2e8e6" stroke-width="2"/>
+    <path d="M160 205 L260 140 L360 205 Z" fill="url(#roof)"/>
+    <rect x="246" y="245" width="36" height="55" rx="3" fill="#16a34a"/>
+    <rect x="195" y="232" width="34" height="30" rx="4" fill="#cdeede"/>
+    <rect x="291" y="232" width="34" height="30" rx="4" fill="#cdeede"/>
+    <circle cx="252" cy="273" r="2.6" fill="#fff"/>
+  </g>
+  <!-- shield with check -->
+  <g transform="translate(260 96)">
+    <path d="M0 -34 L30 -22 V6 C30 26 16 38 0 46 C-16 38 -30 26 -30 6 V-22 Z" fill="#16a34a"/>
+    <path d="M-13 4 L-3 14 L15 -8" fill="none" stroke="#fff" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <!-- repelled bugs outside dome -->
+  <g fill="#9aa6b2">
+    <g transform="translate(70 120)"><ellipse cx="0" cy="0" rx="9" ry="12"/><circle cx="0" cy="-13" r="5"/><line x1="-9" y1="-4" x2="-18" y2="-10" stroke="#9aa6b2" stroke-width="2"/><line x1="9" y1="-4" x2="18" y2="-10" stroke="#9aa6b2" stroke-width="2"/></g>
+    <g transform="translate(445 150)"><ellipse cx="0" cy="0" rx="8" ry="11"/><circle cx="0" cy="-12" r="4.5"/><line x1="-8" y1="-3" x2="-16" y2="-9" stroke="#9aa6b2" stroke-width="2"/><line x1="8" y1="-3" x2="16" y2="-9" stroke="#9aa6b2" stroke-width="2"/></g>
+    <g transform="translate(120 70) scale(.8)"><ellipse cx="0" cy="0" rx="9" ry="12"/><circle cx="0" cy="-13" r="5"/></g>
+  </g>
+  <!-- spray sparkles inside -->
+  <g fill="#16a34a" opacity=".8">
+    <circle cx="200" cy="180" r="3"/><circle cx="330" cy="175" r="3"/><circle cx="300" cy="200" r="2"/><circle cx="225" cy="160" r="2"/>
+  </g>
+</svg>

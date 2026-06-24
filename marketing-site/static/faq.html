@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Q&amp;A — Drudge Pest Control</title>
+  <meta name="description" content="Answers to common questions about Drudge pest control — safety, compliance, contracts, treatments and what to expect from a professional program." />
+  <link rel="icon" href="/img/drudge.jpeg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/css/styles.css" />
+</head>
+<body>
+  <!-- Header -->
+  <header class="nav" id="top">
+    <div class="container nav-inner">
+      <a href="/#top" class="logo"><img src="/img/drudge.jpeg" alt="Drudge" /></a>
+      <nav class="nav-links" id="nav-links">
+        <a href="/#services" data-i18n="nav_services">Services</a>
+        <a href="/#why" data-i18n="nav_why">Why Drudge</a>
+        <a href="/articles.html" data-i18n="nav_articles">Articles</a>
+        <a href="/faq.html" data-i18n="nav_faq">Q&amp;A</a>
+        <a href="/#contact" data-i18n="nav_contact">Contact</a>
+        <button id="lang-toggle" class="lang-btn">العربية</button>
+        <a href="/#contact" class="btn btn-accent nav-quote" data-i18n="nav_quote">Get a Quote</a>
+      </nav>
+      <button class="burger" id="burger" aria-label="Menu"><span></span><span></span><span></span></button>
+    </div>
+  </header>
+
+  <!-- Page hero -->
+  <section class="page-hero">
+    <div class="container">
+      <span class="kicker" id="ph-kicker">Questions &amp; Answers</span>
+      <h1 id="ph-title">Everything you wanted to ask</h1>
+      <p id="ph-sub">Straight answers about our service, safety and contracts.</p>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section class="section">
+    <div class="container">
+      <div class="faq" id="faq"></div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container footer-inner">
+      <div class="footer-brand">
+        <img src="/img/drudge.jpeg" alt="Drudge" class="footer-logo" />
+        <p data-i18n="foot_tag">Professional pest control & hygiene management.</p>
+      </div>
+      <div class="footer-cols">
+        <div>
+          <h4 data-i18n="foot_services">Services</h4>
+          <a href="/#services" data-i18n="s1_t">General Pest Control</a>
+          <a href="/#services" data-i18n="s2_t">Rodent Control</a>
+          <a href="/#services" data-i18n="s4_t">Cockroach Treatment</a>
+          <a href="/#services" data-i18n="s6_t">Fumigation</a>
+        </div>
+        <div>
+          <h4 data-i18n="foot_company">Company</h4>
+          <a href="/articles.html" data-i18n="nav_articles">Articles</a>
+          <a href="/faq.html" data-i18n="nav_faq">Q&amp;A</a>
+          <a href="/#process" data-i18n="nav_process">How It Works</a>
+          <a href="/#contact" data-i18n="foot_contact">Contact</a>
+        </div>
+      </div>
+    </div>
+    <div class="container footer-bottom">
+      <span>© <span id="year">2026</span> Drudge. <span data-i18n="foot_rights">All rights reserved.</span></span>
+      <span class="powered" data-i18n="foot_powered">Operations powered by FoxSystems</span>
+    </div>
+  </footer>
+
+  <script>
+    const PAGE = {
+      en: { kicker: "Questions & Answers", title: "Everything you wanted to ask",
+        sub: "Straight answers about our service, safety, compliance and contracts. Still unsure? Just get in touch.",
+        docTitle: "Q&A — Drudge Pest Control" },
+      ar: { kicker: "أسئلة وأجوبة", title: "كل ما أردت أن تسأل عنه",
+        sub: "إجابات واضحة عن خدمتنا والسلامة والامتثال والعقود. ما زلت غير متأكد؟ تواصل معنا فحسب.",
+        docTitle: "أسئلة وأجوبة — درَدج لمكافحة الآفات" },
+    };
+    const FAQ = [
+      {
+        cat: { en: "Service & treatments", ar: "الخدمة والمعالجات" },
+        items: [
+          {
+            q: { en: "Do you only spray, or do you do more than that?",
+                 ar: "هل تكتفون بالرشّ، أم تقدّمون أكثر من ذلك؟" },
+            a: { en: "Spraying is just one tool. We run a full Integrated Pest Management (IPM) program: we inspect the site, identify the species, seal entry points, improve sanitation, treat precisely where needed, then monitor and document the results. This removes the causes of infestation rather than just the pests you can see today.",
+                 ar: "الرشّ ليس سوى أداة واحدة. نحن ندير برنامج إدارة متكاملة للآفات (IPM): نعاين الموقع، ونحدّد النوع، ونسدّ نقاط الدخول، ونحسّن النظافة، ونعالج بدقّة حيث يلزم، ثم نراقب النتائج ونوثّقها. هذا يزيل أسباب الإصابة لا مجرد الآفات التي تراها اليوم." },
+          },
+          {
+            q: { en: "Which pests do you handle?",
+                 ar: "ما الآفات التي تتعاملون معها؟" },
+            a: { en: "Cockroaches, rodents (rats and mice), termites, bed bugs, flies and mosquitoes, ants, stored-product pests and more. We tailor the program to your premises — restaurants, hotels, schools, warehouses, retail and offices.",
+                 ar: "الصراصير، والقوارض (الجرذان والفئران)، والنمل الأبيض، وبق الفراش، والذباب والبعوض، والنمل، وآفات المخزون وغيرها. ونصمّم البرنامج وفق منشأتك — المطاعم والفنادق والمدارس والمستودعات والمتاجر والمكاتب." },
+          },
+          {
+            q: { en: "How quickly will I see results?",
+                 ar: "متى سأرى النتائج؟" },
+            a: { en: "Visible activity usually drops within the first one to two weeks. Lasting control comes from the full cycle — exclusion, sanitation and monitoring — which is why we measure success over the first 90 days, not a single visit.",
+                 ar: "ينخفض النشاط الظاهر عادةً خلال الأسبوع الأول إلى الثاني. أما السيطرة الدائمة فتأتي من الدورة الكاملة — العزل والنظافة والمراقبة — ولهذا نقيس النجاح خلال الأيام التسعين الأولى، لا في زيارة واحدة." },
+          },
+        ],
+      },
+      {
+        cat: { en: "Safety & compliance", ar: "السلامة والامتثال" },
+        items: [
+          {
+            q: { en: "Are the products safe around food, staff and children?",
+                 ar: "هل المنتجات آمنة حول الطعام والموظفين والأطفال؟" },
+            a: { en: "Yes. We use licensed products and apply the least-toxic effective method in the smallest effective amount, placed precisely rather than sprayed across surfaces. Our technicians are trained and follow strict safety procedures, and we advise on any re-entry intervals where relevant.",
+                 ar: "نعم. نستخدم منتجات مرخّصة ونطبّق أقل الأساليب سُمّيّةً وأكثرها فعالية بأصغر كمية فعّالة، موضوعةً بدقّة لا منثورةً على الأسطح. وفنّيونا مدرّبون ويتّبعون إجراءات سلامة صارمة، وننصحك بفترات إعادة الدخول عند الحاجة." },
+          },
+          {
+            q: { en: "Will your documentation pass a food-safety audit (HACCP)?",
+                 ar: "هل يجتاز توثيقكم تدقيق سلامة الغذاء (HACCP)؟" },
+            a: { en: "That is exactly what it is built for. You receive service reports, a mapped device layout, pest-activity trend analysis and service certificates — the evidence auditors expect. Everything is stored and available on demand whenever an inspector arrives.",
+                 ar: "هذا تماماً ما صُمّم من أجله. تحصل على تقارير خدمة، وخريطة لمواقع الأجهزة، وتحليل اتجاهات نشاط الآفات، وشهادات خدمة — وهي الأدلة التي يتوقّعها المدقّقون. وكل ذلك محفوظ ومتاح عند الطلب متى وصل المفتّش." },
+          },
+          {
+            q: { en: "Do I need to close or empty my premises during treatment?",
+                 ar: "هل يجب إغلاق المنشأة أو إخلاؤها أثناء المعالجة؟" },
+            a: { en: "Rarely. Most routine treatments are carried out with minimal disruption and no closure. For specific intensive treatments such as fumigation we agree the schedule and any temporary precautions with you in advance.",
+                 ar: "نادراً. تُجرى معظم المعالجات الروتينية بأقل قدر من التعطيل ودون إغلاق. أما المعالجات المكثّفة المحدّدة مثل التبخير فنتّفق معك مسبقاً على الجدول وأي احتياطات مؤقتة." },
+          },
+        ],
+      },
+      {
+        cat: { en: "Contracts & working with us", ar: "العقود والتعامل معنا" },
+        items: [
+          {
+            q: { en: "Do you offer one-off visits or ongoing contracts?",
+                 ar: "هل تقدّمون زيارات لمرة واحدة أم عقوداً مستمرة؟" },
+            a: { en: "Both. We handle one-off problems, but most businesses choose a service contract with scheduled visits, continuous monitoring and certificates — it is more cost-effective and keeps you permanently audit-ready.",
+                 ar: "كلاهما. نتعامل مع المشكلات الطارئة، لكن معظم المنشآت تختار عقد خدمة بزيارات مجدولة ومراقبة مستمرة وشهادات — فهو أوفر ويُبقيك جاهزاً للتدقيق على الدوام." },
+          },
+          {
+            q: { en: "How is the price decided?",
+                 ar: "كيف يُحدَّد السعر؟" },
+            a: { en: "After a free site inspection. Pricing depends on the size and type of premises, the pests involved and the level of service. You receive a clear, no-obligation quote before any work begins.",
+                 ar: "بعد معاينة مجانية للموقع. يعتمد السعر على حجم المنشأة ونوعها، والآفات المعنية، ومستوى الخدمة. وتحصل على عرض سعر واضح دون أي التزام قبل بدء أي عمل." },
+          },
+          {
+            q: { en: "How do I get started?",
+                 ar: "كيف أبدأ؟" },
+            a: { en: "Request a free inspection through the contact form or message us on WhatsApp. We survey your site, send a quote, and once approved we schedule the first visit and begin the program.",
+                 ar: "اطلب معاينة مجانية عبر نموذج التواصل أو راسلنا على واتساب. نعاين موقعك، ونرسل عرض سعر، وبمجرد الموافقة نحدّد موعد الزيارة الأولى ونبدأ البرنامج." },
+          },
+        ],
+      },
+    ];
+    function renderPageContent(lang) {
+      const t = PAGE[lang] || PAGE.en;
+      document.title = t.docTitle;
+      document.getElementById("ph-kicker").textContent = t.kicker;
+      document.getElementById("ph-title").textContent = t.title;
+      document.getElementById("ph-sub").textContent = t.sub;
+
+      const wrap = document.getElementById("faq");
+      wrap.innerHTML = FAQ.map(group => {
+        const items = group.items.map(it => `
+          <div class="faq-item">
+            <button class="faq-q" type="button">
+              <span>${it.q[lang] || it.q.en}</span>
+              <span class="chev">+</span>
+            </button>
+            <div class="faq-a"><div class="faq-a-inner">${it.a[lang] || it.a.en}</div></div>
+          </div>`).join("");
+        return `<h2 class="faq-cat">${group.cat[lang] || group.cat.en}</h2>${items}`;
+      }).join("");
+
+      wrap.querySelectorAll(".faq-q").forEach(btn => {
+        btn.addEventListener("click", () => {
+          btn.parentElement.classList.toggle("open");
+        });
+      });
+    }
+  </script>
+  <script src="/js/site.js"></script>
+</body>
+</html>

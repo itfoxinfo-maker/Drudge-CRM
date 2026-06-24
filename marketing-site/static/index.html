@@ -16,13 +16,13 @@
     <div class="container nav-inner">
       <a href="#top" class="logo"><img src="/img/drudge.jpeg" alt="Drudge" /></a>
       <nav class="nav-links" id="nav-links">
-        <a href="#services" data-i18n="nav_services">Services</a>
-        <a href="#why" data-i18n="nav_why">Why Drudge</a>
-        <a href="#sectors" data-i18n="nav_sectors">Industries</a>
-        <a href="#process" data-i18n="nav_process">How It Works</a>
-        <a href="#contact" data-i18n="nav_contact">Contact</a>
+        <a href="/#services" data-i18n="nav_services">Services</a>
+        <a href="/#why" data-i18n="nav_why">Why Drudge</a>
+        <a href="/articles.html" data-i18n="nav_articles">Articles</a>
+        <a href="/faq.html" data-i18n="nav_faq">Q&amp;A</a>
+        <a href="/#contact" data-i18n="nav_contact">Contact</a>
         <button id="lang-toggle" class="lang-btn">العربية</button>
-        <a href="#contact" class="btn btn-accent nav-quote" data-i18n="nav_quote">Get a Quote</a>
+        <a href="/#contact" class="btn btn-accent nav-quote" data-i18n="nav_quote">Get a Quote</a>
       </nav>
       <button class="burger" id="burger" aria-label="Menu"><span></span><span></span><span></span></button>
     </div>
@@ -31,19 +31,22 @@
   <!-- Hero -->
   <section class="hero">
     <div class="container hero-inner">
-      <span class="pill" data-i18n="hero_badge">Licensed & Certified Pest Control</span>
-      <h1 data-i18n="hero_title">Pest control that protects your business and your reputation.</h1>
-      <p class="lead" data-i18n="hero_sub">Drudge delivers professional, safe and fully-documented pest management.</p>
-      <div class="hero-cta">
-        <a href="#contact" class="btn btn-accent" data-i18n="hero_cta1">Request a Free Inspection</a>
-        <a href="#services" class="btn btn-ghost" data-i18n="hero_cta2">Our Services</a>
+      <div class="hero-text">
+        <span class="pill" data-i18n="hero_badge">Licensed & Certified Pest Control</span>
+        <h1 data-i18n="hero_title">Pest control that protects your business and your reputation.</h1>
+        <p class="lead" data-i18n="hero_sub">Drudge delivers professional, safe and fully-documented pest management.</p>
+        <div class="hero-cta">
+          <a href="#contact" class="btn btn-accent" data-i18n="hero_cta1">Request a Free Inspection</a>
+          <a href="#services" class="btn btn-ghost" data-i18n="hero_cta2">Our Services</a>
+        </div>
       </div>
-      <div class="hero-stats">
-        <div class="stat"><b>500+</b><span data-i18n="stat_sites">Sites protected</span></div>
-        <div class="stat"><b>8</b><span data-i18n="stat_services">Pest services</span></div>
-        <div class="stat"><b>24/7</b><span data-i18n="stat_response">Emergency response</span></div>
-        <div class="stat"><b>100%</b><span data-i18n="stat_reports">Documented reports</span></div>
-      </div>
+      <div class="hero-art"><img src="/img/hero-protect.svg" alt="Home protected from pests" /></div>
+    </div>
+    <div class="container hero-stats">
+      <div class="stat"><b>500+</b><span data-i18n="stat_sites">Sites protected</span></div>
+      <div class="stat"><b>8</b><span data-i18n="stat_services">Pest services</span></div>
+      <div class="stat"><b>24/7</b><span data-i18n="stat_response">Emergency response</span></div>
+      <div class="stat"><b>100%</b><span data-i18n="stat_reports">Documented reports</span></div>
     </div>
   </section>
 
@@ -70,19 +73,22 @@
 
   <!-- Why Drudge -->
   <section class="section alt" id="why">
-    <div class="container">
-      <div class="head reveal">
-        <span class="kicker" data-i18n="why_kicker">Why Drudge</span>
-        <h2 data-i18n="why_title">Protection you can prove</h2>
-        <p class="sub" data-i18n="why_sub">We document everything, so you're always inspection-ready.</p>
-      </div>
-      <div class="grid grid-3">
-        <article class="feature reveal"><div class="fic">✅</div><div><h3 data-i18n="w1_t"></h3><p data-i18n="w1_d"></p></div></article>
-        <article class="feature reveal"><div class="fic">📄</div><div><h3 data-i18n="w2_t"></h3><p data-i18n="w2_d"></p></div></article>
-        <article class="feature reveal"><div class="fic">📍</div><div><h3 data-i18n="w3_t"></h3><p data-i18n="w3_d"></p></div></article>
-        <article class="feature reveal"><div class="fic">🌐</div><div><h3 data-i18n="w4_t"></h3><p data-i18n="w4_d"></p></div></article>
-        <article class="feature reveal"><div class="fic">🗓️</div><div><h3 data-i18n="w5_t"></h3><p data-i18n="w5_d"></p></div></article>
-        <article class="feature reveal"><div class="fic">🧪</div><div><h3 data-i18n="w6_t"></h3><p data-i18n="w6_d"></p></div></article>
+    <div class="container why-grid">
+      <div class="why-art reveal"><img src="/img/certified.svg" alt="Certified and documented service" /></div>
+      <div>
+        <div class="head why-head reveal">
+          <span class="kicker" data-i18n="why_kicker">Why Drudge</span>
+          <h2 data-i18n="why_title">Protection you can prove</h2>
+          <p class="sub" data-i18n="why_sub">We document everything, so you're always inspection-ready.</p>
+        </div>
+        <div class="grid grid-2 why-features">
+          <article class="feature reveal"><div class="fic">✅</div><div><h3 data-i18n="w1_t"></h3><p data-i18n="w1_d"></p></div></article>
+          <article class="feature reveal"><div class="fic">📄</div><div><h3 data-i18n="w2_t"></h3><p data-i18n="w2_d"></p></div></article>
+          <article class="feature reveal"><div class="fic">📍</div><div><h3 data-i18n="w3_t"></h3><p data-i18n="w3_d"></p></div></article>
+          <article class="feature reveal"><div class="fic">🌐</div><div><h3 data-i18n="w4_t"></h3><p data-i18n="w4_d"></p></div></article>
+          <article class="feature reveal"><div class="fic">🗓️</div><div><h3 data-i18n="w5_t"></h3><p data-i18n="w5_d"></p></div></article>
+          <article class="feature reveal"><div class="fic">🧪</div><div><h3 data-i18n="w6_t"></h3><p data-i18n="w6_d"></p></div></article>
+        </div>
       </div>
     </div>
   </section>
@@ -118,6 +124,23 @@
         <article class="step reveal"><span class="num">3</span><h3 data-i18n="p3_t"></h3><p data-i18n="p3_d"></p></article>
         <article class="step reveal"><span class="num">4</span><h3 data-i18n="p4_t"></h3><p data-i18n="p4_d"></p></article>
       </div>
+    </div>
+  </section>
+
+  <!-- Monitoring highlight -->
+  <section class="section">
+    <div class="container highlight">
+      <div class="highlight-text reveal">
+        <span class="kicker" data-i18n="mon_kicker">Digital Monitoring</span>
+        <h2 data-i18n="mon_title">Every device tracked. Every result proven.</h2>
+        <p class="sub" data-i18n="mon_sub">We map your bait stations and traps and log every inspection.</p>
+        <ul class="ticks">
+          <li data-i18n="mon_b1">Live device status across your site</li>
+          <li data-i18n="mon_b2">Pest-activity trends over time</li>
+          <li data-i18n="mon_b3">Audit-ready records on demand</li>
+        </ul>
+      </div>
+      <div class="highlight-art reveal"><img src="/img/monitoring.svg" alt="Digital device monitoring map" /></div>
     </div>
   </section>
 

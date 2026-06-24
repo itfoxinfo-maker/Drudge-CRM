@@ -1,0 +1,33 @@
+<svg viewBox="0 0 480 360" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Digital device monitoring on a site map">
+  <defs>
+    <linearGradient id="bg3" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f1115"/><stop offset="1" stop-color="#16241c"/>
+    </linearGradient>
+  </defs>
+  <rect width="480" height="360" rx="24" fill="url(#bg3)"/>
+  <!-- floor plan -->
+  <g transform="translate(60 60)" stroke="#2f3b34" stroke-width="2" fill="none">
+    <rect x="0" y="0" width="360" height="240" rx="8" stroke="#3a4a40"/>
+    <line x1="140" y1="0" x2="140" y2="150"/>
+    <line x1="140" y1="150" x2="360" y2="150"/>
+    <line x1="240" y1="150" x2="240" y2="240"/>
+    <line x1="0" y1="90" x2="140" y2="90"/>
+  </g>
+  <!-- grid dots -->
+  <g fill="#26332c">
+    <circle cx="100" cy="120" r="2"/><circle cx="180" cy="120" r="2"/><circle cx="300" cy="120" r="2"/><circle cx="180" cy="220" r="2"/>
+  </g>
+  <!-- device markers -->
+  <g>
+    <g transform="translate(110 110)"><circle r="13" fill="#16a34a"/><circle r="13" fill="none" stroke="#16a34a" stroke-width="2" opacity=".4"><animate attributeName="r" values="13;20;13" dur="2.4s" repeatCount="indefinite"/><animate attributeName="opacity" values=".5;0;.5" dur="2.4s" repeatCount="indefinite"/></circle><text x="0" y="4" font-size="13" text-anchor="middle" fill="#fff" font-family="Arial">✓</text></g>
+    <g transform="translate(330 110)"><circle r="13" fill="#22c55e"/><text x="0" y="4" font-size="13" text-anchor="middle" fill="#fff" font-family="Arial">✓</text></g>
+    <g transform="translate(250 210)"><circle r="13" fill="#dc2626"/><circle r="13" fill="none" stroke="#dc2626" stroke-width="2" opacity=".4"><animate attributeName="r" values="13;21;13" dur="1.8s" repeatCount="indefinite"/><animate attributeName="opacity" values=".6;0;.6" dur="1.8s" repeatCount="indefinite"/></circle><text x="0" y="4.5" font-size="14" text-anchor="middle" fill="#fff" font-family="Arial">!</text></g>
+    <g transform="translate(160 250)"><circle r="13" fill="#d97706"/><text x="0" y="4" font-size="12" text-anchor="middle" fill="#fff" font-family="Arial">●</text></g>
+  </g>
+  <!-- legend -->
+  <g transform="translate(60 322)" font-family="Arial" font-size="12" fill="#9fb0a6">
+    <circle cx="6" cy="-4" r="6" fill="#16a34a"/><text x="18" y="0">OK</text>
+    <circle cx="92" cy="-4" r="6" fill="#d97706"/><text x="104" y="0">Service</text>
+    <circle cx="196" cy="-4" r="6" fill="#dc2626"/><text x="208" y="0">Activity</text>
+  </g>
+</svg>

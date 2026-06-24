@@ -6,6 +6,21 @@ const I18N = {
     // nav
     nav_services: "Services", nav_why: "Why Drudge", nav_sectors: "Industries",
     nav_process: "How It Works", nav_contact: "Contact", nav_quote: "Get a Quote",
+    nav_articles: "Articles", nav_faq: "Q&A",
+    // articles + faq pages
+    home: "Home",
+    articles_title: "Articles & Guides", articles_sub: "Practical pest-control knowledge from the Drudge team — every article in English and Arabic.",
+    read_article: "Read article", all_articles: "All articles",
+    prev_article: "Previous", next_article: "Next",
+    faq_title: "Questions & Answers", faq_sub: "Straight answers to the questions we hear most about pest control.",
+    faq_cta: "Still have a question? Talk to us.",
+    // monitoring highlight
+    mon_kicker: "Digital Monitoring",
+    mon_title: "Every device tracked. Every result proven.",
+    mon_sub: "We map your bait stations, traps and monitors, and log every inspection — so protection is something you can see and audit, not just trust.",
+    mon_b1: "Live device status across your whole site",
+    mon_b2: "Pest-activity trends tracked over time",
+    mon_b3: "Audit-ready reports and certificates on demand",
     // hero
     hero_badge: "Licensed & Certified Pest Control",
     hero_title: "Pest control that protects your business and your reputation.",
@@ -70,6 +85,19 @@ const I18N = {
     dir: "rtl", langlabel: "English",
     nav_services: "خدماتنا", nav_why: "لماذا درَدج", nav_sectors: "القطاعات",
     nav_process: "آلية العمل", nav_contact: "تواصل معنا", nav_quote: "اطلب عرض سعر",
+    nav_articles: "المقالات", nav_faq: "أسئلة وأجوبة",
+    home: "الرئيسية",
+    articles_title: "المقالات والأدلة", articles_sub: "معرفة عملية في مكافحة الآفات من فريق درَدج — كل مقال بالعربية والإنجليزية.",
+    read_article: "اقرأ المقال", all_articles: "كل المقالات",
+    prev_article: "السابق", next_article: "التالي",
+    faq_title: "أسئلة وأجوبة", faq_sub: "إجابات مباشرة عن أكثر الأسئلة شيوعاً حول مكافحة الآفات.",
+    faq_cta: "لا يزال لديك سؤال؟ تواصل معنا.",
+    mon_kicker: "مراقبة رقمية",
+    mon_title: "كل جهاز مُتابَع. وكل نتيجة مُثبَتة.",
+    mon_sub: "نخرّط محطات الطُعم والمصائد وأجهزة المراقبة، ونسجّل كل عملية فحص — لتكون الحماية شيئاً تراه وتدقّقه، لا مجرد ثقة.",
+    mon_b1: "حالة الأجهزة مباشرةً في موقعك بالكامل",
+    mon_b2: "تتبّع اتجاهات نشاط الآفات عبر الزمن",
+    mon_b3: "تقارير وشهادات جاهزة للتدقيق عند الطلب",
     hero_badge: "مكافحة آفات مرخّصة ومعتمدة",
     hero_title: "مكافحة آفات تحمي عملك وسمعتك.",
     hero_sub: "تقدّم درَدج إدارة آفات احترافية وآمنة وموثّقة بالكامل للمطاعم والفنادق والمدارس والمنشآت في جميع أنحاء مصر — بدعم من فنيين معتمدين ومراقبة رقمية.",
@@ -140,6 +168,7 @@ function applyLang() {
   });
   const lt = document.getElementById("lang-toggle");
   if (lt) lt.textContent = dict.langlabel;
+  if (typeof renderPageContent === "function") renderPageContent(LANG);
 }
 
 function toggleLang() {
@@ -149,19 +178,22 @@ function toggleLang() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-  applyLang();
-  document.getElementById("lang-toggle").addEventListener("click", toggleLang);
+  applyLang(); // also renders article/faq page content if present
+  const lt = document.getElementById("lang-toggle");
+  if (lt) lt.addEventListener("click", toggleLang);
 
   // mobile nav
   const burger = document.getElementById("burger");
   const links = document.getElementById("nav-links");
-  burger.addEventListener("click", () => links.classList.toggle("open"));
-  links.querySelectorAll("a").forEach(a =>
-    a.addEventListener("click", () => links.classList.remove("open")));
+  if (burger && links) {
+    burger.addEventListener("click", () => links.classList.toggle("open"));
+    links.querySelectorAll("a").forEach(a =>
+      a.addEventListener("click", () => links.classList.remove("open")));
+  }
 
   // contact form (front-end only — shows a confirmation)
   const form = document.getElementById("contact-form");
-  form.addEventListener("submit", e => {
+  if (form) form.addEventListener("submit", e => {
     e.preventDefault();
     form.reset();
     document.getElementById("form-thanks").classList.add("show");

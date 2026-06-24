@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Article — Drudge Pest Control</title>
+  <meta name="description" content="In-depth pest-control guidance from the Drudge technical team." />
+  <link rel="icon" href="/img/drudge.jpeg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/css/styles.css" />
+</head>
+<body>
+  <!-- Header -->
+  <header class="nav" id="top">
+    <div class="container nav-inner">
+      <a href="/#top" class="logo"><img src="/img/drudge.jpeg" alt="Drudge" /></a>
+      <nav class="nav-links" id="nav-links">
+        <a href="/#services" data-i18n="nav_services">Services</a>
+        <a href="/#why" data-i18n="nav_why">Why Drudge</a>
+        <a href="/articles.html" data-i18n="nav_articles">Articles</a>
+        <a href="/faq.html" data-i18n="nav_faq">Q&amp;A</a>
+        <a href="/#contact" data-i18n="nav_contact">Contact</a>
+        <button id="lang-toggle" class="lang-btn">العربية</button>
+        <a href="/#contact" class="btn btn-accent nav-quote" data-i18n="nav_quote">Get a Quote</a>
+      </nav>
+      <button class="burger" id="burger" aria-label="Menu"><span></span><span></span><span></span></button>
+    </div>
+  </header>
+
+  <!-- Article -->
+  <section class="section">
+    <div class="container">
+      <article class="article">
+        <p class="crumb"><a href="/articles.html" id="a-crumb">Articles</a></p>
+        <span class="tag" id="a-tag"></span>
+        <h1 id="a-title"></h1>
+        <p class="meta" id="a-meta"></p>
+        <div class="article-body" id="a-body"></div>
+      </article>
+      <nav class="article-nav">
+        <a href="/articles.html" class="btn btn-ghost" id="a-back">← All articles</a>
+        <a href="/#contact" class="btn btn-accent" id="a-cta">Get a Free Quote</a>
+      </nav>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container footer-inner">
+      <div class="footer-brand">
+        <img src="/img/drudge.jpeg" alt="Drudge" class="footer-logo" />
+        <p data-i18n="foot_tag">Professional pest control & hygiene management.</p>
+      </div>
+      <div class="footer-cols">
+        <div>
+          <h4 data-i18n="foot_services">Services</h4>
+          <a href="/#services" data-i18n="s1_t">General Pest Control</a>
+          <a href="/#services" data-i18n="s2_t">Rodent Control</a>
+          <a href="/#services" data-i18n="s4_t">Cockroach Treatment</a>
+          <a href="/#services" data-i18n="s6_t">Fumigation</a>
+        </div>
+        <div>
+          <h4 data-i18n="foot_company">Company</h4>
+          <a href="/articles.html" data-i18n="nav_articles">Articles</a>
+          <a href="/faq.html" data-i18n="nav_faq">Q&amp;A</a>
+          <a href="/#process" data-i18n="nav_process">How It Works</a>
+          <a href="/#contact" data-i18n="foot_contact">Contact</a>
+        </div>
+      </div>
+    </div>
+    <div class="container footer-bottom">
+      <span>© <span id="year">2026</span> Drudge. <span data-i18n="foot_rights">All rights reserved.</span></span>
+      <span class="powered" data-i18n="foot_powered">Operations powered by FoxSystems</span>
+    </div>
+  </footer>
+
+  <script src="/js/articles-data.js"></script>
+  <script src="/js/article-ipm.js"></script>
+  <script src="/js/article-cockroach.js"></script>
+  <script src="/js/article-rodent.js"></script>
+  <script src="/js/article-bedbugs.js"></script>
+  <script src="/js/article-foodsafety.js"></script>
+  <script>
+    const STR = {
+      en: { crumb: "Articles", back: "← All articles", cta: "Get a Free Quote",
+        missing: "Article not found.", missingLink: "Browse all articles →" },
+      ar: { crumb: "المقالات", back: "→ كل المقالات", cta: "احصل على عرض سعر مجاني",
+        missing: "المقال غير موجود.", missingLink: "تصفّح كل المقالات ←" },
+    };
+    function getId() {
+      return new URLSearchParams(window.location.search).get("id");
+    }
+    function renderPageContent(lang) {
+      const t = STR[lang] || STR.en;
+      document.getElementById("a-crumb").textContent = t.crumb;
+      document.getElementById("a-back").textContent = t.back;
+      document.getElementById("a-cta").textContent = t.cta;
+
+      const id = getId();
+      const art = window.ARTICLES && window.ARTICLES[id];
+      const tagEl = document.getElementById("a-tag");
+      const titleEl = document.getElementById("a-title");
+      const metaEl = document.getElementById("a-meta");
+      const bodyEl = document.getElementById("a-body");
+
+      if (!art) {
+        tagEl.textContent = "";
+        titleEl.textContent = t.missing;
+        metaEl.textContent = "";
+        bodyEl.innerHTML = `<p><a href="/articles.html">${t.missingLink}</a></p>`;
+        document.title = t.missing + " — Drudge";
+        return;
+      }
+      const c = art[lang] || art.en;
+      tagEl.textContent = c.tag;
+      titleEl.textContent = c.title;
+      metaEl.textContent = c.meta;
+      bodyEl.innerHTML = c.body;
+      document.title = c.title + " — Drudge";
+    }
+  </script>
+  <script src="/js/site.js"></script>
+</body>
+</html>
