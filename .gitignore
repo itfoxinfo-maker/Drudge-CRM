@@ -12,6 +12,7 @@ env/
 # App data & secrets (do NOT commit)
 data/crm.db
 data/secret.key
+data/backups/
 
 # User uploads
 uploads/*

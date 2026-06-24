@@ -97,7 +97,24 @@ docker run -p 8000:8000 -v "$PWD/data:/app/data" -v "$PWD/uploads:/app/uploads" 
 ## Tests
 
 ```bash
-python3 test_api.py     # spins up an isolated server + DB, runs 27 end-to-end checks
+python3 test_api.py     # spins up an isolated server + DB, runs 39 end-to-end checks
+```
+
+## Backups
+
+`backup.py` makes a consistent online snapshot of the SQLite database (safe to
+run while the server is up) and prunes old copies:
+
+```bash
+python3 backup.py                 # -> data/backups/crm-YYYYmmdd-HHMMSS.db, keep last 14
+python3 backup.py --keep 30       # keep the last 30
+python3 backup.py --dest /mnt/bk  # write elsewhere
+```
+
+Schedule it from cron, e.g. nightly at 02:30:
+
+```cron
+30 2 * * *  cd /path/to/pest-crm && /usr/bin/python3 backup.py >> data/backup.log 2>&1
 ```
 
 ## Project layout
