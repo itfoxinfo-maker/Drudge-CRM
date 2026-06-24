@@ -139,6 +139,7 @@ PERMISSION_CATALOG = [
     {"module": "visits",       "actions": ["view", "create", "edit", "delete"]},
     {"module": "calendar",     "actions": ["view"]},
     {"module": "chemicals",    "actions": ["view", "create", "edit", "delete"]},
+    {"module": "issues",       "actions": ["view", "create", "delete"]},
     {"module": "invoices",     "actions": ["view", "create", "edit", "delete"]},
     {"module": "payments",     "actions": ["view", "create", "delete"]},
     {"module": "contracts",    "actions": ["view", "create", "edit", "delete"]},
@@ -180,14 +181,14 @@ ROLE_DEFAULTS = {
     "admin": _expand({m["module"]: True for m in PERMISSION_CATALOG}),
     "manager": _expand({
         "dashboard": True, "clients": True, "visits": True, "calendar": True,
-        "chemicals": True, "invoices": True, "payments": True, "contracts": True,
-        "analytics": True, "certificates": True, "maps": True, "users": True,
-        "settings": True, "permissions": False,
+        "chemicals": True, "issues": True, "invoices": True, "payments": True,
+        "contracts": True, "analytics": True, "certificates": True, "maps": True,
+        "users": True, "settings": True, "permissions": False,
     }),
     "agent": _expand({
         "dashboard": ["view"], "clients": ["view"], "visits": ["view", "edit"],
         "calendar": ["view"], "chemicals": ["view"], "certificates": ["view"],
-        "maps": ["view", "create", "edit"],
+        "issues": ["view", "create"], "maps": ["view", "create", "edit"],
     }),
     "client": _expand({
         "dashboard": ["view"], "visits": ["view"], "invoices": ["view"],
@@ -972,6 +973,113 @@ def delete_usage(ctx):
         cx.execute("INSERT INTO inventory_transactions(chemical_id,change,reason,reference) VALUES(?,?,?,?)",
                    (row["chemical_id"], row["quantity"], "adjustment", f"usage-reversal:{uid}"))
         cx.execute("DELETE FROM chemical_usage WHERE id=?", (uid,))
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------
+# ENGINEER MATERIAL ISSUES (stock an engineer checks out of inventory)
+# --------------------------------------------------------------------------
+def _issue_with_items(iid):
+    issue = db.query(
+        "SELECT ei.*, u.full_name AS agent_name FROM engineer_issues ei "
+        "JOIN users u ON u.id=ei.agent_id WHERE ei.id=?", (iid,), one=True)
+    if issue:
+        issue["items"] = db.query(
+            "SELECT it.*, ch.name_en, ch.name_ar, ch.unit FROM engineer_issue_items it "
+            "JOIN chemicals ch ON ch.id=it.chemical_id WHERE it.issue_id=? ORDER BY it.id", (iid,))
+    return issue
+
+
+@route("GET", r"/api/issues")
+def list_issues(ctx):
+    require_perm(ctx.user, "issues.view")
+    u = ctx.user
+    where, params = [], []
+    if u["role"] == "agent":                       # engineers see only their own
+        where.append("ei.agent_id=?"); params.append(u["id"])
+    elif ctx.query.get("agent_id"):
+        where.append("ei.agent_id=?"); params.append(int(ctx.query["agent_id"]))
+    sql = ("SELECT ei.id, ei.agent_id, ei.note, ei.created_at, u.full_name AS agent_name, "
+           "(SELECT COUNT(*) FROM engineer_issue_items it WHERE it.issue_id=ei.id) AS item_count "
+           "FROM engineer_issues ei JOIN users u ON u.id=ei.agent_id")
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY ei.created_at DESC"
+    return db.query(sql, tuple(params))
+
+
+@route("GET", r"/api/issues/(\d+)")
+def get_issue(ctx):
+    require_perm(ctx.user, "issues.view")
+    issue = _issue_with_items(int(ctx.params[0]))
+    if not issue:
+        raise ApiError(404, "Issue not found")
+    if ctx.user["role"] == "agent" and issue["agent_id"] != ctx.user["id"]:
+        raise ApiError(403, "Not your issue")
+    return issue
+
+
+@route("POST", r"/api/issues")
+def create_issue(ctx):
+    require_perm(ctx.user, "issues.create")
+    u = ctx.user
+    b = ctx.body
+    # who the materials are issued to (agents may only issue to themselves)
+    agent_id = u["id"]
+    if u["role"] in ("admin", "manager") and b.get("agent_id"):
+        agent_id = int(b["agent_id"])
+    target = db.query("SELECT id FROM users WHERE id=? AND active=1", (agent_id,), one=True)
+    if not target:
+        raise ApiError(400, "Engineer not found")
+    # normalise + validate line items
+    clean = []
+    for it in (b.get("items") or []):
+        cid = it.get("chemical_id")
+        qty = float(it.get("quantity", 0) or 0)
+        if cid and qty > 0:
+            clean.append((int(cid), qty))
+    if not clean:
+        raise ApiError(400, "Add at least one material with a positive quantity")
+    # check stock up-front (sum per chemical in case it appears twice)
+    needed = {}
+    for cid, qty in clean:
+        needed[cid] = needed.get(cid, 0) + qty
+    for cid, qty in needed.items():
+        chem = db.query("SELECT name_en, unit, quantity_in_stock FROM chemicals WHERE id=?", (cid,), one=True)
+        if not chem:
+            raise ApiError(400, "Unknown material")
+        if qty > chem["quantity_in_stock"]:
+            raise ApiError(400, f"Not enough {chem['name_en']} in stock "
+                                f"({chem['quantity_in_stock']:g} {chem['unit']} available, {qty:g} requested)")
+    with db.transaction() as cx:
+        iid = cx.execute("INSERT INTO engineer_issues(agent_id,note,created_by) VALUES(?,?,?)",
+                         (agent_id, b.get("note"), u["id"])).lastrowid
+        for cid, qty in clean:
+            cx.execute("INSERT INTO engineer_issue_items(issue_id,chemical_id,quantity) VALUES(?,?,?)",
+                       (iid, cid, qty))
+            cx.execute("UPDATE chemicals SET quantity_in_stock = quantity_in_stock - ? WHERE id=?", (qty, cid))
+            cx.execute("INSERT INTO inventory_transactions(chemical_id,change,reason,reference) VALUES(?,?,?,?)",
+                       (cid, -qty, "issue", f"issue:{iid}"))
+    audit(ctx, "issue.create", "engineer_issue", iid, f"agent:{agent_id} items:{len(clean)}")
+    return _issue_with_items(iid)
+
+
+@route("DELETE", r"/api/issues/(\d+)")
+def delete_issue(ctx):
+    require_perm(ctx.user, "issues.delete")
+    iid = int(ctx.params[0])
+    issue = db.query("SELECT * FROM engineer_issues WHERE id=?", (iid,), one=True)
+    if not issue:
+        raise ApiError(404, "Issue not found")
+    items = db.query("SELECT * FROM engineer_issue_items WHERE issue_id=?", (iid,))
+    with db.transaction() as cx:
+        for it in items:                            # return the materials to stock
+            cx.execute("UPDATE chemicals SET quantity_in_stock = quantity_in_stock + ? WHERE id=?",
+                       (it["quantity"], it["chemical_id"]))
+            cx.execute("INSERT INTO inventory_transactions(chemical_id,change,reason,reference) VALUES(?,?,?,?)",
+                       (it["chemical_id"], it["quantity"], "adjustment", f"issue-reversal:{iid}"))
+        cx.execute("DELETE FROM engineer_issues WHERE id=?", (iid,))   # items cascade
+    audit(ctx, "issue.delete", "engineer_issue", iid, f"reversed {len(items)} items")
     return {"ok": True}
 
 

@@ -155,6 +155,7 @@ const TRANSLATIONS = {
     perms_all: "All",
     mod_dashboard: "Dashboard", mod_clients: "Clients", mod_visits: "Visits & Reports",
     mod_calendar: "Calendar", mod_chemicals: "Chemicals & Inventory", mod_invoices: "Invoices",
+    mod_issues: "Engineer Issues",
     mod_payments: "Payments", mod_contracts: "Contracts", mod_analytics: "Analytics",
     mod_certificates: "Certificates", mod_maps: "Site Maps & Devices", mod_users: "Users & Agents",
     mod_settings: "Settings", mod_permissions: "Permissions (RBAC)",
@@ -169,6 +170,11 @@ const TRANSLATIONS = {
     upload: "Upload", comment: "Comment",
     attach_hint: "Images, PDF or Excel — up to 25 MB. You can select several.",
     attach_after_save: "Save the report first, then you can attach files.",
+    // engineer material issues
+    nav_issues: "Engineer Issue", new_issue: "New issue", issue_detail: "Issue detail",
+    materials: "Materials", material: "Material", add_material: "Add material",
+    engineer: "Engineer", items_n: "item(s)",
+    need_one_material: "Add at least one material with a quantity.",
   },
   ar: {
     app_name: "نظام إدارة مكافحة الآفات",
@@ -307,6 +313,7 @@ const TRANSLATIONS = {
     perms_all: "الكل",
     mod_dashboard: "لوحة المعلومات", mod_clients: "العملاء", mod_visits: "الزيارات والتقارير",
     mod_calendar: "التقويم", mod_chemicals: "المبيدات والمخزون", mod_invoices: "الفواتير",
+    mod_issues: "صرف المواد للمهندسين",
     mod_payments: "المدفوعات", mod_contracts: "العقود", mod_analytics: "التحليلات",
     mod_certificates: "الشهادات", mod_maps: "خرائط المواقع والأجهزة", mod_users: "المستخدمون والفنيون",
     mod_settings: "الإعدادات", mod_permissions: "الصلاحيات (RBAC)",
@@ -321,6 +328,11 @@ const TRANSLATIONS = {
     upload: "رفع", comment: "تعليق",
     attach_hint: "صور أو PDF أو Excel — حتى 25 ميجابايت. يمكن اختيار عدة ملفات.",
     attach_after_save: "احفظ التقرير أولاً لتتمكن من إرفاق الملفات.",
+    // engineer material issues
+    nav_issues: "صرف للمهندس", new_issue: "صرف جديد", issue_detail: "تفاصيل الصرف",
+    materials: "المواد", material: "المادة", add_material: "إضافة مادة",
+    engineer: "المهندس", items_n: "صنف",
+    need_one_material: "أضف مادة واحدة على الأقل مع الكمية.",
   },
 };
 

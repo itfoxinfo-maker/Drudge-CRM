@@ -143,11 +143,29 @@ CREATE TABLE IF NOT EXISTS inventory_transactions (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     chemical_id INTEGER NOT NULL REFERENCES chemicals(id) ON DELETE CASCADE,
     change      REAL NOT NULL,
-    reason      TEXT NOT NULL CHECK (reason IN ('purchase','usage','adjustment')),
+    reason      TEXT NOT NULL CHECK (reason IN ('purchase','usage','adjustment','issue')),
     reference   TEXT,
     note        TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Engineer material issues: stock an engineer checks out of inventory (e.g. the
+-- week's materials). Each issue deducts stock; line items hold the materials.
+CREATE TABLE IF NOT EXISTS engineer_issues (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    note        TEXT,
+    created_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS engineer_issue_items (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    issue_id    INTEGER NOT NULL REFERENCES engineer_issues(id) ON DELETE CASCADE,
+    chemical_id INTEGER NOT NULL REFERENCES chemicals(id) ON DELETE CASCADE,
+    quantity    REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_issue_items ON engineer_issue_items(issue_id);
+CREATE INDEX IF NOT EXISTS idx_issues_agent ON engineer_issues(agent_id);
 
 -- Unified photo store: client folders, reports, visits, chemicals.
 CREATE TABLE IF NOT EXISTS photos (
@@ -377,6 +395,25 @@ def _migrate(conn):
                 SELECT id,client_id,visit_id,contract_id,doc_type,number,issue_date,due_date,
                 valid_until,amount,tax,total,status,notes,created_at FROM invoices;
             DROP TABLE invoices; ALTER TABLE invoices_new RENAME TO invoices;
+            PRAGMA foreign_keys=ON;
+        """)
+    # Allow the 'issue' reason on inventory_transactions (engineer material
+    # issues). Rebuild the table if its CHECK predates that value.
+    inv_row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='inventory_transactions'").fetchone()
+    if inv_row and "'issue'" not in (inv_row[0] or ""):
+        conn.executescript("""
+            PRAGMA foreign_keys=OFF;
+            CREATE TABLE inventory_transactions_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chemical_id INTEGER NOT NULL REFERENCES chemicals(id) ON DELETE CASCADE,
+                change REAL NOT NULL,
+                reason TEXT NOT NULL CHECK (reason IN ('purchase','usage','adjustment','issue')),
+                reference TEXT, note TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')));
+            INSERT INTO inventory_transactions_new (id,chemical_id,change,reason,reference,note,created_at)
+                SELECT id,chemical_id,change,reason,reference,note,created_at FROM inventory_transactions;
+            DROP TABLE inventory_transactions; ALTER TABLE inventory_transactions_new RENAME TO inventory_transactions;
             PRAGMA foreign_keys=ON;
         """)
 

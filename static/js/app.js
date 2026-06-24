@@ -207,6 +207,7 @@ function navItems() {
     if (can("calendar.view")) items.push({ k: "calendar", i: "📅", t: "nav_calendar" });
     if (can("contracts.view")) items.push({ k: "contracts", i: "🔁", t: "nav_contracts" });
     if (can("chemicals.view")) items.push({ k: "chemicals", i: "🧪", t: "nav_chemicals" });
+    if (can("issues.view")) items.push({ k: "issues", i: "📦", t: "nav_issues" });
     if (can("invoices.view")) items.push({ k: "invoices", i: "💳", t: "nav_invoices" });
     if (can("analytics.view")) items.push({ k: "analytics", i: "📈", t: "nav_analytics" });
     if (can("users.view")) items.push({ k: "agents", i: "👷", t: "nav_agents" });
@@ -239,6 +240,7 @@ async function navigate(view, arg) {
     else if (view === "schedule" || view === "visits") await viewSchedule(v);
     else if (view === "visit") await viewVisit(v, arg);
     else if (view === "chemicals") await viewChemicals(v);
+    else if (view === "issues") await viewIssues(v);
     else if (view === "invoices") await viewInvoices(v);
     else if (view === "invoice") await viewInvoice(v, arg);
     else if (view === "agents") await viewAgents(v);
@@ -798,6 +800,104 @@ function stockForm(id) {
       if (handledOffline(saved)) return;
       closeModal();
       cache.chemicals = await API.get("/chemicals"); navigate("chemicals");
+    });
+  });
+}
+
+// ====================================================================
+// Engineer material issues (stock checked out of inventory by an engineer)
+// ====================================================================
+async function viewIssues(v) {
+  const mine = role() === "agent";
+  const issues = await API.get("/issues");
+  const canDelete = can("issues.delete");
+  v.innerHTML = `<div class="page-head"><h2>📦 ${t("nav_issues")}</h2>
+    ${can("issues.create") ? `<button class="btn" id="add-issue">+ ${t("new_issue")}</button>` : ""}</div>
+    <div class="panel"><table><thead><tr>
+      <th>${t("date")}</th>${mine ? "" : `<th>${t("engineer")}</th>`}<th>${t("materials")}</th><th>${t("notes")}</th>${canDelete ? "<th></th>" : ""}</tr></thead>
+      <tbody>${issues.map(i => `<tr class="clickable" data-issue="${i.id}">
+        <td>${fmtDateTime(i.created_at)}</td>${mine ? "" : `<td>${esc(i.agent_name)}</td>`}
+        <td>${i.item_count} ${t("items_n")}</td><td>${esc(i.note || "—")}</td>
+        ${canDelete ? `<td><button class="link-btn danger sm" data-rmissue="${i.id}">${t("delete")}</button></td>` : ""}</tr>`).join("")
+      || `<tr><td colspan="5" class="empty">${t("none")}</td></tr>`}</tbody></table></div>`;
+  if ($("add-issue")) $("add-issue").addEventListener("click", () => issueForm());
+  v.querySelectorAll("[data-issue]").forEach(tr => tr.addEventListener("click", (e) => {
+    if (e.target.dataset.rmissue !== undefined) return;
+    issueDetail(tr.dataset.issue);
+  }));
+  v.querySelectorAll("[data-rmissue]").forEach(b => b.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (confirm(t("confirm_delete"))) {
+      const r = await API.del("/issues/" + b.dataset.rmissue);
+      if (handledOffline(r, b.closest("tr"))) return;
+      navigate("issues");
+    }
+  }));
+}
+
+function issueForm() {
+  const isManager = role() === "admin" || role() === "manager";
+  const agentOpts = (cache.agents || []).map(a => ({ v: a.id, l: a.full_name }));
+  const chemOpts = (cache.chemicals || []).map(c => ({ v: c.id, l: `${localized(c, "name")} (${c.quantity_in_stock} ${c.unit})` }));
+  openModal(t("new_issue"), `<form id="isf">
+    ${isManager ? field(t("engineer"), "agent_id", { options: agentOpts }) : ""}
+    <div class="full"><label>${t("materials")}</label>
+      <table class="li-table"><thead><tr><th>${t("material")}</th><th>${t("qty")}</th><th></th></tr></thead>
+      <tbody id="iss-body"></tbody></table>
+      <button type="button" class="btn secondary sm" id="iss-add" style="margin-top:8px">+ ${t("add_material")}</button></div>
+    ${field(t("notes"), "note", { textarea: true, cls: "full" })}
+    <div class="form-actions"><button type="button" class="btn secondary" id="isf-x">${t("cancel")}</button>
+    <button class="btn" type="submit">${t("save")}</button></div></form>`, (root) => {
+    const chemSelect = () => `<select class="iss-chem">${chemOpts.map(o => `<option value="${esc(o.v)}">${esc(o.l)}</option>`).join("")}</select>`;
+    const addRow = () => {
+      const tr = document.createElement("tr"); tr.className = "li-row";
+      tr.innerHTML = `<td>${chemSelect()}</td>
+        <td><input class="iss-qty" type="number" step="any" value="1" style="width:80px"></td>
+        <td><button type="button" class="link-btn danger sm li-rm">✕</button></td>`;
+      root.querySelector("#iss-body").appendChild(tr);
+    };
+    addRow();
+    root.querySelector("#iss-add").addEventListener("click", addRow);
+    root.addEventListener("click", (e) => { if (e.target.classList.contains("li-rm")) e.target.closest("tr").remove(); });
+    $("isf-x").addEventListener("click", closeModal);
+    root.querySelector("#isf").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const items = [...root.querySelectorAll(".li-row")].map(r => ({
+        chemical_id: r.querySelector(".iss-chem").value,
+        quantity: parseFloat(r.querySelector(".iss-qty").value) || 0,
+      })).filter(it => it.chemical_id && it.quantity > 0);
+      if (!items.length) { alert(t("need_one_material")); return; }
+      const body = { items, note: root.querySelector("[name=note]").value };
+      const agentSel = root.querySelector("[name=agent_id]");
+      if (agentSel) body.agent_id = agentSel.value;
+      try {
+        const saved = await API.post("/issues", body);
+        if (handledOffline(saved)) return;
+        closeModal(); toast(t("saved"));
+        if (cache.chemicals) cache.chemicals = await API.get("/chemicals");  // reflect deducted stock
+        navigate("issues");
+      } catch (err) { alert(err.message); }
+    });
+  });
+}
+
+async function issueDetail(id) {
+  const iss = await API.get("/issues/" + id);
+  const rows = (iss.items || []).map(it =>
+    `<tr><td>${esc(localized(it, "name"))}</td><td>${it.quantity} ${esc(it.unit)}</td></tr>`).join("");
+  openModal(t("issue_detail"), `<div class="kv">
+      <div>${t("engineer")}</div><div>${esc(iss.agent_name)}</div>
+      <div>${t("date")}</div><div>${fmtDateTime(iss.created_at)}</div>
+      <div>${t("notes")}</div><div>${esc(iss.note || "—")}</div></div>
+    <table style="margin-top:12px"><thead><tr><th>${t("material")}</th><th>${t("qty")}</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="form-actions"><button type="button" class="btn secondary" id="id-x">${t("close")}</button>
+      ${can("issues.delete") ? `<button type="button" class="btn danger" id="id-del">${t("delete")}</button>` : ""}</div>`, (root) => {
+    $("id-x").addEventListener("click", closeModal);
+    if ($("id-del")) $("id-del").addEventListener("click", async () => {
+      if (!confirm(t("confirm_delete"))) return;
+      const r = await API.del("/issues/" + id);
+      if (handledOffline(r)) return;
+      closeModal(); toast(t("saved")); navigate("issues");
     });
   });
 }
