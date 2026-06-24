@@ -48,7 +48,7 @@
   async function enqueue(entry) {
     const h = {};
     await op("readwrite", s => { wrap(s.add({ ...entry, ts: Date.now() }), h); return h; });
-    window.dispatchEvent(new CustomEvent("oq-queued", { detail: { path: entry.path } }));
+    window.dispatchEvent(new CustomEvent("oq-queued", { detail: { path: entry.path, method: entry.method } }));
     await emitChange();
     return h.value;
   }

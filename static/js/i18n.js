@@ -162,6 +162,7 @@ const TRANSLATIONS = {
     prev: "Prev", next: "Next", page: "Page",
     // offline / PWA
     offline: "Offline", to_sync: "to sync", saved_offline: "Saved offline — will sync",
+    deleted_offline: "Deleted offline — will sync",
     synced_ok: "synced",
   },
   ar: {
@@ -308,6 +309,7 @@ const TRANSLATIONS = {
     prev: "السابق", next: "التالي", page: "صفحة",
     // offline / PWA
     offline: "غير متصل", to_sync: "للمزامنة", saved_offline: "حُفظ دون اتصال — ستتم المزامنة",
+    deleted_offline: "حُذف دون اتصال — ستتم المزامنة",
     synced_ok: "تمت المزامنة",
   },
 };

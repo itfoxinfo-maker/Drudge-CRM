@@ -135,7 +135,7 @@ function initOfflineUI() {
   window.addEventListener("online", renderOfflineStatus);
   window.addEventListener("offline", renderOfflineStatus);
   window.addEventListener("oq-change", renderOfflineStatus);
-  window.addEventListener("oq-queued", () => toast(t("saved_offline")));
+  window.addEventListener("oq-queued", (e) => toast(t(e.detail && e.detail.method === "DELETE" ? "deleted_offline" : "saved_offline")));
   window.addEventListener("oq-synced", (e) => { toast(`${e.detail.synced} ${t("synced_ok")}`); renderOfflineStatus(); });
   renderOfflineStatus();
   if (navigator.onLine && window.OfflineQueue) window.OfflineQueue.flush();
