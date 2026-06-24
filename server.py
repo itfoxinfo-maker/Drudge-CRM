@@ -13,6 +13,7 @@ import time
 import threading
 import traceback
 import mimetypes
+import gzip
 from urllib.parse import urlparse, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -30,6 +31,12 @@ ALLOWED_IMG = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 ALLOWED_DOC = {".pdf", ".xls", ".xlsx"}          # report attachments
 ALLOWED_UPLOAD = ALLOWED_IMG | ALLOWED_DOC
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024   # 25 MB per uploaded file
+# Content types worth gzip-compressing (text assets); images are already packed.
+_COMPRESSIBLE = {
+    "text/html", "text/css", "text/plain", "text/javascript",
+    "application/javascript", "application/json", "image/svg+xml",
+    "application/manifest+json",
+}
 
 
 def _sniff_image(data: bytes) -> bool:
@@ -1441,8 +1448,7 @@ def _generate_due_visits(lookahead_days=14):
 @route("GET", r"/api/notifications")
 def list_notifications(ctx):
     if ctx.user["role"] in ("admin", "manager", "agent"):
-        try: _generate_reminders()   # keep the bell live without a manual trigger
-        except Exception as e: print("reminder gen:", e)
+        _maybe_generate_reminders()  # keep the bell live without a manual trigger
     rows = db.query("SELECT * FROM notifications WHERE user_id=? ORDER BY created_at DESC LIMIT 50",
                     (ctx.user["id"],))
     unread = sum(1 for r in rows if not r["is_read"])
@@ -1502,6 +1508,29 @@ def _maybe_send_email(user_id, subject, body):
             srv.send_message(msg)
     except Exception as e:
         print("email send failed:", e)
+
+
+# The notification bell is polled by every signed-in staff browser every 60s.
+# Running the full reminder scan on each poll means repeated table scans + writes
+# (DB contention + latency). Throttle it so the scan runs at most once per window
+# no matter how many users are polling; the result is identical (it's idempotent
+# and de-duplicated), just not recomputed needlessly.
+_reminder_lock = threading.Lock()
+_reminder_last = 0.0
+REMINDER_MIN_INTERVAL = 300  # seconds
+
+
+def _maybe_generate_reminders():
+    global _reminder_last
+    now = time.time()
+    with _reminder_lock:
+        if now - _reminder_last < REMINDER_MIN_INTERVAL:
+            return
+        _reminder_last = now
+    try:
+        _generate_reminders()
+    except Exception as e:
+        print("reminder gen:", e)
 
 
 def _generate_reminders():
@@ -2175,17 +2204,42 @@ class Handler(BaseHTTPRequestHandler):
         if not full.startswith(base) or not os.path.isfile(full):
             # SPA fallback
             full = os.path.join(STATIC_DIR, "index.html")
+        try:
+            stat = os.stat(full)
+        except OSError:
+            return self._json(404, {"error": "Not found"})
+        is_upload = path.startswith("/uploads/")
+        cache = "public, max-age=86400" if is_upload else "no-cache"
+        # Validator from file mtime+size: lets the browser revalidate and get a
+        # tiny 304 instead of re-downloading unchanged assets, while app code
+        # stays fresh (no-cache forces revalidation every load).
+        etag = 'W/"%x-%x"' % (int(stat.st_mtime), stat.st_size)
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", cache)
+            self.end_headers()
+            return
+        try:
+            with open(full, "rb") as f:
+                data = f.read()
+        except OSError:
+            return self._json(404, {"error": "Not found"})
         ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
-        with open(full, "rb") as f:
-            data = f.read()
+        # Compress text assets (JS/CSS/HTML/JSON/SVG) when the client accepts it.
+        encoding = None
+        if ("gzip" in self.headers.get("Accept-Encoding", "") and len(data) > 512
+                and ctype.split(";")[0] in _COMPRESSIBLE):
+            data = gzip.compress(data, 6)
+            encoding = "gzip"
         self.send_response(200)
         self.send_header("Content-Type", ctype)
+        if encoding:
+            self.send_header("Content-Encoding", encoding)
+            self.send_header("Vary", "Accept-Encoding")
         self.send_header("Content-Length", str(len(data)))
-        # Always serve the freshest app code (no stale cached UI in browsers).
-        if path.startswith("/uploads/"):
-            self.send_header("Cache-Control", "public, max-age=86400")
-        else:
-            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("ETag", etag)
+        self.send_header("Cache-Control", cache)
         self.end_headers()
         self.wfile.write(data)
 

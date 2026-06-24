@@ -423,10 +423,12 @@ def get_conn():
     conn = sqlite3.connect(DB_PATH, timeout=5.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    # WAL allows concurrent readers alongside a writer (ThreadingHTTPServer);
     # busy_timeout makes contending writers wait up to 5s rather than erroring.
-    conn.execute("PRAGMA journal_mode = WAL")
+    # (journal_mode=WAL is persisted in the DB file by init_db, so it need not
+    # be re-issued per connection — that just adds latency to every query.)
     conn.execute("PRAGMA busy_timeout = 5000")
+    # synchronous=NORMAL is durable under WAL and markedly faster on writes.
+    conn.execute("PRAGMA synchronous = NORMAL")
     return conn
 
 
@@ -489,6 +491,9 @@ def _backfill_marker_events(conn):
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = get_conn()
+    # WAL persists in the DB file; setting it once here lets every later
+    # connection inherit it (concurrent readers alongside a writer).
+    conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(SCHEMA)
     _migrate(conn)
     _backfill_marker_events(conn)
