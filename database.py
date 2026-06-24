@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS users (
     hire_date     TEXT,
     lang          TEXT NOT NULL DEFAULT 'en',
     active        INTEGER NOT NULL DEFAULT 1,
+    -- bumped to invalidate a user's outstanding session tokens (see auth.py)
+    token_version INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -335,6 +337,9 @@ def _migrate(conn):
                    ("valid_until", "TEXT")):
         if c not in cols("invoices"):
             conn.execute(f"ALTER TABLE invoices ADD COLUMN {c} {ddl}")
+    # token_version: bump to revoke a user's existing session tokens
+    if "token_version" not in cols("users"):
+        conn.execute("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0")
     # Drop the old CHECK on invoices.status (rebuild) if present.
     ddl_row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='invoices'").fetchone()

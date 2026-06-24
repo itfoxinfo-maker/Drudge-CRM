@@ -108,7 +108,10 @@ $("login-form").addEventListener("submit", async (e) => {
 });
 $("login-lang").addEventListener("click", () => { toggleLang(); applyStaticLabels(); });
 $("lang-toggle").addEventListener("click", () => { toggleLang(); applyStaticLabels(); showApp(); });
-$("logout-btn").addEventListener("click", () => { API.clearAuth(); showLogin(); });
+$("logout-btn").addEventListener("click", async () => {
+  try { await API.post("/auth/logout", {}); } catch (e) {}  // revoke token server-side
+  API.clearAuth(); showLogin();
+});
 
 // quick search
 $("quick-search").addEventListener("keydown", (e) => {

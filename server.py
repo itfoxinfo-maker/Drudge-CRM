@@ -9,6 +9,8 @@ import os
 import re
 import sys
 import uuid
+import time
+import threading
 import traceback
 import mimetypes
 from urllib.parse import urlparse, parse_qs
@@ -31,13 +33,14 @@ class ApiError(Exception):
 
 
 class Ctx:
-    def __init__(self, user, params, query, body, raw_body, content_type):
+    def __init__(self, user, params, query, body, raw_body, content_type, ip=None):
         self.user = user
         self.params = params          # regex path groups
         self.query = query            # dict of query string (single values)
         self.body = body              # parsed JSON dict (or {})
         self.raw_body = raw_body      # raw bytes (for uploads)
         self.content_type = content_type
+        self.ip = ip                  # client IP (for login throttling)
 
 
 ROUTES = []
@@ -189,20 +192,68 @@ _PHOTO_ENTITY_PERM = {
 # --------------------------------------------------------------------------
 # AUTH
 # --------------------------------------------------------------------------
+# In-memory login throttle: lock an (email|ip) key after repeated failures.
+LOGIN_MAX_FAILS = 5
+LOGIN_WINDOW = 300       # seconds to accumulate failures
+LOGIN_LOCK_SECS = 300    # lockout duration once the threshold is hit
+_login_lock = threading.Lock()
+_login_attempts = {}     # key -> [fail_count, window_start, locked_until]
+
+
+def _login_locked_for(key):
+    """Return seconds remaining if the key is currently locked, else 0."""
+    now = time.time()
+    with _login_lock:
+        rec = _login_attempts.get(key)
+        if rec and rec[2] > now:
+            return int(rec[2] - now) + 1
+    return 0
+
+
+def _login_register_fail(key):
+    now = time.time()
+    with _login_lock:
+        rec = _login_attempts.get(key)
+        if not rec or now - rec[1] > LOGIN_WINDOW:
+            rec = [0, now, 0]
+        rec[0] += 1
+        if rec[0] >= LOGIN_MAX_FAILS:
+            rec[2] = now + LOGIN_LOCK_SECS
+        _login_attempts[key] = rec
+
+
+def _login_register_ok(key):
+    with _login_lock:
+        _login_attempts.pop(key, None)
+
+
 @route("POST", r"/api/auth/login", auth_required=False)
 def login(ctx):
     email = (ctx.body.get("email") or "").strip().lower()
     password = ctx.body.get("password") or ""
+    key = f"{email}|{ctx.ip or '?'}"
+    locked = _login_locked_for(key)
+    if locked:
+        raise ApiError(429, f"Too many failed attempts. Try again in {locked} seconds.")
     user = db.query("SELECT * FROM users WHERE lower(email)=? AND active=1", (email,), one=True)
     if not user or not auth.verify_password(password, user["password_hash"]):
+        _login_register_fail(key)
         raise ApiError(401, "Invalid email or password")
-    token = auth.make_token(user["id"])
+    _login_register_ok(key)
+    token = auth.make_token(user["id"], user["token_version"] or 0)
     return {"token": token, "user": _me_payload(user)}
 
 
 @route("GET", r"/api/auth/me")
 def me(ctx):
     return _me_payload(ctx.user)
+
+
+@route("POST", r"/api/auth/logout")
+def logout(ctx):
+    # Bump token_version so every outstanding token for this user is rejected.
+    db.execute("UPDATE users SET token_version = token_version + 1 WHERE id=?", (ctx.user["id"],))
+    return {"ok": True}
 
 
 def _me_payload(u):
@@ -309,6 +360,8 @@ def update_user(ctx):
     if b.get("password"):
         fields.append("password_hash=?")
         vals.append(auth.hash_password(b["password"]))
+        # Changing the password revokes the user's existing session tokens.
+        fields.append("token_version=token_version+1")
     if not fields:
         raise ApiError(400, "Nothing to update")
     vals.append(uid)
@@ -1769,7 +1822,8 @@ class Handler(BaseHTTPRequestHandler):
                 user = self._current_user()
                 if not user:
                     return self._json(401, {"error": "Authentication required"})
-            ctx = Ctx(user, list(match.groups()), query, body, raw_body, content_type)
+            client_ip = self.client_address[0] if self.client_address else None
+            ctx = Ctx(user, list(match.groups()), query, body, raw_body, content_type, ip=client_ip)
             try:
                 result = fn(ctx)
                 if isinstance(result, dict) and "_csv" in result:
@@ -1803,10 +1857,16 @@ class Handler(BaseHTTPRequestHandler):
         hdr = self.headers.get("Authorization", "")
         if not hdr.startswith("Bearer "):
             return None
-        uid = auth.verify_token(hdr[7:])
-        if not uid:
+        payload = auth.verify_token(hdr[7:])
+        if not payload:
             return None
-        return db.query("SELECT * FROM users WHERE id=? AND active=1", (uid,), one=True)
+        user = db.query("SELECT * FROM users WHERE id=? AND active=1", (payload["uid"],), one=True)
+        if not user:
+            return None
+        # Reject tokens issued before the user's token_version was bumped.
+        if (user["token_version"] or 0) != payload.get("tv", 0):
+            return None
+        return user
 
     def _json(self, status, payload):
         data = json.dumps(payload, default=str).encode()
