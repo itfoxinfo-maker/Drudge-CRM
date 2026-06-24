@@ -956,12 +956,12 @@ def record_usage(ctx):
     qty = float(b.get("quantity", 0))
     if not chem_id or qty <= 0:
         raise ApiError(400, "Chemical and a positive quantity are required")
-    with db.transaction() as cx:
-        uid = cx.execute("INSERT INTO chemical_usage(visit_id,chemical_id,quantity,area_treated) VALUES(?,?,?,?)",
-                         (vid, chem_id, qty, b.get("area_treated"))).lastrowid
-        cx.execute("UPDATE chemicals SET quantity_in_stock = quantity_in_stock - ? WHERE id=?", (qty, chem_id))
-        cx.execute("INSERT INTO inventory_transactions(chemical_id,change,reason,reference) VALUES(?,?,?,?)",
-                   (chem_id, -qty, "usage", f"visit:{vid}"))
+    # Material consumed on a visit comes out of the engineer's issued on-hand
+    # balance (issued − used), NOT central warehouse stock — that was already
+    # decremented when the material was issued to the engineer. So we only
+    # record the usage; we do not touch chemicals.quantity_in_stock here.
+    uid = db.execute("INSERT INTO chemical_usage(visit_id,chemical_id,quantity,area_treated) VALUES(?,?,?,?)",
+                     (vid, chem_id, qty, b.get("area_treated")))
     return db.query(
         "SELECT cu.*, ch.name_en, ch.name_ar, ch.unit FROM chemical_usage cu "
         "JOIN chemicals ch ON ch.id=cu.chemical_id WHERE cu.id=?", (uid,), one=True)
@@ -974,12 +974,10 @@ def delete_usage(ctx):
     row = db.query("SELECT * FROM chemical_usage WHERE id=?", (uid,), one=True)
     if not row:
         raise ApiError(404, "Not found")
-    with db.transaction() as cx:
-        cx.execute("UPDATE chemicals SET quantity_in_stock = quantity_in_stock + ? WHERE id=?",
-                   (row["quantity"], row["chemical_id"]))
-        cx.execute("INSERT INTO inventory_transactions(chemical_id,change,reason,reference) VALUES(?,?,?,?)",
-                   (row["chemical_id"], row["quantity"], "adjustment", f"usage-reversal:{uid}"))
-        cx.execute("DELETE FROM chemical_usage WHERE id=?", (uid,))
+    # Usage no longer touches central stock (see record_usage), so removing it
+    # simply restores the engineer's on-hand balance — nothing to credit back
+    # to the warehouse.
+    db.execute("DELETE FROM chemical_usage WHERE id=?", (uid,))
     return {"ok": True}
 
 

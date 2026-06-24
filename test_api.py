@@ -72,10 +72,13 @@ def main():
         _, chems = call("GET", "/chemicals", admin)
         cyp = next(c for c in chems if c["id"] == 1)
         before = cyp["quantity_in_stock"]
-        call("POST", "/visits/2/usage", admin, {"chemical_id": 1, "quantity": 3})
+        _, used_row = call("POST", "/visits/2/usage", admin, {"chemical_id": 1, "quantity": 3})
         _, chems2 = call("GET", "/chemicals", admin)
         after = next(c for c in chems2 if c["id"] == 1)["quantity_in_stock"]
-        check("chemical usage decrements stock", abs((before - after) - 3) < 0.001)
+        # Usage comes out of the engineer's issued balance, NOT central stock
+        # (central stock is decremented once, when the material is issued).
+        check("visit usage does NOT touch central stock", abs(after - before) < 0.001)
+        check("visit usage recorded", bool(used_row and used_row.get("id")))
         _, rep = call("POST", "/visits/2/report", admin, {"summary": "ok", "severity": "medium"})
         check("report upsert", rep and rep["severity"] == "medium")
 
@@ -159,9 +162,15 @@ def main():
         _, agusers = call("GET", "/users?role=agent", admin)
         a1 = next(u["id"] for u in agusers if u["email"] == "agent1@pestcrm.com")
         # issue 5 units of chemical 1 to agent1, then log 2 used on agent1's own visit
+        _, ch_b = call("GET", "/chemicals", admin)
+        c1_before = next(c for c in ch_b if c["id"] == 1)["quantity_in_stock"]
         _, iss = call("POST", "/issues", admin, {"agent_id": a1,
                       "items": [{"chemical_id": 1, "quantity": 5}]})
         check("issue created for agent1", bool(iss and iss.get("id")))
+        _, ch_a = call("GET", "/chemicals", admin)
+        c1_after = next(c for c in ch_a if c["id"] == 1)["quantity_in_stock"]
+        check("issuing deducts central stock (single deduction point)",
+              abs((c1_before - c1_after) - 5) < 0.001)
         call("POST", "/visits/1/usage", admin, {"chemical_id": 1, "quantity": 2})
         _, bal = call("GET", f"/issues/balance?agent_id={a1}", admin)
         eng = next((e for e in bal["engineers"] if e["agent_id"] == a1), None)
