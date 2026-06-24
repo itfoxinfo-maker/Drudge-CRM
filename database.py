@@ -351,9 +351,13 @@ def _migrate(conn):
                    ("valid_until", "TEXT")):
         if c not in cols("invoices"):
             conn.execute(f"ALTER TABLE invoices ADD COLUMN {c} {ddl}")
-    # token_version: bump to revoke a user's existing session tokens
+    # token_version: bump to revoke a user's existing session tokens.
+    # try/except guards against a race when two instances init the same DB at once.
     if "token_version" not in cols("users"):
-        conn.execute("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0")
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # another process added it first
     # Drop the old CHECK on invoices.status (rebuild) if present.
     ddl_row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='invoices'").fetchone()
