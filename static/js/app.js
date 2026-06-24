@@ -16,8 +16,14 @@ function toast(msg) { const e = $("toast"); e.textContent = msg; e.classList.rem
 // navigate to the new/updated record) would fail offline and mask the success.
 // In that case just close the form; the oq-queued toast ("saved offline — will
 // sync") already confirms it. Returns true when the caller should stop here.
-function handledOffline(saved) {
-  if (saved && saved.__queued) { closeModal(); return true; }
+function handledOffline(saved, optimisticEl) {
+  if (saved && saved.__queued) {
+    // Offline delete: drop the row immediately (no refresh possible) so the UI
+    // reflects the queued removal; the delete replays on reconnect.
+    if (optimisticEl) optimisticEl.remove();
+    closeModal();
+    return true;
+  }
   return false;
 }
 
@@ -435,7 +441,7 @@ async function viewClientFolder(v, arg) {
   v.querySelectorAll("tr[data-inv]").forEach(tr => tr.addEventListener("click", () => navigate("invoice", { id: tr.dataset.inv })));
   if ($("add-site")) $("add-site").addEventListener("click", () => siteForm(c.id));
   v.querySelectorAll("[data-rmsite]").forEach(b => b.addEventListener("click", async () => {
-    if (confirm(t("confirm_delete"))) { const r = await API.del("/sites/" + b.dataset.rmsite); if (handledOffline(r)) return; navigate("client", { id: c.id }); }
+    if (confirm(t("confirm_delete"))) { const r = await API.del("/sites/" + b.dataset.rmsite); if (handledOffline(r, b.closest("tr"))) return; navigate("client", { id: c.id }); }
   }));
   renderPhotos("client", c.id, c.photos);
   if ($("add-photo")) $("add-photo").addEventListener("click", () => uploadPhotoDialog("client", c.id, () => navigate("client", { id: c.id })));
@@ -466,7 +472,7 @@ function renderPhotos(entityType, entityId, photos) {
     ${role() !== "client" ? `<button class="rm" data-rmphoto="${p.id}">✕</button>` : ""}
     <div class="cap">${esc(p.caption || p.original_name || "")}</div></div>`).join("");
   box.querySelectorAll("[data-rmphoto]").forEach(b => b.addEventListener("click", async () => {
-    if (confirm(t("confirm_delete"))) { const r = await API.del("/photos/" + b.dataset.rmphoto); if (handledOffline(r)) return; navigate(currentView, { id: entityId }); }
+    if (confirm(t("confirm_delete"))) { const r = await API.del("/photos/" + b.dataset.rmphoto); if (handledOffline(r, b.closest(".photo-item"))) return; navigate(currentView, { id: entityId }); }
   }));
 }
 function uploadPhotoDialog(entityType, entityId, after) {
@@ -621,7 +627,7 @@ async function viewVisit(v, arg) {
   });
   if ($("add-chem")) $("add-chem").addEventListener("click", () => usageForm(id));
   v.querySelectorAll("[data-rmuse]").forEach(b => b.addEventListener("click", async () => {
-    const r = await API.del("/usage/" + b.dataset.rmuse); if (handledOffline(r)) return; navigate("visit", { id });
+    const r = await API.del("/usage/" + b.dataset.rmuse); if (handledOffline(r, b.closest("tr"))) return; navigate("visit", { id });
   }));
   const allPhotos = (visit.photos || []).concat(visit.report_photos || []);
   renderPhotos("visit", id, allPhotos);
@@ -1547,7 +1553,7 @@ async function viewContracts(v) {
   });
   v.querySelectorAll("[data-edit]").forEach(b => b.addEventListener("click", () => contractForm(list.find(c => c.id == b.dataset.edit))));
   v.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", async () => {
-    if (confirm(t("confirm_delete"))) { const r = await API.del("/contracts/" + b.dataset.del); if (handledOffline(r)) return; navigate("contracts"); }
+    if (confirm(t("confirm_delete"))) { const r = await API.del("/contracts/" + b.dataset.del); if (handledOffline(r, b.closest("tr"))) return; navigate("contracts"); }
   }));
 }
 function contractForm(c) {
@@ -2044,7 +2050,7 @@ async function loadClientMaps(c) {
   }));
   box.querySelectorAll("[data-rmmap]").forEach(b => b.addEventListener("click", async (e) => {
     e.stopPropagation();
-    if (confirm(t("confirm_delete"))) { const r = await API.del("/maps/" + b.dataset.rmmap); if (handledOffline(r)) return; loadClientMaps(c); }
+    if (confirm(t("confirm_delete"))) { const r = await API.del("/maps/" + b.dataset.rmmap); if (handledOffline(r, b.closest(".map-thumb"))) return; loadClientMaps(c); }
   }));
 }
 
