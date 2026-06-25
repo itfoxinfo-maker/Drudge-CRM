@@ -31,7 +31,10 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Install SDK components
-        run: yes | sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" >/dev/null
+        run: sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Point Gradle at the SDK
+        run: echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
