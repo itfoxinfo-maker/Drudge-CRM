@@ -573,10 +573,11 @@ function uploadPhotoDialog(entityType, entityId, after) {
 function visitsTable(visits) {
   if (!visits || !visits.length) return `<div class="empty">${t("none")}</div>`;
   return `<table><thead><tr><th>${t("scheduled_start")}</th><th>${t("client")}</th>
-    <th>${t("service")}</th><th>${t("agent")}</th><th>${t("status")}</th></tr></thead>
+    <th>${t("location_lbl")}</th><th>${t("service")}</th><th>${t("agent")}</th><th>${t("status")}</th></tr></thead>
     <tbody>${visits.map(v => `<tr class="clickable" data-visit="${v.id}">
       <td>${fmtDateTime(v.scheduled_start)}</td>
       <td>${esc(localized(v, "client") || "")}</td>
+      <td>${esc(v.site_name || v.location || "—")}</td>
       <td>${esc(localized(v, "service") || "—")}</td>
       <td>${esc(v.agent_name || "—")}</td>
       <td>${statusBadge(v.status)}</td></tr>`).join("")}</tbody></table>`;
@@ -665,9 +666,12 @@ async function viewVisit(v, arg) {
         <div>${t("service")}</div><div>${esc(localized(visit, "service") || "—")}</div>
         <div>${t("agent")}</div><div>${esc(visit.agent_name || "—")}</div>
         <div>${t("scheduled_start")}</div><div>${fmtDateTime(visit.scheduled_start)}</div>
-        <div>${t("location")}</div><div>${esc(visit.location || visit.site_name || "—")}</div>
+        <div>${t("location_lbl")}</div><div>${esc(visit.site_name || visit.location || "—")}</div>
         <div>${t("notes")}</div><div>${esc(visit.notes || "—")}</div>
       </div>
+      ${canEdit && role() !== "agent" ? `<div class="form-actions" style="justify-content:flex-start;flex-wrap:wrap">
+        <select id="v-site" style="min-width:140px"><option value="">${t("none")}</option></select>
+        <button class="btn sm secondary" id="v-site-btn">📍 ${t("set_location")}</button></div>` : ""}
       ${canEdit ? `<div class="form-actions" style="justify-content:flex-start">
         <select id="v-status">${["scheduled", "in_progress", "completed", "cancelled"].map(s => `<option value="${s}" ${visit.status === s ? "selected" : ""}>${t(statusKey(s))}</option>`).join("")}</select>
         <button class="btn sm" id="v-status-btn">${t("change_status")}</button></div>` : ""}
@@ -703,6 +707,13 @@ async function viewVisit(v, arg) {
   if ($("v-status-btn")) $("v-status-btn").addEventListener("click", async () => {
     const saved = await API.put("/visits/" + id, { status: $("v-status").value }); if (handledOffline(saved)) return; toast(t("saved")); navigate("visit", { id });
   });
+  if ($("v-site")) {
+    loadSiteOptions(visit.client_id, $("v-site"), visit.site_id, t("none"));
+    $("v-site-btn").addEventListener("click", async () => {
+      const saved = await API.put("/visits/" + id, { site_id: $("v-site").value || null });
+      if (handledOffline(saved)) return; toast(t("saved")); navigate("visit", { id });
+    });
+  }
   if ($("report-form")) {
     const form = $("report-form");
     const hint = $("report-draft-hint");
@@ -1761,8 +1772,8 @@ async function viewCalendar(v, arg) {
     const dayVisits = byDay[k] || [];
     const isToday = k === ymd(new Date());
     cells += `<div class="cal-cell ${isToday ? "today" : ""}"><div class="cal-day">${day}</div>
-      ${dayVisits.slice(0, 4).map(vi => `<div class="cal-ev b-${vi.status}" data-visit="${vi.id}" data-agent="${vi.agent_id || ""}"
-        title="${esc(localized(vi, "client"))}">${esc((localized(vi, "client") || "").slice(0, 16))}</div>`).join("")}
+      ${dayVisits.slice(0, 4).map(vi => { const loc = vi.site_name || vi.location || ""; return `<div class="cal-ev b-${vi.status}" data-visit="${vi.id}" data-agent="${vi.agent_id || ""}"
+        title="${esc(localized(vi, "client"))}${loc ? " — " + esc(loc) : ""}">${esc((localized(vi, "client") || "").slice(0, 16))}${loc ? `<span class="cal-ev-site">📍 ${esc(loc.slice(0, 16))}</span>` : ""}</div>`; }).join("")}
       ${dayVisits.length > 4 ? `<div class="muted small">+${dayVisits.length - 4}</div>` : ""}</div>`;
   }
   const dows = (LANG === "ar" ? ["إث", "ثل", "أر", "خم", "جم", "سب", "أح"] : ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]);

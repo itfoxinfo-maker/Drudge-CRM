@@ -225,6 +225,7 @@ tr.clickable:hover { background: var(--green-l); }
 .cal-cell.today { border-color: var(--green); box-shadow: 0 0 0 2px var(--green-l) inset; }
 .cal-day { font-size: 12px; font-weight: 700; color: var(--muted); margin-bottom: 5px; }
 .cal-ev { font-size: 11px; padding: 3px 7px; border-radius: 6px; margin-bottom: 4px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+.cal-ev-site { display: block; font-weight: 500; opacity: 0.85; font-size: 10px; overflow: hidden; text-overflow: ellipsis; }
 
 /* analytics bars */
 .bar-row { display: grid; grid-template-columns: 140px 1fr auto; gap: 12px; align-items: center; margin-bottom: 10px; }

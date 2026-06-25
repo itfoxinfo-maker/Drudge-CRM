@@ -728,10 +728,11 @@ def list_visits(ctx):
         where.append("date(v.scheduled_start) <= date(?)")
         params.append(ctx.query["to"])
     sql = ("SELECT v.*, c.name_en client_en, c.name_ar client_ar, "
-           "s.name_en service_en, s.name_ar service_ar, u.full_name agent_name, "
+           "s.name_en service_en, s.name_ar service_ar, u.full_name agent_name, st.name site_name, "
            "EXISTS(SELECT 1 FROM reports r WHERE r.visit_id=v.id AND r.status='complete') has_report "
            "FROM visits v JOIN clients c ON c.id=v.client_id "
            "LEFT JOIN service_types s ON s.id=v.service_type_id "
+           "LEFT JOIN sites st ON st.id=v.site_id "
            "LEFT JOIN users u ON u.id=v.agent_id")
     if where:
         sql += " WHERE " + " AND ".join(where)
@@ -806,6 +807,8 @@ def update_visit(ctx):
             raise ApiError(403, "Not your visit")
         allowed = {"status", "notes", "completed_at"}
         b = {k: val for k, val in b.items() if k in allowed}
+    if "site_id" in b and not b["site_id"]:
+        b["site_id"] = None     # blank -> unassigned location (NULL), not ""
     cols = ("client_id", "site_id", "agent_id", "service_type_id", "scheduled_start",
             "scheduled_end", "status", "location", "notes", "completed_at")
     fields = [f"{c}=?" for c in cols if c in b]
