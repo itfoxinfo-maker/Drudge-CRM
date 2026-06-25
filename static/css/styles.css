@@ -356,6 +356,32 @@ tr.clickable:hover { background: var(--green-l); }
 .login-screen::before { background: #38bdf8; }
 .login-screen::after { background: #22d3ee; }
 
+/* Same backdrop, now gently animated: the gradient slowly drifts and the two
+   blurred blobs float around. Honors reduced-motion. */
+.login-screen {
+  background-size: 180% 180%, 180% 180%, 100% 100%;
+  animation: loginDrift 22s ease-in-out infinite alternate;
+}
+@keyframes loginDrift {
+  0%   { background-position: 0% 0%, 100% 100%, 0 0; }
+  100% { background-position: 35% 25%, 65% 75%, 0 0; }
+}
+.login-screen::before { will-change: transform, opacity; animation: blobA 15s ease-in-out infinite alternate; }
+.login-screen::after  { will-change: transform, opacity; animation: blobB 19s ease-in-out infinite alternate; }
+@keyframes blobA {
+  0%   { transform: translate(0, 0) scale(1);       opacity: .20; }
+  50%  { transform: translate(70px, 50px) scale(1.18); opacity: .33; }
+  100% { transform: translate(25px, 100px) scale(1.06); opacity: .26; }
+}
+@keyframes blobB {
+  0%   { transform: translate(0, 0) scale(1);        opacity: .20; }
+  50%  { transform: translate(-60px, -35px) scale(1.22); opacity: .30; }
+  100% { transform: translate(-25px, -90px) scale(1.08); opacity: .24; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .login-screen, .login-screen::before, .login-screen::after { animation: none; }
+}
+
 /* ---- RBAC permissions matrix ---- */
 .tabs { display: flex; gap: 6px; margin-bottom: 16px; border-bottom: 2px solid var(--line); }
 .tabs .tab {
