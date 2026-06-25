@@ -227,6 +227,28 @@ tr.clickable:hover { background: var(--green-l); }
 .cal-ev { font-size: 11px; padding: 3px 7px; border-radius: 6px; margin-bottom: 4px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
 .cal-ev-site { display: block; font-weight: 500; opacity: 0.85; font-size: 10px; overflow: hidden; text-overflow: ellipsis; }
 
+/* Editable report document (Reports sidebar only) */
+.rdoc { max-width: 820px; margin: 0 auto; background: #fff; border: 1px solid #e6ecf2; border-radius: 14px; padding: 26px 30px; box-shadow: 0 4px 18px rgba(15,23,42,.05); }
+.rdoc-head { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #0f172a; padding-bottom: 12px; }
+.rdoc-title { font-size: 20px; font-weight: 800; letter-spacing: .02em; }
+.rdoc-no { color: #64748b; font-size: 12px; margin-top: 3px; }
+.rdoc-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 24px; margin: 16px 0 8px; }
+.rdoc-meta > div { font-size: 13px; }
+.rdoc-meta span { color: #64748b; display: block; font-size: 11px; }
+.rdoc-sec { margin: 22px 0 8px; font-size: 11px; color: #0f172a; text-transform: uppercase; letter-spacing: .08em; border-bottom: 1px solid #e3e8ec; padding-bottom: 4px; }
+.rdoc-body { margin-top: 12px; }
+.rdoc-row { margin-bottom: 12px; }
+.rdoc-row label { display: block; font-size: 11px; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 4px; }
+.rdoc-row input, .rdoc-row textarea, .rdoc-row select { width: 100%; padding: 8px 10px; border: 1px solid #dfe6ee; border-radius: 8px; font: inherit; background: #fbfdff; }
+.rdoc-row textarea { resize: vertical; }
+.rdoc-table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+.rdoc-table th, .rdoc-table td { padding: 8px 10px; border-bottom: 1px solid #eef2f5; text-align: start; }
+.rdoc-table th { background: #f1f5f9; font-size: 11px; text-transform: uppercase; color: #475569; }
+.rdoc-sigs { display: flex; gap: 30px; margin-top: 26px; }
+.rdoc-sig { flex: 1; text-align: center; }
+.rdoc-sig img { max-height: 70px; max-width: 220px; }
+.rdoc-sig .ln { border-top: 1px solid #1c2733; margin-top: 6px; padding-top: 6px; color: #64748b; font-size: 12px; }
+
 /* analytics bars */
 .bar-row { display: grid; grid-template-columns: 140px 1fr auto; gap: 12px; align-items: center; margin-bottom: 10px; }
 .bar-label { font-size: 12.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }

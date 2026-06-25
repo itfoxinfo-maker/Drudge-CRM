@@ -262,6 +262,7 @@ async function navigate(view, arg) {
     else if (view === "map") await viewMap(v, arg);
     else if (view === "schedule" || view === "visits") await viewSchedule(v);
     else if (view === "reports") await viewReports(v);
+    else if (view === "report") await viewReportDoc(v, arg);
     else if (view === "visit") await viewVisit(v, arg);
     else if (view === "chemicals") await viewChemicals(v);
     else if (view === "issues") await viewIssues(v);
@@ -669,7 +670,7 @@ async function viewReports(v) {
     const d = await API.get("/reports?" + buildQuery(page));
     $("rep-list").innerHTML = reportsTable(d.items) + pagerHTML(d);
     $("rep-list").querySelectorAll("tr[data-visit]").forEach(tr =>
-      tr.addEventListener("click", () => navigate("visit", { id: tr.dataset.visit })));
+      tr.addEventListener("click", () => navigate("report", { id: tr.dataset.visit })));
     wirePager($("rep-list"), d, refresh);
   }
   $("rf-client").addEventListener("change", async () => {
@@ -692,6 +693,178 @@ async function viewReports(v) {
     analyticsReportDoc(t("nav_reports"), sub, `<div class="panel">${reportsTable(rows, true)}</div>`);
   });
   refresh(1);
+}
+
+// Report fields, in document order. area=multi-line. Materials are numbers.
+const REPORT_TEXT_FIELDS = [
+  { n: "summary", area: true }, { n: "pests_found" }, { n: "findings", area: true },
+  { n: "recommendations", area: true }, { n: "spare_parts_changed" }, { n: "branch_issue", area: true },
+];
+const REPORT_MAT_FIELDS = ["lamps_used", "cables_used", "transformers_used", "light_sheets_used",
+  "fipronil_ml", "imidacloprid_gm", "baits_count", "glo_pieces", "flybase_bags"];
+
+// Single-report document view, opened ONLY from the Reports sidebar list.
+// Looks like a printable report, is editable, and shows only fields that have
+// content (empty fields are tucked behind a "show all fields" toggle so they can
+// still be added). New design — intentionally distinct from the certificate.
+async function viewReportDoc(v, arg) {
+  const id = arg && arg.id;
+  const visit = await API.get("/visits/" + id);
+  const rep = visit.report || {};
+  const has = (val) => val !== null && val !== undefined && String(val).trim() !== "";
+  const textRow = (f) => {
+    const val = rep[f.n] || "";
+    const input = f.area ? `<textarea data-rep="${f.n}" rows="3">${esc(val)}</textarea>`
+                         : `<input type="text" data-rep="${f.n}" value="${esc(val)}">`;
+    return `<div class="rdoc-row" data-empty="${has(val) ? "0" : "1"}"><label>${esc(t(f.n))}</label>${input}</div>`;
+  };
+  const matRow = (k) => {
+    const val = rep[k] || "";
+    return `<div class="rdoc-row" data-empty="${Number(val) > 0 ? "0" : "1"}"><label>${esc(t(k))}</label>
+      <input type="number" step="any" data-rep="${k}" value="${esc(Number(val) > 0 ? val : "")}"></div>`;
+  };
+  const sevSel = `<div class="rdoc-row"><label>${esc(t("severity"))}</label>
+    <select data-rep="severity">${["low", "medium", "high", "critical"].map(s =>
+      `<option value="${s}" ${(rep.severity || "low") === s ? "selected" : ""}>${t("sev_" + s)}</option>`).join("")}</select></div>`;
+  const dateRow = `<div class="rdoc-row" data-empty="${has(rep.next_visit_due) ? "0" : "1"}"><label>${esc(t("next_visit_due"))}</label>
+    <input type="date" data-rep="next_visit_due" value="${esc(rep.next_visit_due || "")}"></div>`;
+  const sig = (f, label) => f ? `<div class="rdoc-sig"><img src="/uploads/${esc(f)}"><div class="ln">${esc(label)}</div></div>` : "";
+  const chemRows = (visit.chemicals || []).map(cu =>
+    `<tr><td>${esc(localized(cu, "name"))}</td><td>${cu.quantity} ${esc(cu.unit || "")}</td><td>${esc(cu.area_treated || "—")}</td></tr>`).join("");
+
+  const allRows = [sevSel, ...REPORT_TEXT_FIELDS.map(textRow), dateRow, ...REPORT_MAT_FIELDS.map(matRow)].join("");
+  const statusBadgeHtml = `<span class="badge b-${rep.status === "complete" ? "completed" : "draft"}">${t(rep.status === "complete" ? "report_complete" : "report_draft")}</span>`;
+
+  v.innerHTML = `
+    <div class="breadcrumb" id="bc">← 📋 ${t("nav_reports")}</div>
+    <div class="page-head"><h2>📋 ${t("report")} — ${esc(localized(visit, "client"))}</h2>
+      <div style="display:flex;gap:8px;align-items:center">
+        <label class="muted small"><input type="checkbox" id="rd-showall"> ${t("show_all_fields")}</label>
+        <button class="btn sm secondary" id="rd-print">🖨️ ${t("print")}</button>
+        ${can("visits.edit") ? `<button class="btn sm" id="rd-save">💾 ${t("save")}</button>` : ""}</div></div>
+    <div class="rdoc" id="rdoc">
+      <div class="rdoc-head">
+        <div><div class="rdoc-title">${t("service_report")}</div>
+          <div class="rdoc-no">#${String(visit.id).padStart(5, "0")} · ${fmtDateTime(visit.completed_at || visit.scheduled_start)}</div></div>
+        ${statusBadgeHtml}
+      </div>
+      <div class="rdoc-meta">
+        <div><span>${t("client")}</span><b>${esc(localized(visit, "client") || "—")}</b></div>
+        <div><span>${t("location_lbl")}</span><b>${esc(visit.site_name || visit.location || "—")}</b></div>
+        <div><span>${t("agent")}</span><b>${esc(visit.agent_name || "—")}</b></div>
+        <div><span>${t("service")}</span><b>${esc(localized(visit, "service") || "—")}</b></div>
+      </div>
+      <div class="rdoc-body">${allRows}</div>
+      ${chemRows ? `<h3 class="rdoc-sec">${t("chemicals_applied")}</h3>
+        <table class="rdoc-table"><thead><tr><th>${t("name_en")}</th><th>${t("quantity")}</th><th>${t("area_treated")}</th></tr></thead>
+        <tbody>${chemRows}</tbody></table>` : ""}
+      ${(rep.customer_signature || rep.technician_signature) ? `<div class="rdoc-sigs">
+        ${sig(rep.customer_signature, rep.customer_name || t("customer_signature"))}
+        ${sig(rep.technician_signature, visit.agent_name || t("technician_signature"))}</div>` : ""}
+    </div>`;
+
+  $("bc").addEventListener("click", () => navigate("reports"));
+  // hide empty fields by default; the toggle reveals them for adding
+  const applyShowAll = () => {
+    const show = $("rd-showall").checked;
+    $("rdoc").querySelectorAll('.rdoc-row[data-empty="1"]').forEach(el => el.classList.toggle("hidden", !show));
+  };
+  applyShowAll();
+  $("rd-showall").addEventListener("change", applyShowAll);
+  $("rd-print").addEventListener("click", () => printReportDoc(visit));
+  if ($("rd-save")) $("rd-save").addEventListener("click", async () => {
+    const d = {};
+    $("rdoc").querySelectorAll("[data-rep]").forEach(el => { d[el.dataset.rep] = el.value; });
+    const saved = await API.post(`/visits/${id}/report`, d);   // no status -> keeps draft/complete
+    if (handledOffline(saved)) return;
+    toast(t("saved")); navigate("report", { id });
+  });
+}
+
+// Printable PDF of one report — a clean, NEW layout (not the certificate).
+// Renders only the fields that have content.
+function printReportDoc(visit) {
+  const ar = LANG === "ar";
+  const dir = ar ? "rtl" : "ltr";
+  const S = SETTINGS || {};
+  const rep = visit.report || {};
+  const compName = (ar ? S.company_name_ar : S.company_name_en) || S.company_name_en || "Company";
+  const compAddr = (ar ? S.address_ar : S.address_en) || S.address_en || "";
+  const logoHtml = S.logo ? `<img src="/uploads/${esc(S.logo)}" style="height:46px">` : `<div style="font-size:32px">🐜</div>`;
+  const has = (x) => x !== null && x !== undefined && String(x).trim() !== "";
+  const row = (label, val) => has(val) ? `<tr><td class="l">${esc(label)}</td><td>${esc(val).replace(/\n/g, "<br>")}</td></tr>` : "";
+  const sev = rep.severity || "low";
+  const sevColors = { low: "#16a34a", medium: "#d97706", high: "#ef4444", critical: "#b91c1c" };
+  const matRows = REPORT_MAT_FIELDS.filter(k => Number(rep[k]) > 0)
+    .map(k => `<tr><td class="l">${esc(t(k))}</td><td>${esc(rep[k])}</td></tr>`).join("");
+  const chemRows = (visit.chemicals || []).map(cu =>
+    `<tr><td>${esc(localized(cu, "name"))}</td><td>${cu.quantity} ${esc(cu.unit || "")}</td><td>${esc(cu.area_treated || "—")}</td></tr>`).join("");
+  const sig = (f, label) => f ? `<div class="sg"><img src="/uploads/${esc(f)}"><div class="ln">${esc(label)}</div></div>` : "";
+  const reportRows = [
+    row(t("pests_found"), rep.pests_found), row(t("findings"), rep.findings),
+    row(t("recommendations"), rep.recommendations),
+    `<tr><td class="l">${esc(t("severity"))}</td><td><span class="sev" style="background:${sevColors[sev]}">${esc(t("sev_" + sev))}</span></td></tr>`,
+    row(t("summary"), rep.summary), row(t("spare_parts_changed"), rep.spare_parts_changed),
+    row(t("branch_issue"), rep.branch_issue),
+    has(rep.next_visit_due) ? row(t("next_visit_due"), fmtDate(rep.next_visit_due)) : "",
+  ].join("");
+  const doc = `<!DOCTYPE html><html lang="${LANG}" dir="${dir}"><head><meta charset="utf-8">
+    <title>${esc(t("service_report"))} #${String(visit.id).padStart(5, "0")}</title>
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <style>
+      *{box-sizing:border-box}
+      body{font-family:${ar ? "'Cairo'" : "'Inter'"},system-ui,sans-serif;color:#1c2733;margin:0;padding:40px;font-size:13px}
+      .sheet{max-width:760px;margin:auto}
+      .top{display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid #0f172a;padding-bottom:14px;margin-bottom:6px}
+      .co h1{margin:0;font-size:17px}.co .m{color:#64748b;font-size:11px;line-height:1.6}
+      .rt{text-align:${ar ? "left" : "right"}}
+      .rt h2{margin:0;font-size:20px;letter-spacing:.02em}
+      .rt .no{color:#64748b;font-size:12px;margin-top:3px}
+      .meta{display:grid;grid-template-columns:1fr 1fr;gap:6px 22px;margin:16px 0 6px}
+      .meta div{font-size:12px}.meta span{color:#64748b}.meta b{margin-${ar ? "right" : "left"}:6px}
+      h3.sec{margin:20px 0 6px;font-size:11px;color:#0f172a;text-transform:uppercase;letter-spacing:.08em;border-bottom:1px solid #e3e8ec;padding-bottom:4px}
+      table{width:100%;border-collapse:collapse}
+      .kv td{padding:7px 4px;vertical-align:top;line-height:1.6;border-bottom:1px solid #eef2f5}
+      .kv td.l{color:#64748b;width:32%;white-space:nowrap}
+      .data th,.data td{padding:8px 10px;text-align:${ar ? "right" : "left"};border-bottom:1px solid #e3e8ec}
+      .data th{background:#f1f5f9;font-size:11px;text-transform:uppercase;color:#475569}
+      .sev{display:inline-block;padding:3px 12px;border-radius:20px;font-weight:700;font-size:12px;color:#fff}
+      .sigs{display:flex;gap:30px;margin-top:30px}
+      .sg{flex:1;text-align:center}.sg img{max-height:70px;max-width:220px}
+      .sg .ln{border-top:1px solid #1c2733;margin-top:6px;padding-top:6px;color:#64748b;font-size:12px}
+      .noprint{text-align:center;margin-bottom:18px}
+      .pbtn{background:#0f172a;color:#fff;border:none;padding:10px 22px;border-radius:8px;font-size:14px;cursor:pointer}
+      @media print{body{padding:0}.noprint{display:none}*{-webkit-print-color-adjust:exact !important;print-color-adjust:exact !important}}
+    </style></head><body>
+    <div class="noprint"><button class="pbtn" onclick="window.print()">🖨️ ${esc(t("print"))}</button></div>
+    <div class="sheet">
+      <div class="top">
+        <div style="display:flex;gap:12px;align-items:center">${logoHtml}
+          <div class="co"><h1>${esc(compName)}</h1><div class="m">${esc(compAddr)}<br>${esc(S.phone || "")} · ${esc(S.email || "")}</div></div></div>
+        <div class="rt"><h2>${esc(t("service_report"))}</h2>
+          <div class="no">#${String(visit.id).padStart(5, "0")} · ${fmtDate(visit.completed_at || visit.scheduled_start)}</div></div>
+      </div>
+      <div class="meta">
+        <div><span>${t("client")}:</span><b>${esc(localized(visit, "client") || "—")}</b></div>
+        <div><span>${t("location_lbl")}:</span><b>${esc(visit.site_name || visit.location || "—")}</b></div>
+        <div><span>${t("agent")}:</span><b>${esc(visit.agent_name || "—")}</b></div>
+        <div><span>${t("service")}:</span><b>${esc(localized(visit, "service") || "—")}</b></div>
+      </div>
+      <h3 class="sec">${esc(t("report"))}</h3>
+      <table class="kv">${reportRows}</table>
+      ${matRows ? `<h3 class="sec">${esc(t("materials_used"))}</h3><table class="kv">${matRows}</table>` : ""}
+      ${chemRows ? `<h3 class="sec">${esc(t("chemicals_applied"))}</h3>
+        <table class="data"><thead><tr><th>${esc(t("name_en"))}</th><th>${esc(t("quantity"))}</th><th>${esc(t("area_treated"))}</th></tr></thead>
+        <tbody>${chemRows}</tbody></table>` : ""}
+      ${(rep.customer_signature || rep.technician_signature) ? `<div class="sigs">
+        ${sig(rep.customer_signature, rep.customer_name || t("customer_signature"))}
+        ${sig(rep.technician_signature, visit.agent_name || t("technician_signature"))}</div>` : ""}
+    </div>
+    <script>window.onload=function(){setTimeout(function(){window.print()},400)}<\/script>
+    </body></html>`;
+  const w = window.open("", "_blank");
+  if (!w) { alert("Please allow pop-ups to print the report."); return; }
+  w.document.open(); w.document.write(doc); w.document.close();
 }
 
 function visitForm(preset) {
