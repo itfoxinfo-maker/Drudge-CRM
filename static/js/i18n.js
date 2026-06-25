@@ -33,6 +33,7 @@ const TRANSLATIONS = {
     // visits
     schedule_title: "Visit Schedule", new_visit: "New Visit", client: "Client", agent: "Agent",
     service: "Service Type", scheduled_start: "Scheduled Start", scheduled_end: "End",
+    duration: "Duration", minutes: "min",
     location: "Location", visit_detail: "Visit Detail", report: "Report",
     summary: "Summary", pests_found: "Pests Found", findings: "Findings",
     recommendations: "Recommendations", severity: "Severity", next_visit_due: "Next Visit Due",
@@ -216,6 +217,7 @@ const TRANSLATIONS = {
     recent_visits: "أحدث الزيارات", client_users: "مستخدمو البوابة", finance: "المالية",
     schedule_title: "جدول الزيارات", new_visit: "زيارة جديدة", client: "العميل", agent: "الفني",
     service: "نوع الخدمة", scheduled_start: "موعد البدء", scheduled_end: "النهاية",
+    duration: "المدة", minutes: "دقيقة",
     location: "الموقع", visit_detail: "تفاصيل الزيارة", report: "التقرير",
     summary: "الملخص", pests_found: "الآفات المكتشفة", findings: "الملاحظات",
     recommendations: "التوصيات", severity: "الخطورة", next_visit_due: "موعد الزيارة القادمة",

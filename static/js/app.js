@@ -875,6 +875,12 @@ function printReportDoc(visit) {
   w.document.open(); w.document.write(doc); w.document.close();
 }
 
+// Visit duration choices: 15 min up to 90 min in 5-minute steps.
+function durationOpts() {
+  const opts = [];
+  for (let m = 15; m <= 90; m += 5) opts.push({ v: m, l: `${m} ${t("minutes")}` });
+  return opts;
+}
 function visitForm(preset) {
   preset = preset || {};
   const clientOpts = cache.clients.map(c => ({ v: c.id, l: localized(c, "name") }));
@@ -886,7 +892,7 @@ function visitForm(preset) {
     ${field(t("agent"), "agent_id", { options: agentOpts })}
     ${field(t("service"), "service_type_id", { options: svcOpts })}
     ${field(t("scheduled_start"), "scheduled_start", { type: "datetime-local" })}
-    ${field(t("scheduled_end"), "scheduled_end", { type: "datetime-local" })}
+    ${field(t("duration"), "duration", { options: durationOpts(), value: 30 })}
     ${field(t("location_detail"), "location", { cls: "full" })}
     ${field(t("notes"), "notes", { textarea: true, cls: "full" })}
     </div><div class="form-actions"><button type="button" class="btn secondary" id="vf-x">${t("cancel")}</button>
@@ -902,6 +908,16 @@ function visitForm(preset) {
         alert(t("select_location")); siteSel.focus(); return;
       }
       const d = formData(root);
+      // The end time is derived from start + chosen duration (no manual end field).
+      if (d.scheduled_start && d.duration) {
+        const start = new Date(d.scheduled_start);
+        if (!isNaN(start)) {
+          const end = new Date(start.getTime() + Number(d.duration) * 60000);
+          const pad = (n) => String(n).padStart(2, "0");
+          d.scheduled_end = `${end.getFullYear()}-${pad(end.getMonth() + 1)}-${pad(end.getDate())}T${pad(end.getHours())}:${pad(end.getMinutes())}`;
+        }
+      }
+      delete d.duration;
       Object.keys(d).forEach(k => { if (d[k] === "") delete d[k]; });
       try { const saved = await API.post("/visits", d); if (handledOffline(saved)) return; closeModal(); navigate("visit", { id: saved.id }); }
       catch (err) { alert(err.message); }
