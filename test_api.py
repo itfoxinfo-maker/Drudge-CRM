@@ -111,6 +111,23 @@ def main():
         _, run = call("POST", "/contracts/run", admin)
         check("contract generated visits", run["created"] >= 1)
 
+        print("EVENT NOTIFICATIONS (start / end / contract / visit-due)")
+        mgr = login("manager@pestcrm.com", "manager123")
+        _, mn = call("GET", "/notifications", mgr)
+        check("manager notified of new contract", any(n["type"] == "contract_new" for n in mn["items"]))
+        call("PUT", "/visits/1", agent, {"status": "in_progress"})
+        _, mn = call("GET", "/notifications", mgr)
+        check("manager notified visit started", any(n["type"] == "visit_started" for n in mn["items"]))
+        call("PUT", "/visits/1", agent, {"status": "completed"})
+        _, mn = call("GET", "/notifications", mgr)
+        check("manager notified visit completed", any(n["type"] == "visit_completed" for n in mn["items"]))
+        # a visit starting now -> the assigned agent is reminded to start it
+        call("POST", "/visits", admin, {"client_id": 1, "agent_id": 3,
+                                        "scheduled_start": time.strftime("%Y-%m-%dT%H:%M")})
+        call("POST", "/notifications/generate", admin)
+        _, an = call("GET", "/notifications", agent)
+        check("agent reminded it's time to start the visit", any(n["type"] == "visit_due" for n in an["items"]))
+
         print("NOTIFICATIONS / ANALYTICS / SETTINGS")
         _, notif = call("GET", "/notifications", admin)
         check("notifications generated", notif["unread"] >= 1)

@@ -102,6 +102,7 @@ const TRANSLATIONS = {
     bucket_current: "Current", bucket_1_30: "1–30 days", bucket_31_60: "31–60 days", bucket_60: "60+ days",
     // notifications
     notifications_title: "Notifications", mark_all_read: "Mark all read", no_notifications: "No notifications.",
+    sound: "Sound on/off",
     // signatures
     signatures: "Signatures", customer_signature: "Customer Signature", technician_signature: "Technician Signature",
     sign_here: "Sign in the box below", clear: "Clear", save_signature: "Save Signature",
@@ -275,6 +276,7 @@ const TRANSLATIONS = {
     total_revenue: "إجمالي الإيرادات (المدفوعة)", active_contracts: "العقود النشطة", visits_completed: "الزيارات المنجزة",
     bucket_current: "حالية", bucket_1_30: "١–٣٠ يوم", bucket_31_60: "٣١–٦٠ يوم", bucket_60: "أكثر من ٦٠ يوم",
     notifications_title: "الإشعارات", mark_all_read: "تعليم الكل كمقروء", no_notifications: "لا توجد إشعارات.",
+    sound: "تشغيل/إيقاف الصوت",
     signatures: "التواقيع", customer_signature: "توقيع العميل", technician_signature: "توقيع الفني",
     sign_here: "وقّع في المربع أدناه", clear: "مسح", save_signature: "حفظ التوقيع",
     customer_name: "اسم العميل", capture_sig: "التقاط التوقيع", signed: "موقّع",

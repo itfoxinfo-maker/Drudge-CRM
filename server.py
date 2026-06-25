@@ -824,6 +824,21 @@ def update_visit(ctx):
         raise ApiError(400, "Nothing to update")
     vals.append(vid)
     db.execute(f"UPDATE visits SET {','.join(fields)} WHERE id=?", vals)
+    # Notify managers/admins when a visit is started or ended.
+    new_status = b.get("status")
+    if new_status and new_status != v["status"] and new_status in ("in_progress", "completed"):
+        info = db.query("SELECT c.name_en client, u2.full_name agent FROM visits vv "
+                        "JOIN clients c ON c.id=vv.client_id LEFT JOIN users u2 ON u2.id=vv.agent_id "
+                        "WHERE vv.id=?", (vid,), one=True)
+        who = (info["agent"] or "Agent")
+        if new_status == "in_progress":
+            _notify_roles(("admin", "manager"), "visit_started", "Visit started",
+                          f"{who} started the visit at {info['client']}", "visit", vid,
+                          f"vstart:{vid}", exclude=u["id"])
+        else:
+            _notify_roles(("admin", "manager"), "visit_completed", "Visit completed",
+                          f"{who} completed the visit at {info['client']}", "visit", vid,
+                          f"vdone:{vid}", exclude=u["id"])
     return db.query("SELECT * FROM visits WHERE id=?", (vid,), one=True)
 
 
@@ -1582,6 +1597,10 @@ def create_contract(ctx):
         (b["client_id"], b.get("site_id"), b.get("service_type_id"), b.get("agent_id"),
          b["frequency"], b["start_date"], b.get("end_date"), b["start_date"],
          float(b.get("price", 0)), b.get("status", "active"), b.get("notes")))
+    cl = db.query("SELECT name_en FROM clients WHERE id=?", (b["client_id"],), one=True)
+    _notify_roles(("admin", "manager"), "contract_new", "New contract",
+                  f"New {b['frequency']} contract for {cl['name_en'] if cl else ''}",
+                  "contracts", cid, f"contract:{cid}", exclude=ctx.user["id"])
     return db.query("SELECT * FROM contracts WHERE id=?", (cid,), one=True)
 
 
@@ -1693,6 +1712,20 @@ def _notify(user_id, ntype, title, body, link_view=None, link_id=None, dedup_key
     return True
 
 
+def _notify_roles(roles, ntype, title, body, link_view=None, link_id=None, dedup_key=None, exclude=None):
+    """Notify every active user holding one of `roles` (dedup key is made unique
+    per recipient). `exclude` skips one user id (e.g. the actor)."""
+    ph = ",".join("?" * len(roles))
+    n = 0
+    for usr in db.query(f"SELECT id FROM users WHERE role IN ({ph}) AND active=1", tuple(roles)):
+        if exclude and usr["id"] == exclude:
+            continue
+        dk = f"{dedup_key}:{usr['id']}" if dedup_key else None
+        if _notify(usr["id"], ntype, title, body, link_view, link_id, dk):
+            n += 1
+    return n
+
+
 def _maybe_send_email(user_id, subject, body):
     """Send email if SMTP is configured in settings; otherwise no-op (in-app only)."""
     s = get_settings()
@@ -1728,7 +1761,7 @@ def _maybe_send_email(user_id, subject, body):
 # and de-duplicated), just not recomputed needlessly.
 _reminder_lock = threading.Lock()
 _reminder_last = 0.0
-REMINDER_MIN_INTERVAL = 300  # seconds
+REMINDER_MIN_INTERVAL = 120  # seconds (keeps "time to start" reminders timely)
 
 
 def _maybe_generate_reminders():
@@ -1755,6 +1788,17 @@ def _generate_reminders():
         if _notify(v["agent_id"], "visit_reminder", "Upcoming visit",
                    f"{v['name_en']} on {v['scheduled_start'][:16]}", "visit", v["id"],
                    f"visitrem:{v['id']}:{v['scheduled_start'][:10]}"):
+            created += 1
+    # visits about to start (<=15 min away, still not started) -> remind the agent
+    # it's time to start the visit.
+    for v in db.query(
+        "SELECT v.id, v.agent_id, v.scheduled_start, c.name_en FROM visits v "
+        "JOIN clients c ON c.id=v.client_id WHERE v.status='scheduled' AND v.agent_id IS NOT NULL "
+        "AND datetime(v.scheduled_start) <= datetime('now','+15 minutes') "
+        "AND datetime(v.scheduled_start) >= datetime('now','-3 hours')"):
+        if _notify(v["agent_id"], "visit_due", "Time to start your visit",
+                   f"Your visit at {v['name_en']} starts at {v['scheduled_start'][11:16]}",
+                   "visit", v["id"], f"visitstart:{v['id']}"):
             created += 1
     # unfinished (draft) reports left by agents -> remind the agent to complete &
     # save. Only nag once the draft has sat for >10 min (i.e. they likely left the

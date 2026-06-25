@@ -1988,6 +1988,36 @@ async function downloadCsv(entity) {
 // Notifications (topbar bell)
 // ====================================================================
 let notifTimer = null;
+let notifLastMaxId = null;            // baseline; sound plays when it grows
+let notifMuted = localStorage.getItem("notifMuted") === "1";
+let _audioCtx = null;
+// Short two-tone chime via Web Audio (no asset needed). Unlocked on first click.
+function playNotifSound() {
+  if (notifMuted) return;
+  try {
+    _audioCtx = _audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (_audioCtx.state === "suspended") _audioCtx.resume();
+    const beep = (freq, at, dur) => {
+      const o = _audioCtx.createOscillator(), g = _audioCtx.createGain();
+      o.connect(g); g.connect(_audioCtx.destination); o.type = "sine"; o.frequency.value = freq;
+      const t0 = _audioCtx.currentTime + at;
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(0.3, t0 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      o.start(t0); o.stop(t0 + dur);
+    };
+    beep(880, 0, 0.35); beep(1175, 0.18, 0.4);
+  } catch (e) {}
+}
+// Browsers require a user gesture before audio can play — unlock on first click.
+document.addEventListener("click", function unlockAudio() {
+  try {
+    _audioCtx = _audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (_audioCtx.state === "suspended") _audioCtx.resume();
+  } catch (e) {}
+  document.removeEventListener("click", unlockAudio);
+}, { once: true });
+
 async function initNotifications() {
   if (role() === "client") { $("topbar-right").innerHTML = ""; return; }
   $("topbar-right").innerHTML = `<div class="bell-wrap">
@@ -1997,6 +2027,7 @@ async function initNotifications() {
   document.addEventListener("click", (e) => {
     if (!e.target.closest(".bell-wrap")) $("bell-menu").classList.add("hidden");
   });
+  notifLastMaxId = null;   // reset baseline on (re)login so we don't replay old ones
   await refreshNotifications();
   clearInterval(notifTimer);
   notifTimer = setInterval(refreshNotifications, 60000);
@@ -2009,6 +2040,10 @@ async function refreshNotifications() {
     if (d.unread > 0) { c.textContent = d.unread; c.classList.remove("hidden"); }
     else c.classList.add("hidden");
     window._notifs = d.items;
+    // play a sound when a genuinely new notification has arrived since last poll
+    const maxId = (d.items || []).reduce((m, n) => Math.max(m, n.id || 0), 0);
+    if (notifLastMaxId !== null && maxId > notifLastMaxId && d.unread > 0) playNotifSound();
+    notifLastMaxId = maxId;
   } catch (e) {}
 }
 function toggleBell() {
@@ -2016,11 +2051,20 @@ function toggleBell() {
   if (!menu.classList.contains("hidden")) { menu.classList.add("hidden"); return; }
   const items = window._notifs || [];
   menu.innerHTML = `<div class="bell-head"><strong>${t("notifications_title")}</strong>
-    <button class="link-btn sm" id="bell-read">${t("mark_all_read")}</button></div>
+    <span style="display:flex;gap:10px;align-items:center">
+      <button class="link-btn sm" id="bell-mute" title="${t("sound")}">${notifMuted ? "🔇" : "🔊"}</button>
+      <button class="link-btn sm" id="bell-read">${t("mark_all_read")}</button></span></div>
     ${items.length ? items.map(n => `<div class="notif ${n.is_read ? "" : "unread"}" data-link="${n.link_view || ""}" data-id="${n.link_id || ""}">
       <div class="nt">${esc(n.title)}</div><div class="nb muted small">${esc(n.body || "")}</div></div>`).join("")
       : `<div class="empty">${t("no_notifications")}</div>`}`;
   menu.classList.remove("hidden");
+  $("bell-mute").addEventListener("click", (e) => {
+    e.stopPropagation();
+    notifMuted = !notifMuted;
+    localStorage.setItem("notifMuted", notifMuted ? "1" : "0");
+    $("bell-mute").textContent = notifMuted ? "🔇" : "🔊";
+    if (!notifMuted) playNotifSound();   // confirm sound when re-enabling
+  });
   $("bell-read").addEventListener("click", async (e) => { e.stopPropagation(); await API.post("/notifications/read", {}); refreshNotifications(); menu.classList.add("hidden"); });
   menu.querySelectorAll(".notif").forEach(n => n.addEventListener("click", () => {
     const view = n.dataset.link, id = n.dataset.id;

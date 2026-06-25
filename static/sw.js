@@ -5,7 +5,7 @@
  *  - same-origin GET (app shell + assets): stale-while-revalidate.
  *  - navigations: fall back to the cached shell when offline.
  */
-const VERSION = "pestcare-v8";
+const VERSION = "pestcare-v9";
 const SHELL = [
   "/",
   "/index.html",
