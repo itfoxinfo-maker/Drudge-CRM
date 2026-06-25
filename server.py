@@ -776,6 +776,12 @@ def create_visit(ctx):
     b = ctx.body
     if not b.get("client_id") or not b.get("scheduled_start"):
         raise ApiError(400, "Client and scheduled date are required")
+    # If the client has locations defined, a visit must be assigned to one so its
+    # report rolls up to the right location.
+    if not b.get("site_id"):
+        has_sites = db.query("SELECT 1 FROM sites WHERE client_id=? LIMIT 1", (b["client_id"],), one=True)
+        if has_sites:
+            raise ApiError(400, "Please choose a location for this visit")
     vid = db.execute(
         "INSERT INTO visits(client_id,site_id,agent_id,service_type_id,scheduled_start,"
         "scheduled_end,status,location,notes) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -1273,10 +1279,10 @@ def create_invoice(ctx):
     tax = float(b.get("tax", 0))
     with db.transaction() as cx:
         iid = cx.execute(
-            "INSERT INTO invoices(client_id,visit_id,contract_id,doc_type,number,issue_date,due_date,"
-            "valid_until,amount,tax,total,status,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (b["client_id"], b.get("visit_id"), b.get("contract_id"), doc_type, number,
-             b["issue_date"], b.get("due_date"), b.get("valid_until"), 0, 0, 0,
+            "INSERT INTO invoices(client_id,site_id,visit_id,contract_id,doc_type,number,issue_date,due_date,"
+            "valid_until,amount,tax,total,status,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (b["client_id"], b.get("site_id") or None, b.get("visit_id"), b.get("contract_id"),
+             doc_type, number, b["issue_date"], b.get("due_date"), b.get("valid_until"), 0, 0, 0,
              b.get("status", "draft"), b.get("notes"))).lastrowid
         # amount: from items if provided, else flat amount
         amount = _save_items(iid, items, cx) if items else float(b.get("amount", 0))
@@ -1296,6 +1302,8 @@ def update_invoice(ctx):
     cur = db.query("SELECT * FROM invoices WHERE id=?", (iid,), one=True)
     if not cur:
         raise ApiError(404, "Not found")
+    if "site_id" in b and not b["site_id"]:
+        b["site_id"] = None     # blank -> unassigned location (NULL), not ""
     with db.transaction() as cx:
         if "items" in b:                       # items drive the amount
             b["amount"] = _save_items(iid, b["items"], cx)
@@ -1303,7 +1311,7 @@ def update_invoice(ctx):
             amount = float(b.get("amount", cur["amount"]))
             tax = float(b.get("tax", cur["tax"]))
             b["amount"], b["tax"], b["total"] = amount, tax, amount + tax
-        cols = ("visit_id", "issue_date", "due_date", "valid_until", "amount", "tax",
+        cols = ("site_id", "visit_id", "issue_date", "due_date", "valid_until", "amount", "tax",
                 "total", "status", "notes", "number", "doc_type")
         fields = [f"{c}=?" for c in cols if c in b]
         vals = [b[c] for c in cols if c in b]
@@ -1733,48 +1741,54 @@ def client_analytics(ctx):
     _assert_client_access(ctx.user, cid)
     if ctx.user["role"] != "client":
         require_perm(ctx.user, "analytics.view")
+    site_id = ctx.query.get("site_id")
+    vf, vp = _site_filter(site_id, "v.site_id")     # visit-derived queries
+    inf, inp = _site_filter(site_id, "site_id")     # bare invoices table
+    iif, iip = _site_filter(site_id, "i.site_id")   # invoices via alias i
     labels = _month_labels(12)
     # build continuous 12-month series (fill gaps with zero) for smooth curves
     inv_by = {r["m"]: r["v"] for r in db.query(
         "SELECT strftime('%Y-%m',issue_date) m, SUM(total) v FROM invoices "
-        "WHERE client_id=? AND doc_type='invoice' GROUP BY m", (cid,))}
+        "WHERE client_id=? AND doc_type='invoice'" + inf + " GROUP BY m", (cid, *inp))}
     paid_by = {r["m"]: r["v"] for r in db.query(
         "SELECT strftime('%Y-%m',p.paid_at) m, SUM(p.amount) v FROM payments p "
-        "JOIN invoices i ON i.id=p.invoice_id WHERE i.client_id=? GROUP BY m", (cid,))}
+        "JOIN invoices i ON i.id=p.invoice_id WHERE i.client_id=?" + iif + " GROUP BY m", (cid, *iip))}
     vis_by = {r["m"]: r["v"] for r in db.query(
-        "SELECT strftime('%Y-%m',scheduled_start) m, COUNT(*) v FROM visits "
-        "WHERE client_id=? GROUP BY m", (cid,))}
+        "SELECT strftime('%Y-%m',scheduled_start) m, COUNT(*) v FROM visits v "
+        "WHERE client_id=?" + vf + " GROUP BY m", (cid, *vp))}
     months = [{"m": k, "invoiced": round(inv_by.get(k, 0) or 0, 2),
                "paid": round(paid_by.get(k, 0) or 0, 2), "visits": vis_by.get(k, 0) or 0}
               for k in labels]
-    status = db.query("SELECT status, COUNT(*) cnt FROM visits WHERE client_id=? GROUP BY status", (cid,))
+    status = db.query("SELECT status, COUNT(*) cnt FROM visits v WHERE client_id=?" + vf + " GROUP BY status", (cid, *vp))
     services = db.query(
         "SELECT s.name_en, s.name_ar, COUNT(v.id) cnt FROM service_types s "
-        "JOIN visits v ON v.service_type_id=s.id WHERE v.client_id=? GROUP BY s.id "
-        "HAVING cnt>0 ORDER BY cnt DESC", (cid,))
+        "JOIN visits v ON v.service_type_id=s.id WHERE v.client_id=?" + vf + " GROUP BY s.id "
+        "HAVING cnt>0 ORDER BY cnt DESC", (cid, *vp))
     severity = db.query(
         "SELECT r.severity, COUNT(*) cnt FROM reports r JOIN visits v ON v.id=r.visit_id "
-        "WHERE v.client_id=? AND r.severity IS NOT NULL GROUP BY r.severity", (cid,))
+        "WHERE v.client_id=?" + vf + " AND r.severity IS NOT NULL GROUP BY r.severity", (cid, *vp))
     chemicals = db.query(
         "SELECT ch.name_en, ch.name_ar, ch.unit, SUM(cu.quantity) used FROM chemical_usage cu "
         "JOIN chemicals ch ON ch.id=cu.chemical_id JOIN visits v ON v.id=cu.visit_id "
-        "WHERE v.client_id=? GROUP BY ch.id ORDER BY used DESC LIMIT 8", (cid,))
-    # Engineer service-log materials consumed across all of this client's visits.
+        "WHERE v.client_id=?" + vf + " GROUP BY ch.id ORDER BY used DESC LIMIT 8", (cid, *vp))
+    # Engineer service-log materials consumed across the selected location's visits.
     mat_cols = ("lamps_used", "cables_used", "transformers_used", "light_sheets_used",
                 "fipronil_ml", "imidacloprid_gm", "baits_count", "glo_pieces", "flybase_bags")
     mat_sum = db.query(
         "SELECT " + ",".join(f"COALESCE(SUM(r.{c}),0) {c}" for c in mat_cols) +
-        " FROM reports r JOIN visits v ON v.id=r.visit_id WHERE v.client_id=?", (cid,), one=True)
+        " FROM reports r JOIN visits v ON v.id=r.visit_id WHERE v.client_id=?" + vf, (cid, *vp), one=True)
     materials = [{"key": c, "total": round(mat_sum[c] or 0, 2)} for c in mat_cols if (mat_sum[c] or 0) > 0]
-    fin = _finance_summary(cid)
+    fin = _finance_summary(cid, site_id)
     totals = {
-        "visits": db.query("SELECT COUNT(*) c FROM visits WHERE client_id=?", (cid,), one=True)["c"],
-        "completed": db.query("SELECT COUNT(*) c FROM visits WHERE client_id=? AND status='completed'", (cid,), one=True)["c"],
+        "visits": db.query("SELECT COUNT(*) c FROM visits v WHERE client_id=?" + vf, (cid, *vp), one=True)["c"],
+        "completed": db.query("SELECT COUNT(*) c FROM visits v WHERE client_id=?" + vf + " AND status='completed'", (cid, *vp), one=True)["c"],
         "invoiced": fin["total_invoiced"], "paid": fin["total_paid"], "outstanding": fin["outstanding"],
         "contracts": db.query("SELECT COUNT(*) c FROM contracts WHERE client_id=? AND status='active'", (cid,), one=True)["c"],
     }
+    sites = db.query("SELECT id, name FROM sites WHERE client_id=? ORDER BY name", (cid,))
     return {"months": months, "status": status, "services": services,
-            "severity": severity, "chemicals": chemicals, "materials": materials, "totals": totals}
+            "severity": severity, "chemicals": chemicals, "materials": materials,
+            "totals": totals, "sites": sites, "site_id": site_id or ""}
 
 
 @route("GET", r"/api/clients/(\d+)/pest-trends")
@@ -1786,40 +1800,45 @@ def client_pest_trends(ctx):
     _assert_client_access(ctx.user, cid)
     if ctx.user["role"] != "client":
         require_perm(ctx.user, "analytics.view")
+    site_id = ctx.query.get("site_id")
+    # marker_events carry no site_id; scope via their map's location.
+    ef, ep = _site_filter(site_id, "(SELECT site_id FROM maps WHERE id=marker_events.map_id)")
+    eef, eep = _site_filter(site_id, "(SELECT site_id FROM maps WHERE id=e.map_id)")
+    mf, mp_ = _site_filter(site_id, "m.site_id")
     labels = _month_labels(12)
     insp_by = {r["m"]: r["v"] for r in db.query(
         "SELECT strftime('%Y-%m',recorded_at) m, COUNT(*) v FROM marker_events "
-        "WHERE client_id=? GROUP BY m", (cid,))}
+        "WHERE client_id=?" + ef + " GROUP BY m", (cid, *ep))}
     act_by = {r["m"]: r["v"] for r in db.query(
         "SELECT strftime('%Y-%m',recorded_at) m, COUNT(*) v FROM marker_events "
-        "WHERE client_id=? AND status='activity' GROUP BY m", (cid,))}
+        "WHERE client_id=? AND status='activity'" + ef + " GROUP BY m", (cid, *ep))}
     months = [{"m": k, "inspections": insp_by.get(k, 0) or 0,
                "detections": act_by.get(k, 0) or 0} for k in labels]
     by_type = db.query(
         "SELECT type, COUNT(*) detections FROM marker_events "
-        "WHERE client_id=? AND status='activity' GROUP BY type ORDER BY detections DESC", (cid,))
+        "WHERE client_id=? AND status='activity'" + ef + " GROUP BY type ORDER BY detections DESC", (cid, *ep))
     hotspots = db.query(
         "SELECT k.id, k.label, k.type, k.status, mp.name map_name, "
         "COUNT(e.id) detections, MAX(e.recorded_at) last_seen "
         "FROM marker_events e JOIN map_markers k ON k.id=e.marker_id "
         "JOIN maps mp ON mp.id=e.map_id "
-        "WHERE e.client_id=? AND e.status='activity' "
-        "GROUP BY e.marker_id ORDER BY detections DESC, last_seen DESC LIMIT 8", (cid,))
+        "WHERE e.client_id=? AND e.status='activity'" + eef +
+        " GROUP BY e.marker_id ORDER BY detections DESC, last_seen DESC LIMIT 8", (cid, *eep))
     totals = {
         "inspections": db.query(
-            "SELECT COUNT(*) c FROM marker_events WHERE client_id=?", (cid,), one=True)["c"],
+            "SELECT COUNT(*) c FROM marker_events WHERE client_id=?" + ef, (cid, *ep), one=True)["c"],
         "detections": db.query(
-            "SELECT COUNT(*) c FROM marker_events WHERE client_id=? AND status='activity'",
-            (cid,), one=True)["c"],
+            "SELECT COUNT(*) c FROM marker_events WHERE client_id=? AND status='activity'" + ef,
+            (cid, *ep), one=True)["c"],
         "devices": db.query(
             "SELECT COUNT(DISTINCT k.id) c FROM map_markers k JOIN maps m ON m.id=k.map_id "
-            "WHERE m.client_id=?", (cid,), one=True)["c"],
+            "WHERE m.client_id=?" + mf, (cid, *mp_), one=True)["c"],
         "active_now": db.query(
             "SELECT COUNT(*) c FROM map_markers k JOIN maps m ON m.id=k.map_id "
-            "WHERE m.client_id=? AND k.status='activity'", (cid,), one=True)["c"],
+            "WHERE m.client_id=?" + mf + " AND k.status='activity'", (cid, *mp_), one=True)["c"],
     }
     last = db.query(
-        "SELECT MAX(recorded_at) v FROM marker_events WHERE client_id=?", (cid,), one=True)
+        "SELECT MAX(recorded_at) v FROM marker_events WHERE client_id=?" + ef, (cid, *ep), one=True)
     return {"months": months, "by_type": by_type, "hotspots": hotspots,
             "totals": totals, "last_inspection": last["v"] if last else None}
 
@@ -2177,10 +2196,27 @@ def _client_outstanding(cid):
     return round(total - paid, 2)
 
 
-def _finance_summary(cid):
+def _site_filter(site_id, col):
+    """Build an AND-clause + params for an optional location filter.
+
+    site_id: None/"" -> all locations (no filter); "none"/"0" -> unassigned
+    (col IS NULL); a numeric id -> that single location."""
+    if site_id in (None, "", "all"):
+        return "", []
+    if str(site_id) in ("none", "0"):
+        return f" AND {col} IS NULL", []
+    try:
+        return f" AND {col}=?", [int(site_id)]
+    except (TypeError, ValueError):
+        return "", []
+
+
+def _finance_summary(cid, site_id=None):
+    clause, params = _site_filter(site_id, "i.site_id")
     invoices = db.query(
         "SELECT i.*, COALESCE((SELECT SUM(amount) FROM payments p WHERE p.invoice_id=i.id),0) paid "
-        "FROM invoices i WHERE i.client_id=? ORDER BY i.issue_date DESC", (cid,))
+        "FROM invoices i WHERE i.client_id=?" + clause + " ORDER BY i.issue_date DESC",
+        (cid, *params))
     total = sum(i["total"] for i in invoices)
     paid = sum(i["paid"] for i in invoices)
     return {

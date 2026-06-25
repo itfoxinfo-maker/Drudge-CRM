@@ -309,6 +309,21 @@ function formData(root) {
   root.querySelectorAll("[name]").forEach(el => { d[el.name] = el.value; });
   return d;
 }
+// Fill a <select name="site_id"> with the client's locations. Sets
+// dataset.hasSites="1" when the client has any (so the form can require one).
+// firstLabel is the placeholder shown for the empty option.
+async function loadSiteOptions(clientId, selectEl, selected, firstLabel) {
+  if (!selectEl) return;
+  if (!clientId) { selectEl.innerHTML = `<option value="">${t("none")}</option>`; selectEl.dataset.hasSites = ""; return; }
+  selectEl.innerHTML = `<option value="">${t("loading")}</option>`;
+  let sites = [];
+  try { const c = await API.get("/clients/" + clientId); sites = c.sites || []; } catch (e) {}
+  selectEl.dataset.hasSites = sites.length ? "1" : "";
+  const ph = firstLabel || (sites.length ? t("select_location") : t("none"));
+  const opts = [{ v: "", l: ph }].concat(sites.map(s => ({ v: s.id, l: s.name })));
+  selectEl.innerHTML = opts.map(o =>
+    `<option value="${esc(o.v)}" ${String(o.v) === String(selected || "") ? "selected" : ""}>${esc(o.l)}</option>`).join("");
+}
 function statusBadge(s) { return `<span class="badge b-${s}">${t(statusKey(s))}</span>`; }
 function statusKey(s) {
   const map = { scheduled: "st_scheduled", in_progress: "st_in_progress", completed: "st_completed",
@@ -605,17 +620,25 @@ function visitForm(preset) {
   const svcOpts = [{ v: "", l: t("none") }].concat(cache.services.map(s => ({ v: s.id, l: localized(s, "name") })));
   openModal(t("new_visit"), `<form id="vf"><div class="form-grid">
     ${field(t("client"), "client_id", { options: clientOpts, value: preset.client_id, cls: "full" })}
+    ${field(t("location_lbl"), "site_id", { options: [{ v: "", l: t("none") }], cls: "full" })}
     ${field(t("agent"), "agent_id", { options: agentOpts })}
     ${field(t("service"), "service_type_id", { options: svcOpts })}
     ${field(t("scheduled_start"), "scheduled_start", { type: "datetime-local" })}
     ${field(t("scheduled_end"), "scheduled_end", { type: "datetime-local" })}
-    ${field(t("location"), "location", { cls: "full" })}
+    ${field(t("location_detail"), "location", { cls: "full" })}
     ${field(t("notes"), "notes", { textarea: true, cls: "full" })}
     </div><div class="form-actions"><button type="button" class="btn secondary" id="vf-x">${t("cancel")}</button>
     <button class="btn" type="submit">${t("save")}</button></div></form>`, (root) => {
     $("vf-x").addEventListener("click", closeModal);
+    const clientSel = root.querySelector("[name=client_id]");
+    const siteSel = root.querySelector("[name=site_id]");
+    loadSiteOptions(preset.client_id || (clientSel && clientSel.value), siteSel, preset.site_id);
+    if (clientSel) clientSel.addEventListener("change", () => loadSiteOptions(clientSel.value, siteSel));
     root.querySelector("#vf").addEventListener("submit", async (e) => {
       e.preventDefault();
+      if (siteSel && siteSel.dataset.hasSites === "1" && !siteSel.value) {
+        alert(t("select_location")); siteSel.focus(); return;
+      }
       const d = formData(root);
       Object.keys(d).forEach(k => { if (d[k] === "") delete d[k]; });
       try { const saved = await API.post("/visits", d); if (handledOffline(saved)) return; closeModal(); navigate("visit", { id: saved.id }); }
@@ -1092,6 +1115,7 @@ function invoiceForm(preset) {
   const title = isEdit ? `${t("edit")} — ${esc(preset.number)}` : (isQuote ? t("quote") : t("new_invoice"));
   openModal(title, `<form id="if"><div class="form-grid">
     ${field(t("client"), "client_id", { options: clientOpts, value: preset.client_id, cls: "full" })}
+    ${field(t("location_lbl"), "site_id", { options: [{ v: "", l: t("none") }], cls: "full" })}
     ${field(t("issue_date"), "issue_date", { type: "date", value: preset.issue_date })}
     ${isQuote ? field(t("valid_until"), "valid_until", { type: "date", value: preset.valid_until })
               : field(t("due_date"), "due_date", { type: "date", value: preset.due_date })}
@@ -1102,6 +1126,10 @@ function invoiceForm(preset) {
     </div><div class="form-actions"><button type="button" class="btn secondary" id="if-x">${t("cancel")}</button>
     <button class="btn" type="submit">${t("save")}</button></div></form>`, (root) => {
     $("if-x").addEventListener("click", closeModal);
+    const clientSel = root.querySelector("[name=client_id]");
+    const siteSel = root.querySelector("[name=site_id]");
+    loadSiteOptions(preset.client_id || (clientSel && clientSel.value), siteSel, preset.site_id, t("none"));
+    if (clientSel) clientSel.addEventListener("change", () => loadSiteOptions(clientSel.value, siteSel, null, t("none")));
     // In edit mode the client can't be moved and the existing tax shouldn't be auto-overwritten.
     if (isEdit) {
       const cl = root.querySelector("[name=client_id]"); if (cl) cl.disabled = true;
@@ -2138,53 +2166,84 @@ function materialsBlock(materials) {
 async function viewClientAnalytics(v, arg) {
   const id = (arg && arg.id) || (role() === "client" ? API.user.client_id : null);
   if (!id) { v.innerHTML = `<div class="empty">${t("none")}</div>`; return; }
-  const [c, a, tr] = await Promise.all([API.get("/clients/" + id),
-    API.get(`/clients/${id}/analytics`),
-    API.get(`/clients/${id}/pest-trends`).catch(() => null)]);
-  const T = a.totals;
-  const labels = a.months.map(m => monthShort(m.m));
-  const statusColors = { scheduled: "#2563eb", in_progress: "#d97706", completed: "#16a34a", cancelled: "#dc2626" };
-  const sevColors = { low: "#16a34a", medium: "#d97706", high: "#ef4444", critical: "#b91c1c" };
-  const statusSeg = a.status.map(s => ({ label: t(statusKey(s.status)), value: s.cnt, color: statusColors[s.status] || "#64748b" }));
-  const sevSeg = a.severity.map(s => ({ label: t("sev_" + s.severity), value: s.cnt, color: sevColors[s.severity] || "#64748b" }));
-  const svcItems = a.services.map((s, i) => ({ label: localized(s, "name"), value: s.cnt, color: PALETTE[i % PALETTE.length] }));
-  const chemItems = a.chemicals.map((ch, i) => ({ label: localized(ch, "name"), value: Math.round((ch.used || 0) * 100) / 100, color: PALETTE[(i + 3) % PALETTE.length] }));
-  const sc = (val, label, icon, cls) => `<div class="stat-card ${cls}"><div class="sc-ic">${icon}</div><div><div class="v">${val}</div><div class="l">${label}</div></div></div>`;
-  // Build chart markup once so the screen and the PDF export are identical.
-  const parts = {
-    cards: `<div class="cards">
-      ${sc(T.visits, t("total_visits"), "🗓️", "c-blue")}
-      ${sc(T.completed, t("visits_completed"), "✅", "c-green")}
-      ${sc(money(T.invoiced), t("total_invoiced"), "🧾", "c-purple")}
-      ${sc(money(T.paid), t("total_paid"), "💰", "c-teal")}
-      ${sc(money(T.outstanding), t("outstanding"), "⚠️", "danger")}
-      ${sc(T.contracts, t("active_contracts"), "🔁", "c-amber")}</div>`,
-    revenue: curveChart(labels, [
-      { name: t("invoiced"), color: "#16a34a", values: a.months.map(m => m.invoiced) },
-      { name: t("paid"), color: "#2563eb", values: a.months.map(m => m.paid) }], { money: true }),
-    visits: curveChart(labels, [{ name: t("nav_visits"), color: "#7c3aed", values: a.months.map(m => m.visits) }]),
-    status: pie3d(statusSeg), severity: pie3d(sevSeg),
-    services: cols3d(svcItems), chemicals: cols3d(chemItems),
-    materials: materialsBlock(a.materials),
-    pestTrends: pestTrendsBlock(tr),
-  };
+  const c = await API.get("/clients/" + id);
+  const sites = c.sites || [];
+  // Location filter: total + each location (+ unassigned bucket when sites exist).
+  const locOpts = [`<option value="">${esc(t("all_locations"))}</option>`]
+    .concat(sites.map(s => `<option value="${s.id}">${esc(s.name)}</option>`));
+  if (sites.length) locOpts.push(`<option value="none">${esc(t("unassigned"))}</option>`);
+  const locName = (sid) => !sid ? t("all_locations")
+    : sid === "none" ? t("unassigned")
+    : (sites.find(s => String(s.id) === String(sid)) || {}).name || "";
+
   v.innerHTML = `
     <div class="breadcrumb" id="bc">← 📁 ${esc(localized(c, "name"))}</div>
     <div class="page-head"><h2>📊 ${t("company_analytics")} — ${esc(localized(c, "name"))}</h2>
-      <button class="btn sm" id="export-analytics">🖨️ ${t("export_pdf")}</button></div>
-    ${parts.cards}
-    <div class="panel"><h3>📈 ${t("revenue_trend")}</h3>${parts.revenue}</div>
-    <div class="grid-2">
-      <div class="panel"><h3>📉 ${t("visits_trend")}</h3>${parts.visits}</div>
-      <div class="panel"><h3>🟢 ${t("status_distribution")}</h3>${parts.status}</div>
-      <div class="panel"><h3>🧭 ${t("severity_distribution")}</h3>${parts.severity}</div>
-      <div class="panel"><h3>🧰 ${t("service_mix")}</h3>${parts.services}</div>
-    </div>
-    <div class="panel"><h3>🧪 ${t("chemical_usage")}</h3>${parts.chemicals}</div>
-    ${parts.materials ? `<div class="panel"><h3>📦 ${t("materials_consumed")}</h3>${parts.materials}</div>` : ""}
-    ${parts.pestTrends ? `<div class="section-title" style="margin-top:8px"><h2>🐭 ${t("pest_trends")}</h2></div>${parts.pestTrends}` : ""}`;
+      <div style="display:flex;gap:8px;align-items:center">
+        ${sites.length ? `<label class="muted small">📍 ${t("location_lbl")}:</label>
+          <select id="loc-filter">${locOpts.join("")}</select>` : ""}
+        <button class="btn sm" id="export-analytics">🖨️ ${t("export_pdf")}</button></div></div>
+    <div id="analytics-body"><div class="empty">${t("loading")}</div></div>`;
   $("bc").addEventListener("click", () => navigate(role() === "client" ? "folder" : "client", { id }));
-  $("export-analytics").addEventListener("click", () => printAnalytics(c, parts));
+
+  let currentParts = null, currentSite = "";
+  async function render(siteId) {
+    currentSite = siteId || "";
+    const body = $("analytics-body");
+    body.innerHTML = `<div class="empty">${t("loading")}</div>`;
+    const q = siteId ? `?site_id=${encodeURIComponent(siteId)}` : "";
+    const [a, tr] = await Promise.all([
+      API.get(`/clients/${id}/analytics${q}`),
+      API.get(`/clients/${id}/pest-trends${q}`).catch(() => null)]);
+    const T = a.totals;
+    const labels = a.months.map(m => monthShort(m.m));
+    const statusColors = { scheduled: "#2563eb", in_progress: "#d97706", completed: "#16a34a", cancelled: "#dc2626" };
+    const sevColors = { low: "#16a34a", medium: "#d97706", high: "#ef4444", critical: "#b91c1c" };
+    const statusSeg = a.status.map(s => ({ label: t(statusKey(s.status)), value: s.cnt, color: statusColors[s.status] || "#64748b" }));
+    const sevSeg = a.severity.map(s => ({ label: t("sev_" + s.severity), value: s.cnt, color: sevColors[s.severity] || "#64748b" }));
+    const svcItems = a.services.map((s, i) => ({ label: localized(s, "name"), value: s.cnt, color: PALETTE[i % PALETTE.length] }));
+    const chemItems = a.chemicals.map((ch, i) => ({ label: localized(ch, "name"), value: Math.round((ch.used || 0) * 100) / 100, color: PALETTE[(i + 3) % PALETTE.length] }));
+    const sc = (val, label, icon, cls) => `<div class="stat-card ${cls}"><div class="sc-ic">${icon}</div><div><div class="v">${val}</div><div class="l">${label}</div></div></div>`;
+    // Build chart markup once so the screen and the PDF export are identical.
+    const parts = {
+      cards: `<div class="cards">
+        ${sc(T.visits, t("total_visits"), "🗓️", "c-blue")}
+        ${sc(T.completed, t("visits_completed"), "✅", "c-green")}
+        ${sc(money(T.invoiced), t("total_invoiced"), "🧾", "c-purple")}
+        ${sc(money(T.paid), t("total_paid"), "💰", "c-teal")}
+        ${sc(money(T.outstanding), t("outstanding"), "⚠️", "danger")}
+        ${sc(T.contracts, t("active_contracts"), "🔁", "c-amber")}</div>`,
+      revenue: curveChart(labels, [
+        { name: t("invoiced"), color: "#16a34a", values: a.months.map(m => m.invoiced) },
+        { name: t("paid"), color: "#2563eb", values: a.months.map(m => m.paid) }], { money: true }),
+      visits: curveChart(labels, [{ name: t("nav_visits"), color: "#7c3aed", values: a.months.map(m => m.visits) }]),
+      status: pie3d(statusSeg), severity: pie3d(sevSeg),
+      services: cols3d(svcItems), chemicals: cols3d(chemItems),
+      materials: materialsBlock(a.materials),
+      pestTrends: pestTrendsBlock(tr),
+    };
+    currentParts = parts;
+    body.innerHTML = `
+      ${parts.cards}
+      <div class="panel"><h3>📈 ${t("revenue_trend")}</h3>${parts.revenue}</div>
+      <div class="grid-2">
+        <div class="panel"><h3>📉 ${t("visits_trend")}</h3>${parts.visits}</div>
+        <div class="panel"><h3>🟢 ${t("status_distribution")}</h3>${parts.status}</div>
+        <div class="panel"><h3>🧭 ${t("severity_distribution")}</h3>${parts.severity}</div>
+        <div class="panel"><h3>🧰 ${t("service_mix")}</h3>${parts.services}</div>
+      </div>
+      <div class="panel"><h3>🧪 ${t("chemical_usage")}</h3>${parts.chemicals}</div>
+      ${parts.materials ? `<div class="panel"><h3>📦 ${t("materials_consumed")}</h3>${parts.materials}</div>` : ""}
+      ${parts.pestTrends ? `<div class="section-title" style="margin-top:8px"><h2>🐭 ${t("pest_trends")}</h2></div>${parts.pestTrends}` : ""}`;
+  }
+
+  if ($("loc-filter")) $("loc-filter").addEventListener("change", (e) => render(e.target.value));
+  $("export-analytics").addEventListener("click", () => {
+    if (!currentParts) return;
+    const sub = localized(c, "name") + " — " + locName(currentSite);
+    printAnalytics(c, currentParts, sub);
+  });
+  await render("");
 }
 
 // ---- shared printable / PDF analytics report shell ----
@@ -2236,7 +2295,7 @@ function analyticsReportDoc(titleText, subtitle, bodyHtml) {
   w.document.open(); w.document.write(doc); w.document.close();
 }
 
-function printAnalytics(c, parts) {
+function printAnalytics(c, parts, subtitle) {
   const body = `${parts.cards}
     <div class="panel"><h3>📈 ${esc(t("revenue_trend"))}</h3>${parts.revenue}</div>
     <div class="grid-2">
@@ -2248,7 +2307,7 @@ function printAnalytics(c, parts) {
     <div class="panel"><h3>🧪 ${esc(t("chemical_usage"))}</h3>${parts.chemicals}</div>
     ${parts.materials ? `<div class="panel"><h3>📦 ${esc(t("materials_consumed"))}</h3>${parts.materials}</div>` : ""}
     ${parts.pestTrends ? `<h2 style="margin:18px 0 6px">🐭 ${esc(t("pest_trends"))}</h2>${parts.pestTrends}` : ""}`;
-  analyticsReportDoc(t("analytics_report"), localized(c, "name"), body);
+  analyticsReportDoc(t("analytics_report"), subtitle || localized(c, "name"), body);
 }
 
 // ====================================================================

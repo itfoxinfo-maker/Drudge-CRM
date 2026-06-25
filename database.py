@@ -188,6 +188,7 @@ CREATE TABLE IF NOT EXISTS photos (
 CREATE TABLE IF NOT EXISTS invoices (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     client_id   INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    site_id     INTEGER REFERENCES sites(id) ON DELETE SET NULL,  -- location this doc belongs to
     visit_id    INTEGER REFERENCES visits(id) ON DELETE SET NULL,
     contract_id INTEGER REFERENCES contracts(id) ON DELETE SET NULL,
     doc_type    TEXT NOT NULL DEFAULT 'invoice',   -- 'invoice' | 'quote'
@@ -384,6 +385,12 @@ def _migrate(conn):
                    ("valid_until", "TEXT")):
         if c not in cols("invoices"):
             conn.execute(f"ALTER TABLE invoices ADD COLUMN {c} {ddl}")
+    # invoice -> location link (per-location finance). On first add, backfill from
+    # the linked visit's site so existing visit-invoices attribute to that location.
+    if "site_id" not in cols("invoices"):
+        conn.execute("ALTER TABLE invoices ADD COLUMN site_id INTEGER")
+        conn.execute("UPDATE invoices SET site_id=(SELECT v.site_id FROM visits v WHERE v.id=invoices.visit_id) "
+                     "WHERE visit_id IS NOT NULL")
     # token_version: bump to revoke a user's existing session tokens.
     # try/except guards against a race when two instances init the same DB at once.
     if "token_version" not in cols("users"):

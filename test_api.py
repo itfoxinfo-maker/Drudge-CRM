@@ -119,6 +119,29 @@ def main():
         _, s = call("PUT", "/settings", admin, {"company_name_en": "Test Co"})
         check("settings persisted", s["company_name_en"] == "Test Co")
 
+        print("PER-LOCATION REPORTS + ANALYTICS")
+        _, site = call("POST", "/clients/1/sites", admin, {"name": "Branch X"})
+        sid = site["id"]
+        # once a client has locations, a visit must be assigned to one
+        st, _ = call("POST", "/visits", admin, {"client_id": 1, "scheduled_start": "2026-07-01 09:00"})
+        check("visit without location blocked (400)", st == 400)
+        st, vis = call("POST", "/visits", admin,
+                       {"client_id": 1, "site_id": sid, "scheduled_start": "2026-07-01 09:00"})
+        check("visit with location created", st == 200 and vis["site_id"] == sid)
+        # an invoice can be attributed to a location
+        _, linv = call("POST", "/invoices", admin,
+                       {"client_id": 1, "site_id": sid, "issue_date": "2026-07-01", "amount": 500})
+        check("invoice carries site_id", linv["site_id"] == sid)
+        # analytics: total vs per-location vs unassigned
+        _, aall = call("GET", "/clients/1/analytics", admin)
+        _, asite = call("GET", f"/clients/1/analytics?site_id={sid}", admin)
+        _, anone = call("GET", "/clients/1/analytics?site_id=none", admin)
+        check("analytics lists the location", any(x["id"] == sid for x in aall["sites"]))
+        check("per-location visits within total", 1 <= asite["totals"]["visits"] <= aall["totals"]["visits"])
+        check("per-location invoiced reflects site", asite["totals"]["invoiced"] >= 500)
+        check("location split sums under total",
+              asite["totals"]["visits"] + anone["totals"]["visits"] == aall["totals"]["visits"])
+
         print("SIGNATURES / SEARCH / CSV")
         png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMCAQGNuM5UAAAAAElFTkSuQmCC"
         _, sig = call("POST", "/visits/1/signature", admin, {"which": "customer", "data": png, "customer_name": "Ali"})
