@@ -226,6 +226,7 @@ function navItems() {
   } else {
     if (can("clients.view")) items.push({ k: "clients", i: "🏢", t: "nav_clients" });
     if (can("visits.view")) items.push({ k: "schedule", i: "🗓️", t: "nav_schedule" });
+    if (can("visits.view")) items.push({ k: "reports", i: "📋", t: "nav_reports" });
     if (can("calendar.view")) items.push({ k: "calendar", i: "📅", t: "nav_calendar" });
     if (can("contracts.view")) items.push({ k: "contracts", i: "🔁", t: "nav_contracts" });
     if (can("chemicals.view")) items.push({ k: "chemicals", i: "🧪", t: "nav_chemicals" });
@@ -260,6 +261,7 @@ async function navigate(view, arg) {
     else if (view === "client-analytics") await viewClientAnalytics(v, arg);
     else if (view === "map") await viewMap(v, arg);
     else if (view === "schedule" || view === "visits") await viewSchedule(v);
+    else if (view === "reports") await viewReports(v);
     else if (view === "visit") await viewVisit(v, arg);
     else if (view === "chemicals") await viewChemicals(v);
     else if (view === "issues") await viewIssues(v);
@@ -611,6 +613,84 @@ async function viewSchedule(v) {
   }
   ["f-status", "f-agent", "f-from", "f-to"].forEach(id => { if ($(id)) $(id).addEventListener("change", () => refresh(1)); });
   if ($("add-visit")) $("add-visit").addEventListener("click", () => visitForm());
+  refresh(1);
+}
+
+// ---- central reports list (admin/owner: all reports, filterable + printable) ----
+const SEV_COLORS = { low: "#16a34a", medium: "#d97706", high: "#ef4444", critical: "#b91c1c" };
+function reportsTable(rows, forPrint) {
+  if (!rows || !rows.length) return `<div class="empty">${t("none")}</div>`;
+  const head = `<tr><th>${t("scheduled_start")}</th><th>${t("client")}</th><th>${t("location_lbl")}</th>
+    <th>${t("agent")}</th><th>${t("severity")}</th><th>${t("status")}</th><th>${t("summary")}</th></tr>`;
+  const body = rows.map(r => {
+    const sev = r.severity || "low";
+    const sevB = `<span style="display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:700;color:#fff;background:${SEV_COLORS[sev] || "#64748b"}">${t("sev_" + sev)}</span>`;
+    const stB = `<span class="badge b-${r.status === "complete" ? "completed" : "draft"}">${t(r.status === "complete" ? "report_complete" : "report_draft")}</span>`;
+    const attr = forPrint ? "" : `class="clickable" data-visit="${r.visit_id}"`;
+    return `<tr ${attr}><td>${fmtDateTime(r.scheduled_start)}</td><td>${esc(localized(r, "client") || "")}</td>
+      <td>${esc(r.site_name || "—")}</td><td>${esc(r.agent_name || "—")}</td>
+      <td>${sevB}</td><td>${stB}</td><td>${esc((r.summary || "").slice(0, 70))}</td></tr>`;
+  }).join("");
+  return `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+}
+async function viewReports(v) {
+  const sevs = ["", "low", "medium", "high", "critical"];
+  const stats = ["", "complete", "draft"];
+  const clientOpts = `<option value="">${t("all")}</option>` +
+    cache.clients.map(c => `<option value="${c.id}">${esc(localized(c, "name"))}</option>`).join("");
+  const agentSel = can("users.view")
+    ? `<label>${t("agent")}: <select id="rf-agent"><option value="">${t("all")}</option>${cache.agents.map(a => `<option value="${a.id}">${esc(a.full_name)}</option>`).join("")}</select></label>` : "";
+  v.innerHTML = `<div class="page-head"><h2>📋 ${t("nav_reports")}</h2>
+      <button class="btn sm" id="rf-print">🖨️ ${t("print")}</button></div>
+    <div class="toolbar">
+      <label>${t("client")}: <select id="rf-client">${clientOpts}</select></label>
+      <label>${t("location_lbl")}: <select id="rf-site"><option value="">${t("all")}</option></select></label>
+      ${agentSel}
+      <label>${t("severity")}: <select id="rf-sev">${sevs.map(s => `<option value="${s}">${s ? t("sev_" + s) : t("all")}</option>`).join("")}</select></label>
+      <label>${t("status")}: <select id="rf-status">${stats.map(s => `<option value="${s}">${s ? t(s === "complete" ? "report_complete" : "report_draft") : t("all")}</option>`).join("")}</select></label>
+      <label>${t("from")}: <input type="date" id="rf-from"></label>
+      <label>${t("to")}: <input type="date" id="rf-to"></label>
+    </div>
+    <div class="panel" id="rep-list">${t("loading")}</div>`;
+  const val = (id) => ($(id) && $(id).value) || "";
+  function buildQuery(paged) {
+    const p = [];
+    if (paged) p.push(`page=${paged}`, `limit=${PAGE_SIZE}`);
+    if (val("rf-client")) p.push("client=" + val("rf-client"));
+    if (val("rf-site")) p.push("site=" + val("rf-site"));
+    if (val("rf-agent")) p.push("agent=" + val("rf-agent"));
+    if (val("rf-sev")) p.push("severity=" + val("rf-sev"));
+    if (val("rf-status")) p.push("status=" + val("rf-status"));
+    if (val("rf-from")) p.push("from=" + val("rf-from"));
+    if (val("rf-to")) p.push("to=" + val("rf-to"));
+    return p.join("&");
+  }
+  async function refresh(page = 1) {
+    const d = await API.get("/reports?" + buildQuery(page));
+    $("rep-list").innerHTML = reportsTable(d.items) + pagerHTML(d);
+    $("rep-list").querySelectorAll("tr[data-visit]").forEach(tr =>
+      tr.addEventListener("click", () => navigate("visit", { id: tr.dataset.visit })));
+    wirePager($("rep-list"), d, refresh);
+  }
+  $("rf-client").addEventListener("change", async () => {
+    const cid = val("rf-client"), sel = $("rf-site");
+    if (!cid) { sel.innerHTML = `<option value="">${t("all")}</option>`; refresh(1); return; }
+    await loadSiteOptions(cid, sel, "", t("all"));
+    if (sel.dataset.hasSites === "1") sel.insertAdjacentHTML("beforeend", `<option value="none">${t("unassigned")}</option>`);
+    refresh(1);
+  });
+  ["rf-site", "rf-agent", "rf-sev", "rf-status", "rf-from", "rf-to"].forEach(id => {
+    if ($(id)) $(id).addEventListener("change", () => refresh(1));
+  });
+  $("rf-print").addEventListener("click", async () => {
+    const res = await API.get("/reports?" + buildQuery(0));   // no page -> full list
+    const rows = Array.isArray(res) ? res : (res.items || []);
+    const sub = [val("rf-client") && $("rf-client").selectedOptions[0].text,
+                 val("rf-site") && $("rf-site").selectedOptions[0].text,
+                 $("rf-agent") && val("rf-agent") && $("rf-agent").selectedOptions[0].text]
+                .filter(Boolean).join(" · ") || t("all");
+    analyticsReportDoc(t("nav_reports"), sub, `<div class="panel">${reportsTable(rows, true)}</div>`);
+  });
   refresh(1);
 }
 

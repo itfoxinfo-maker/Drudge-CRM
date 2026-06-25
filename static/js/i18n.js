@@ -9,7 +9,7 @@ const TRANSLATIONS = {
     // nav
     nav_dashboard: "Dashboard", nav_clients: "Clients", nav_schedule: "Schedule",
     nav_visits: "Visits", nav_chemicals: "Chemicals & Inventory", nav_invoices: "Invoices & Finance",
-    nav_agents: "Agents & Users", nav_search: "Search",
+    nav_agents: "Agents & Users", nav_search: "Search", nav_reports: "Reports", print: "Print",
     // dashboard
     dash_clients: "Clients", dash_agents: "Active Agents", dash_visits_today: "Visits Today",
     dash_scheduled: "Scheduled Visits", dash_low_stock: "Low Stock Items",
@@ -195,7 +195,7 @@ const TRANSLATIONS = {
     language: "English",
     nav_dashboard: "لوحة التحكم", nav_clients: "العملاء", nav_schedule: "الجدول",
     nav_visits: "الزيارات", nav_chemicals: "المبيدات والمخزون", nav_invoices: "الفواتير والمالية",
-    nav_agents: "الفنيون والمستخدمون", nav_search: "بحث",
+    nav_agents: "الفنيون والمستخدمون", nav_search: "بحث", nav_reports: "التقارير", print: "طباعة",
     dash_clients: "العملاء", dash_agents: "الفنيون النشطون", dash_visits_today: "زيارات اليوم",
     dash_scheduled: "الزيارات المجدولة", dash_low_stock: "أصناف منخفضة المخزون",
     dash_outstanding: "الرصيد المستحق", dash_my_visits: "زياراتي المفتوحة",

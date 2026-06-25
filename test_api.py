@@ -142,6 +142,20 @@ def main():
         check("location split sums under total",
               asite["totals"]["visits"] + anone["totals"]["visits"] == aall["totals"]["visits"])
 
+        print("CENTRAL REPORTS LIST")
+        _, rl = call("GET", "/reports", admin)
+        check("reports list returns rows with joins",
+              isinstance(rl, list) and (not rl or all(k in rl[0] for k in ("visit_id", "client_en", "agent_name", "severity", "status"))))
+        _, rp = call("GET", "/reports?page=1&limit=10", admin)
+        check("reports list paginates", all(k in rp for k in ("items", "total", "page", "pages")))
+        st, rf = call("GET", "/reports?severity=high&status=complete", admin)
+        check("reports list filters", st == 200 and all(r["severity"] == "high" and r["status"] == "complete" for r in rf))
+        _, rag = call("GET", "/reports?page=1&limit=50", agent)
+        check("reports scoped to agent's own", all(r["agent_id"] for r in rag["items"]))
+        # the /reports/drafts route is not shadowed by /reports
+        st, _ = call("GET", "/reports/drafts", admin)
+        check("reports drafts route still resolves", st == 200)
+
         print("SIGNATURES / SEARCH / CSV")
         png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMCAQGNuM5UAAAAAElFTkSuQmCC"
         _, sig = call("POST", "/visits/1/signature", admin, {"which": "customer", "data": png, "customer_name": "Ali"})

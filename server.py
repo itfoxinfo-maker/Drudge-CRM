@@ -931,6 +931,45 @@ def list_draft_reports(ctx):
     return {"items": _draft_reports_for(ctx.user)}
 
 
+@route("GET", r"/api/reports")
+def list_reports(ctx):
+    """Central report list for admin/owner, filterable by agent, client,
+    location, severity, status and date range."""
+    u = ctx.user
+    require_perm(u, "visits.view")
+    where, params = [], []
+    if u["role"] == "client":
+        where.append("v.client_id=?"); params.append(u["client_id"])
+    elif u["role"] == "agent":
+        where.append("v.agent_id=?"); params.append(u["id"])
+    for key, col in (("client", "v.client_id"), ("agent", "v.agent_id"),
+                     ("severity", "r.severity"), ("status", "r.status")):
+        if ctx.query.get(key):
+            where.append(f"{col}=?"); params.append(ctx.query[key])
+    site = ctx.query.get("site")
+    if site:
+        if str(site) in ("none", "0"):
+            where.append("v.site_id IS NULL")
+        else:
+            where.append("v.site_id=?"); params.append(site)
+    if ctx.query.get("from"):
+        where.append("date(v.scheduled_start) >= date(?)"); params.append(ctx.query["from"])
+    if ctx.query.get("to"):
+        where.append("date(v.scheduled_start) <= date(?)"); params.append(ctx.query["to"])
+    sql = ("SELECT r.id, r.visit_id, r.severity, r.status, r.summary, r.pests_found, "
+           "r.recommendations, r.created_at, r.completed_at, "
+           "v.scheduled_start, v.agent_id, v.client_id, v.site_id, "
+           "c.name_en client_en, c.name_ar client_ar, st.name site_name, "
+           "u.full_name agent_name "
+           "FROM reports r JOIN visits v ON v.id=r.visit_id "
+           "JOIN clients c ON c.id=v.client_id "
+           "LEFT JOIN sites st ON st.id=v.site_id "
+           "LEFT JOIN users u ON u.id=v.agent_id")
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    return _paginate(ctx, sql, params, "ORDER BY r.created_at DESC")
+
+
 # --------------------------------------------------------------------------
 # CHEMICALS / INVENTORY
 # --------------------------------------------------------------------------
