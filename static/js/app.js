@@ -655,7 +655,7 @@ async function viewReports(v) {
     <div class="panel" id="rep-list">${t("loading")}</div>`;
   const val = (id) => ($(id) && $(id).value) || "";
   function buildQuery(paged) {
-    const p = [];
+    const p = [`lang=${LANG}`];   // summaries shown in the current CRM language
     if (paged) p.push(`page=${paged}`, `limit=${PAGE_SIZE}`);
     if (val("rf-client")) p.push("client=" + val("rf-client"));
     if (val("rf-site")) p.push("site=" + val("rf-site"));
@@ -709,7 +709,10 @@ const REPORT_MAT_FIELDS = ["lamps_used", "cables_used", "transformers_used", "li
 // still be added). New design — intentionally distinct from the certificate.
 async function viewReportDoc(v, arg) {
   const id = arg && arg.id;
-  const visit = await API.get("/visits/" + id);
+  // Load the report already translated into the current CRM language for
+  // display/printing. Edits are dirty-tracked so untouched (translated) fields
+  // are never saved back over the agent's original text.
+  const visit = await API.get(`/visits/${id}?lang=${LANG}`);
   const rep = visit.report || {};
   const has = (val) => val !== null && val !== undefined && String(val).trim() !== "";
   const textRow = (f) => {
@@ -771,10 +774,15 @@ async function viewReportDoc(v, arg) {
   };
   applyShowAll();
   $("rd-showall").addEventListener("change", applyShowAll);
+  // mark a field dirty once the user actually edits it (so we only save changes,
+  // never the auto-translated text of fields they left alone)
+  $("rdoc").querySelectorAll("[data-rep]").forEach(el =>
+    el.addEventListener("input", () => { el.dataset.dirty = "1"; }));
   $("rd-print").addEventListener("click", () => printReportDoc(visit));
   if ($("rd-save")) $("rd-save").addEventListener("click", async () => {
     const d = {};
-    $("rdoc").querySelectorAll("[data-rep]").forEach(el => { d[el.dataset.rep] = el.value; });
+    $("rdoc").querySelectorAll('[data-rep][data-dirty="1"]').forEach(el => { d[el.dataset.rep] = el.value; });
+    if (!Object.keys(d).length) { toast(t("saved")); return; }   // nothing changed
     const saved = await API.post(`/visits/${id}/report`, d);   // no status -> keeps draft/complete
     if (handledOffline(saved)) return;
     toast(t("saved")); navigate("report", { id });
@@ -904,7 +912,10 @@ function visitForm(preset) {
 // ---- visit detail ----
 async function viewVisit(v, arg) {
   const id = arg.id;
-  const visit = await API.get("/visits/" + id);
+  // Clients get the report auto-translated into the current language (read-only).
+  // Staff edit the original text, so we don't translate the editable form.
+  const langParam = role() === "client" ? `?lang=${LANG}` : "";
+  const visit = await API.get("/visits/" + id + langParam);
   const canEdit = can("visits.edit");
   const rep = visit.report || {};
   v.innerHTML = `
@@ -950,11 +961,12 @@ async function viewVisit(v, arg) {
       <div id="photos" class="photo-grid"></div></div>`;
 
   $("bc").addEventListener("click", () => navigate(role() === "client" ? "visits" : "schedule"));
-  if ($("print-cert")) $("print-cert").addEventListener("click", () => {
+  if ($("print-cert")) $("print-cert").addEventListener("click", async () => {
     if (!visit.report || visit.report.status !== "complete") {
       alert(t("no_report_for_cert")); return;
     }
-    printCertificate(visit);
+    const vt = await API.get(`/visits/${id}?lang=${LANG}`);   // certificate in current language
+    printCertificate(vt);
   });
   v.querySelectorAll("[data-sign]").forEach(b => b.addEventListener("click", () => signatureDialog(id, b.dataset.sign)));
   if ($("v-status-btn")) $("v-status-btn").addEventListener("click", async () => {
@@ -1705,7 +1717,7 @@ async function viewCertificates(v) {
       <th>${t("service")}</th><th>${t("agent")}</th><th>${t("certificate")}</th></tr></thead>
       <tbody>${rows}</tbody></table></div>`;
   v.querySelectorAll("[data-cert]").forEach(b => b.addEventListener("click", async () => {
-    const visit = await API.get("/visits/" + b.dataset.cert);
+    const visit = await API.get(`/visits/${b.dataset.cert}?lang=${LANG}`);
     if (!visit.report || visit.report.status !== "complete") {
       alert(t("no_report_for_cert")); return;
     }

@@ -14,7 +14,9 @@ import threading
 import traceback
 import mimetypes
 import gzip
-from urllib.parse import urlparse, parse_qs
+import hashlib
+import urllib.request
+from urllib.parse import urlparse, parse_qs, quote
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import database as db
@@ -768,6 +770,9 @@ def get_visit(ctx):
             (v["report"]["id"],))
     else:
         v["report_photos"] = []
+    # Optional auto-translation of the report text for display/printing.
+    if ctx.query.get("lang") in ("en", "ar"):
+        _translate_report(v["report"], ctx.query["lang"])
     return v
 
 
@@ -908,6 +913,51 @@ def _report_incomplete_fields(rep):
     return missing
 
 
+# Report free-text fields that get auto-translated for display/printing.
+REPORT_TRANSLATABLE = ("summary", "pests_found", "findings", "recommendations",
+                       "spare_parts_changed", "branch_issue")
+
+
+def _translate(text, target):
+    """Translate text into target ('en'|'ar'), cached in the translations table.
+
+    Uses the free Google endpoint. On any failure (or if the text is already in
+    the target language) the original text is returned, so callers degrade
+    gracefully and never block on the network."""
+    text = (text or "").strip()
+    if not text or target not in ("en", "ar"):
+        return text
+    h = hashlib.sha1((target + "::" + text).encode("utf-8")).hexdigest()
+    row = db.query("SELECT text FROM translations WHERE src_hash=? AND target=?",
+                   (h, target), one=True)
+    if row:
+        return row["text"]
+    try:
+        url = ("https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl="
+               + target + "&dt=t&q=" + quote(text))
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        src_lang = data[2] if len(data) > 2 else None
+        out = text if src_lang == target else "".join(
+            seg[0] for seg in data[0] if seg and seg[0])
+        db.execute("INSERT OR IGNORE INTO translations(src_hash,target,src_lang,text) "
+                   "VALUES(?,?,?,?)", (h, target, src_lang, out))
+        return out
+    except Exception as e:
+        print("translate failed:", e)
+        return text
+
+
+def _translate_report(rep, target):
+    """Translate a report dict's free-text fields in place (best-effort)."""
+    if rep and target in ("en", "ar"):
+        for f in REPORT_TRANSLATABLE:
+            if rep.get(f):
+                rep[f] = _translate(rep[f], target)
+    return rep
+
+
 def _draft_reports_for(user):
     """Unfinished (draft) reports the user is responsible for.
 
@@ -967,7 +1017,13 @@ def list_reports(ctx):
            "LEFT JOIN users u ON u.id=v.agent_id")
     if where:
         sql += " WHERE " + " AND ".join(where)
-    return _paginate(ctx, sql, params, "ORDER BY r.created_at DESC")
+    res = _paginate(ctx, sql, params, "ORDER BY r.created_at DESC")
+    lang = ctx.query.get("lang")
+    if lang in ("en", "ar"):
+        for r in (res["items"] if isinstance(res, dict) else res):
+            if r.get("summary"):
+                r["summary"] = _translate(r["summary"], lang)
+    return res
 
 
 # --------------------------------------------------------------------------

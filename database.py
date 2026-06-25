@@ -239,6 +239,17 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT
 );
 
+-- Cache of machine translations (report text auto-translated EN<->AR for
+-- display/printing). Keyed by a hash of the source text + target language.
+CREATE TABLE IF NOT EXISTS translations (
+    src_hash   TEXT NOT NULL,
+    target     TEXT NOT NULL,
+    src_lang   TEXT,
+    text       TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (src_hash, target)
+);
+
 -- In-app notifications / reminders.
 CREATE TABLE IF NOT EXISTS notifications (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,

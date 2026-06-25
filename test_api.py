@@ -155,6 +155,12 @@ def main():
         # the /reports/drafts route is not shadowed by /reports
         st, _ = call("GET", "/reports/drafts", admin)
         check("reports drafts route still resolves", st == 200)
+        # ?lang= auto-translation param is accepted (translation itself is
+        # best-effort/network-dependent, so we only assert the endpoints work)
+        st, vt = call("GET", "/visits/1?lang=en", admin)
+        check("visit accepts lang param", st == 200 and "report" in vt)
+        st, _ = call("GET", "/reports?lang=ar", admin)
+        check("reports list accepts lang param", st == 200)
 
         print("SIGNATURES / SEARCH / CSV")
         png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMCAQGNuM5UAAAAAElFTkSuQmCC"
