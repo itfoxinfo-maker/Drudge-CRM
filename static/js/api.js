@@ -56,11 +56,12 @@ const API = {
   put(p, b) { return this.request("PUT", p, b); },
   del(p) { return this.request("DELETE", p); },
 
-  async uploadPhoto(entityType, entityId, file, caption) {
+  async uploadPhoto(entityType, entityId, file, caption, businessPlan) {
     const fd = new FormData();
     fd.append("entity_type", entityType);
     fd.append("entity_id", entityId);
     if (caption) fd.append("caption", caption);
+    if (businessPlan) fd.append("business_plan", "1");
     fd.append("file", file);
     const headers = {};
     if (this.token) headers["Authorization"] = "Bearer " + this.token;
@@ -73,12 +74,24 @@ const API = {
         await window.OfflineQueue.enqueue({
           kind: "photo", method: "POST", path: "/photos",
           entity_type: entityType, entity_id: entityId, caption: caption || "",
+          business_plan: businessPlan ? "1" : "",
           file, filename: file.name || "photo.jpg",
         });
         return { __queued: true };
       }
       throw new Error("offline");
     }
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((data && data.error) || "Upload failed");
+    return data;
+  },
+
+  async uploadSiteMap(siteId, file) {
+    const fd = new FormData();
+    fd.append("file", file);
+    const headers = {};
+    if (this.token) headers["Authorization"] = "Bearer " + this.token;
+    const res = await fetch(`/api/sites/${siteId}/map`, { method: "POST", headers, body: fd });
     const data = await res.json().catch(() => null);
     if (!res.ok) throw new Error((data && data.error) || "Upload failed");
     return data;

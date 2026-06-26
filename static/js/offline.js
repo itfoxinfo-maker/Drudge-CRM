@@ -74,6 +74,7 @@
       fd.append("entity_type", entry.entity_type);
       fd.append("entity_id", entry.entity_id);
       if (entry.caption) fd.append("caption", entry.caption);
+      if (entry.business_plan) fd.append("business_plan", entry.business_plan);
       fd.append("file", entry.file, entry.filename || "photo");
       body = fd;
     } else {

@@ -666,6 +666,26 @@ def delete_client(ctx):
     return {"ok": True}
 
 
+@route("GET", r"/api/sites")
+def list_all_sites(ctx):
+    """Every site/location across all clients (powers the Locations sidebar view)."""
+    u = ctx.user
+    if u["role"] != "client":
+        require_perm(u, "clients.view")
+    where, params = [], []
+    if u["role"] == "client":
+        where.append("s.client_id=?"); params.append(u["client_id"])
+    if ctx.query.get("client"):
+        where.append("s.client_id=?"); params.append(ctx.query["client"])
+    sql = ("SELECT s.id, s.client_id, s.name, s.address, s.area, s.map_image, s.created_at, "
+           "c.name_en client_en, c.name_ar client_ar "
+           "FROM sites s JOIN clients c ON c.id=s.client_id")
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY c.name_en, s.name"
+    return db.query(sql, params)
+
+
 @route("POST", r"/api/clients/(\d+)/sites")
 def add_site(ctx):
     require_perm(ctx.user, "clients.edit")
@@ -682,6 +702,46 @@ def add_site(ctx):
 def delete_site(ctx):
     require_perm(ctx.user, "clients.edit")
     db.execute("DELETE FROM sites WHERE id=?", (int(ctx.params[0]),))
+    return {"ok": True}
+
+
+@route("POST", r"/api/sites/(\d+)/map")
+def upload_site_map(ctx):
+    """Upload (or replace) the map-design picture for a site."""
+    require_perm(ctx.user, "clients.edit")
+    sid = int(ctx.params[0])
+    site = db.query("SELECT * FROM sites WHERE id=?", (sid,), one=True)
+    if not site:
+        raise ApiError(404, "Site not found")
+    _fields, files = parse_multipart(ctx.raw_body, ctx.content_type)
+    if not files:
+        raise ApiError(400, "No file uploaded")
+    f = files[0]
+    ext = _validate_image_upload(f)
+    fname = f"sitemap_{uuid.uuid4().hex}{ext}"
+    with open(os.path.join(UPLOAD_DIR, fname), "wb") as out:
+        out.write(f["data"])
+    # remove the previous image file, if any
+    if site.get("map_image"):
+        try:
+            os.remove(os.path.join(UPLOAD_DIR, site["map_image"]))
+        except OSError:
+            pass
+    db.execute("UPDATE sites SET map_image=? WHERE id=?", (fname, sid))
+    return db.query("SELECT * FROM sites WHERE id=?", (sid,), one=True)
+
+
+@route("DELETE", r"/api/sites/(\d+)/map")
+def delete_site_map(ctx):
+    require_perm(ctx.user, "clients.edit")
+    sid = int(ctx.params[0])
+    site = db.query("SELECT * FROM sites WHERE id=?", (sid,), one=True)
+    if site and site.get("map_image"):
+        try:
+            os.remove(os.path.join(UPLOAD_DIR, site["map_image"]))
+        except OSError:
+            pass
+    db.execute("UPDATE sites SET map_image=NULL WHERE id=?", (sid,))
     return {"ok": True}
 
 
@@ -746,7 +806,8 @@ def get_visit(ctx):
     vid = int(ctx.params[0])
     v = db.query(
         "SELECT v.*, c.name_en client_en, c.name_ar client_ar, c.id client_id, "
-        "s.name_en service_en, s.name_ar service_ar, u.full_name agent_name, st.name site_name "
+        "s.name_en service_en, s.name_ar service_ar, u.full_name agent_name, "
+        "st.name site_name, st.map_image site_map_image "
         "FROM visits v JOIN clients c ON c.id=v.client_id "
         "LEFT JOIN service_types s ON s.id=v.service_type_id "
         "LEFT JOIN users u ON u.id=v.agent_id "
@@ -790,10 +851,10 @@ def create_visit(ctx):
             raise ApiError(400, "Please choose a location for this visit")
     vid = db.execute(
         "INSERT INTO visits(client_id,site_id,agent_id,service_type_id,scheduled_start,"
-        "scheduled_end,status,location,notes) VALUES(?,?,?,?,?,?,?,?,?)",
+        "scheduled_end,status,location,notes,visit_number) VALUES(?,?,?,?,?,?,?,?,?,?)",
         (b["client_id"], b.get("site_id"), b.get("agent_id"), b.get("service_type_id"),
          b["scheduled_start"], b.get("scheduled_end"), b.get("status", "scheduled"),
-         b.get("location"), b.get("notes")))
+         b.get("location"), b.get("notes"), b.get("visit_number") or None))
     return db.query("SELECT * FROM visits WHERE id=?", (vid,), one=True)
 
 
@@ -810,12 +871,14 @@ def update_visit(ctx):
     if u["role"] == "agent":
         if v["agent_id"] != u["id"]:
             raise ApiError(403, "Not your visit")
-        allowed = {"status", "notes", "completed_at"}
+        allowed = {"status", "notes", "completed_at", "visit_number"}
         b = {k: val for k, val in b.items() if k in allowed}
     if "site_id" in b and not b["site_id"]:
         b["site_id"] = None     # blank -> unassigned location (NULL), not ""
+    if "visit_number" in b and not b["visit_number"]:
+        b["visit_number"] = None     # blank -> unset
     cols = ("client_id", "site_id", "agent_id", "service_type_id", "scheduled_start",
-            "scheduled_end", "status", "location", "notes", "completed_at")
+            "scheduled_end", "status", "location", "notes", "visit_number", "completed_at")
     fields = [f"{c}=?" for c in cols if c in b]
     vals = [b[c] for c in cols if c in b]
     if b.get("status") == "completed" and "completed_at" not in b:
@@ -1502,6 +1565,7 @@ DEFAULT_SETTINGS = {
     "address_en": "Riyadh, Saudi Arabia", "address_ar": "الرياض، المملكة العربية السعودية",
     "phone": "+966 11 000 0000", "email": "billing@pestcare.com", "vat_no": "300000000000003",
     "currency": "EGP", "tax_rate": "14", "logo": "",
+    "google_maps_api_key": "",   # enables Places search on contract site locations
     # Service-certificate template (editable in Settings, used on every certificate).
     "cert_statement_en": "This is to certify that pest control services were carried out at the "
                          "premises detailed below, in accordance with professional standards and applicable regulations.",
@@ -1582,7 +1646,26 @@ def list_contracts(ctx):
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY ct.next_run_date"
-    return db.query(sql, params)
+    rows = db.query(sql, params)
+    # Attach each contract's per-site lines (location + Google Maps URL + price).
+    for ct in rows:
+        ct["sites"] = db.query(
+            "SELECT cs.id, cs.site_id, cs.map_location, cs.price, s.name site_name "
+            "FROM contract_sites cs LEFT JOIN sites s ON s.id=cs.site_id "
+            "WHERE cs.contract_id=? ORDER BY cs.id", (ct["id"],))
+    return rows
+
+
+def _save_contract_sites(cid, sites):
+    """Replace a contract's per-site lines. Each entry: {site_id, map_location, price}."""
+    db.execute("DELETE FROM contract_sites WHERE contract_id=?", (cid,))
+    for s in (sites or []):
+        if not s.get("site_id") and not s.get("map_location") and not s.get("price"):
+            continue  # skip empty rows
+        db.execute(
+            "INSERT INTO contract_sites(contract_id,site_id,map_location,price) VALUES(?,?,?,?)",
+            (cid, s.get("site_id") or None, s.get("map_location") or None,
+             float(s.get("price") or 0)))
 
 
 @route("POST", r"/api/contracts")
@@ -1591,12 +1674,18 @@ def create_contract(ctx):
     b = ctx.body
     if not b.get("client_id") or not b.get("start_date") or not b.get("frequency"):
         raise ApiError(400, "Client, start date and frequency are required")
+    sites = b.get("sites") or []
+    # The contract's headline site/price are derived from the site rows (first
+    # location, summed price) so existing lists and visit-generation still work.
+    site_id = (sites[0].get("site_id") or None) if sites else b.get("site_id")
+    price = sum(float(s.get("price") or 0) for s in sites) if sites else float(b.get("price", 0))
     cid = db.execute(
         "INSERT INTO contracts(client_id,site_id,service_type_id,agent_id,frequency,start_date,"
         "end_date,next_run_date,price,status,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-        (b["client_id"], b.get("site_id"), b.get("service_type_id"), b.get("agent_id"),
+        (b["client_id"], site_id, b.get("service_type_id"), b.get("agent_id"),
          b["frequency"], b["start_date"], b.get("end_date"), b["start_date"],
-         float(b.get("price", 0)), b.get("status", "active"), b.get("notes")))
+         price, b.get("status", "active"), b.get("notes")))
+    _save_contract_sites(cid, sites)
     cl = db.query("SELECT name_en FROM clients WHERE id=?", (b["client_id"],), one=True)
     _notify_roles(("admin", "manager"), "contract_new", "New contract",
                   f"New {b['frequency']} contract for {cl['name_en'] if cl else ''}",
@@ -1609,14 +1698,22 @@ def update_contract(ctx):
     require_perm(ctx.user, "contracts.edit")
     cid = int(ctx.params[0])
     b = ctx.body
+    sites = b.get("sites")
+    if sites is not None:
+        # Derive headline site/price from the rows, then persist the rows below.
+        b["site_id"] = (sites[0].get("site_id") or None) if sites else None
+        b["price"] = sum(float(s.get("price") or 0) for s in sites)
     cols = ("site_id", "service_type_id", "agent_id", "frequency", "start_date",
             "end_date", "next_run_date", "price", "status", "notes")
     fields = [f"{c}=?" for c in cols if c in b]
     vals = [b[c] for c in cols if c in b]
-    if not fields:
+    if not fields and sites is None:
         raise ApiError(400, "Nothing to update")
-    vals.append(cid)
-    db.execute(f"UPDATE contracts SET {','.join(fields)} WHERE id=?", vals)
+    if fields:
+        vals.append(cid)
+        db.execute(f"UPDATE contracts SET {','.join(fields)} WHERE id=?", vals)
+    if sites is not None:
+        _save_contract_sites(cid, sites)
     return db.query("SELECT * FROM contracts WHERE id=?", (cid,), one=True)
 
 
@@ -2098,10 +2195,11 @@ def upload_photo(ctx):
     fname = f"{uuid.uuid4().hex}{ext}"
     with open(os.path.join(UPLOAD_DIR, fname), "wb") as out:
         out.write(f["data"])
+    bp = 1 if str(fields.get("business_plan", "")).lower() in ("1", "true", "on", "yes") else 0
     pid = db.execute(
-        "INSERT INTO photos(entity_type,entity_id,filename,original_name,caption,uploaded_by) "
-        "VALUES(?,?,?,?,?,?)",
-        (et, int(eid), fname, f["filename"], fields.get("caption"), ctx.user["id"]))
+        "INSERT INTO photos(entity_type,entity_id,filename,original_name,caption,is_business_plan,uploaded_by) "
+        "VALUES(?,?,?,?,?,?,?)",
+        (et, int(eid), fname, f["filename"], fields.get("caption"), bp, ctx.user["id"]))
     return db.query("SELECT * FROM photos WHERE id=?", (pid,), one=True)
 
 

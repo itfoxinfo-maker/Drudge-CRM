@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS sites (
     name       TEXT NOT NULL,
     address    TEXT,
     area       TEXT,
+    map_image  TEXT,   -- uploaded floor-plan / map-design picture for this site
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -80,6 +81,7 @@ CREATE TABLE IF NOT EXISTS visits (
                     CHECK (status IN ('scheduled','in_progress','completed','cancelled')),
     location        TEXT,
     notes           TEXT,
+    visit_number    INTEGER,   -- the visit's number within the year/month (1–12)
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     completed_at    TEXT
 );
@@ -179,6 +181,8 @@ CREATE TABLE IF NOT EXISTS photos (
     filename      TEXT NOT NULL,
     original_name TEXT,
     caption       TEXT,
+    -- When set, the attachment is a "Business plan" and is surfaced on the report.
+    is_business_plan INTEGER NOT NULL DEFAULT 0,
     uploaded_by   INTEGER REFERENCES users(id) ON DELETE SET NULL,
     uploaded_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -232,6 +236,18 @@ CREATE TABLE IF NOT EXISTS contracts (
     notes           TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Per-site lines on a contract: each covered location, its Google Maps
+-- location (a maps URL or "lat,lng" string) and the price for that site.
+-- A contract's overall price is the sum of its site rows.
+CREATE TABLE IF NOT EXISTS contract_sites (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    contract_id  INTEGER NOT NULL REFERENCES contracts(id) ON DELETE CASCADE,
+    site_id      INTEGER REFERENCES sites(id) ON DELETE SET NULL,
+    map_location TEXT,
+    price        REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_contract_sites_contract ON contract_sites(contract_id);
 
 -- Key/value settings (company profile, tax rate, SMTP, etc.).
 CREATE TABLE IF NOT EXISTS settings (
@@ -391,6 +407,15 @@ def _migrate(conn):
         conn.execute("ALTER TABLE reports ADD COLUMN completed_at TEXT")
         conn.execute("UPDATE reports SET completed_at=created_at "
                      "WHERE completed_at IS NULL AND status='complete'")
+    # business-plan flag on attachments (surfaced on the printed report)
+    if "is_business_plan" not in cols("photos"):
+        conn.execute("ALTER TABLE photos ADD COLUMN is_business_plan INTEGER NOT NULL DEFAULT 0")
+    # per-site uploaded map-design picture
+    if "map_image" not in cols("sites"):
+        conn.execute("ALTER TABLE sites ADD COLUMN map_image TEXT")
+    # visit number within the year/month (1–12)
+    if "visit_number" not in cols("visits"):
+        conn.execute("ALTER TABLE visits ADD COLUMN visit_number INTEGER")
     # invoice columns
     for c, ddl in (("contract_id", "INTEGER"), ("doc_type", "TEXT DEFAULT 'invoice'"),
                    ("valid_until", "TEXT")):

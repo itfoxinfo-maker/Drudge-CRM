@@ -225,6 +225,7 @@ function navItems() {
     items.push({ k: "folder", i: "📁", t: "company_folder" });
   } else {
     if (can("clients.view")) items.push({ k: "clients", i: "🏢", t: "nav_clients" });
+    if (can("clients.view")) items.push({ k: "locations", i: "📍", t: "nav_locations" });
     if (can("visits.view")) items.push({ k: "schedule", i: "🗓️", t: "nav_schedule" });
     if (can("visits.view")) items.push({ k: "reports", i: "📋", t: "nav_reports" });
     if (can("calendar.view")) items.push({ k: "calendar", i: "📅", t: "nav_calendar" });
@@ -257,6 +258,7 @@ async function navigate(view, arg) {
   try {
     if (view === "dashboard") await viewDashboard(v);
     else if (view === "clients") await viewClients(v);
+    else if (view === "locations") await viewLocations(v);
     else if (view === "client" || view === "folder") await viewClientFolder(v, arg);
     else if (view === "client-analytics") await viewClientAnalytics(v, arg);
     else if (view === "map") await viewMap(v, arg);
@@ -293,6 +295,16 @@ function openModal(title, bodyHtml, onMount) {
 function closeModal() { $("modal-overlay").classList.add("hidden"); $("modal-body").innerHTML = ""; }
 $("modal-close").addEventListener("click", closeModal);
 $("modal-overlay").addEventListener("click", (e) => { if (e.target === $("modal-overlay")) closeModal(); });
+
+// Collapsible sidebar — toggled from the topbar, remembered across sessions.
+function applySidebarState() {
+  $("app").classList.toggle("nav-collapsed", localStorage.getItem("navCollapsed") === "1");
+}
+if ($("nav-toggle")) $("nav-toggle").addEventListener("click", () => {
+  const collapsed = $("app").classList.toggle("nav-collapsed");
+  localStorage.setItem("navCollapsed", collapsed ? "1" : "0");
+});
+applySidebarState();
 
 function field(label, name, opts = {}) {
   const { type = "text", value = "", cls = "", options, textarea } = opts;
@@ -529,7 +541,8 @@ function renderPhotos(entityType, entityId, photos, containerId) {
   const canRemove = role() !== "client";
   box.innerHTML = photos.map(p => {
     const rm = canRemove ? `<button class="rm" data-rmphoto="${p.id}">✕</button>` : "";
-    const cap = `<div class="cap">${esc(p.caption || p.original_name || "")}</div>`;
+    const bp = Number(p.is_business_plan) ? `<span class="badge b-active" style="margin-inline-start:4px">${t("business_plan")}</span>` : "";
+    const cap = `<div class="cap">${esc(p.caption || p.original_name || "")}${bp}</div>`;
     if (attachKind(p.filename) === "image") {
       return `<div class="photo-item"><img src="/uploads/${esc(p.filename)}" alt="${esc(p.caption || "")}" />${rm}${cap}</div>`;
     }
@@ -548,6 +561,8 @@ function uploadPhotoDialog(entityType, entityId, after) {
       <input type="file" name="file" accept="image/*,.pdf,.xls,.xlsx" multiple required />
       <div class="muted small">${t("attach_hint")}</div></div>
     ${field(t("comment"), "caption")}
+    <div class="field"><label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+      <input type="checkbox" name="business_plan" style="width:auto"> ${t("business_plan")}</label></div>
     <div class="form-actions"><button type="button" class="btn secondary" id="pf-x">${t("cancel")}</button>
     <button class="btn" type="submit">${t("upload")}</button></div></form>`, (root) => {
     $("pf-x").addEventListener("click", closeModal);
@@ -556,10 +571,11 @@ function uploadPhotoDialog(entityType, entityId, after) {
       const files = Array.from(root.querySelector("[name=file]").files);
       if (!files.length) return;
       const caption = root.querySelector("[name=caption]").value;
+      const businessPlan = root.querySelector("[name=business_plan]").checked;
       try {
         let queued = false;
         for (const file of files) {
-          const saved = await API.uploadPhoto(entityType, entityId, file, caption);
+          const saved = await API.uploadPhoto(entityType, entityId, file, caption, businessPlan);
           if (saved && saved.__queued) queued = true;
         }
         closeModal();
@@ -737,6 +753,8 @@ async function viewReportDoc(v, arg) {
 
   const allRows = [sevSel, ...REPORT_TEXT_FIELDS.map(textRow), dateRow, ...REPORT_MAT_FIELDS.map(matRow)].join("");
   const statusBadgeHtml = `<span class="badge b-${rep.status === "complete" ? "completed" : "draft"}">${t(rep.status === "complete" ? "report_complete" : "report_draft")}</span>`;
+  // Attachments flagged "Business plan" on the visit are surfaced on the report.
+  const bpPhotos = (visit.photos || []).filter(p => Number(p.is_business_plan));
 
   v.innerHTML = `
     <div class="breadcrumb" id="bc">← 📋 ${t("nav_reports")}</div>
@@ -756,6 +774,7 @@ async function viewReportDoc(v, arg) {
         <div><span>${t("location_lbl")}</span><b>${esc(visit.site_name || visit.location || "—")}</b></div>
         <div><span>${t("agent")}</span><b>${esc(visit.agent_name || "—")}</b></div>
         <div><span>${t("service")}</span><b>${esc(localized(visit, "service") || "—")}</b></div>
+        ${visit.visit_number ? `<div><span>${t("visit_number")}</span><b>${esc(visit.visit_number)}</b></div>` : ""}
       </div>
       <div class="rdoc-body">${allRows}</div>
       ${chemRows ? `<h3 class="rdoc-sec">${t("chemicals_applied")}</h3>
@@ -764,8 +783,11 @@ async function viewReportDoc(v, arg) {
       ${(rep.customer_signature || rep.technician_signature) ? `<div class="rdoc-sigs">
         ${sig(rep.customer_signature, rep.customer_name || t("customer_signature"))}
         ${sig(rep.technician_signature, visit.agent_name || t("technician_signature"))}</div>` : ""}
+      ${bpPhotos.length ? `<h3 class="rdoc-sec">📎 ${t("business_plan")}</h3>
+        <div id="report-bp-files" class="photo-grid"></div>` : ""}
     </div>`;
 
+  if (bpPhotos.length) renderPhotos("visit", id, bpPhotos, "report-bp-files");
   $("bc").addEventListener("click", () => navigate("reports"));
   // hide empty fields by default; the toggle reveals them for adding
   const applyShowAll = () => {
@@ -808,6 +830,14 @@ function printReportDoc(visit) {
   const chemRows = (visit.chemicals || []).map(cu =>
     `<tr><td>${esc(localized(cu, "name"))}</td><td>${cu.quantity} ${esc(cu.unit || "")}</td><td>${esc(cu.area_treated || "—")}</td></tr>`).join("");
   const sig = (f, label) => f ? `<div class="sg"><img src="/uploads/${esc(f)}"><div class="ln">${esc(label)}</div></div>` : "";
+  // "Business plan" attachments from the visit, surfaced on the printed report.
+  const bpHtml = (visit.photos || []).filter(p => Number(p.is_business_plan)).map(p => {
+    const isImg = /\.(jpe?g|png|gif|webp)$/i.test(p.filename || "");
+    const cap = esc(p.caption || p.original_name || "");
+    return isImg
+      ? `<div class="bp-item"><img src="/uploads/${esc(p.filename)}"><div class="bp-cap">${cap}</div></div>`
+      : `<div class="bp-item bp-file">📎 ${esc(p.original_name || p.filename)}<div class="bp-cap">${cap}</div></div>`;
+  }).join("");
   const reportRows = [
     row(t("pests_found"), rep.pests_found), row(t("findings"), rep.findings),
     row(t("recommendations"), rep.recommendations),
@@ -840,6 +870,10 @@ function printReportDoc(visit) {
       .sigs{display:flex;gap:30px;margin-top:30px}
       .sg{flex:1;text-align:center}.sg img{max-height:70px;max-width:220px}
       .sg .ln{border-top:1px solid #1c2733;margin-top:6px;padding-top:6px;color:#64748b;font-size:12px}
+      .bp-grid{display:flex;flex-wrap:wrap;gap:12px;margin-top:8px}
+      .bp-item{width:170px}.bp-item img{width:100%;border:1px solid #e3e8ec;border-radius:8px}
+      .bp-file{padding:10px;border:1px solid #e3e8ec;border-radius:8px;font-size:12px;word-break:break-all}
+      .bp-cap{color:#64748b;font-size:11px;margin-top:4px}
       .noprint{text-align:center;margin-bottom:18px}
       .pbtn{background:#0f172a;color:#fff;border:none;padding:10px 22px;border-radius:8px;font-size:14px;cursor:pointer}
       @media print{body{padding:0}.noprint{display:none}*{-webkit-print-color-adjust:exact !important;print-color-adjust:exact !important}}
@@ -857,6 +891,7 @@ function printReportDoc(visit) {
         <div><span>${t("location_lbl")}:</span><b>${esc(visit.site_name || visit.location || "—")}</b></div>
         <div><span>${t("agent")}:</span><b>${esc(visit.agent_name || "—")}</b></div>
         <div><span>${t("service")}:</span><b>${esc(localized(visit, "service") || "—")}</b></div>
+        ${visit.visit_number ? `<div><span>${t("visit_number")}:</span><b>${esc(visit.visit_number)}</b></div>` : ""}
       </div>
       <h3 class="sec">${esc(t("report"))}</h3>
       <table class="kv">${reportRows}</table>
@@ -867,6 +902,7 @@ function printReportDoc(visit) {
       ${(rep.customer_signature || rep.technician_signature) ? `<div class="sigs">
         ${sig(rep.customer_signature, rep.customer_name || t("customer_signature"))}
         ${sig(rep.technician_signature, visit.agent_name || t("technician_signature"))}</div>` : ""}
+      ${bpHtml ? `<h3 class="sec">${esc(t("business_plan"))}</h3><div class="bp-grid">${bpHtml}</div>` : ""}
     </div>
     <script>window.onload=function(){setTimeout(function(){window.print()},400)}<\/script>
     </body></html>`;
@@ -948,6 +984,10 @@ async function viewVisit(v, arg) {
         <div>${t("scheduled_start")}</div><div>${fmtDateTime(visit.scheduled_start)}</div>
         <div>${t("location_lbl")}</div><div>${esc(visit.site_name || visit.location || "—")}</div>
         <div>${t("notes")}</div><div>${esc(visit.notes || "—")}</div>
+        <div>${t("visit_number")}</div><div>${canEdit
+          ? `<select id="v-visitnum"><option value="">—</option>${Array.from({ length: 12 }, (_, i) => i + 1).map(n =>
+              `<option value="${n}" ${Number(visit.visit_number) === n ? "selected" : ""}>${n}</option>`).join("")}</select>`
+          : (visit.visit_number || "—")}</div>
       </div>
       ${canEdit && role() !== "agent" ? `<div class="form-actions" style="justify-content:flex-start;flex-wrap:wrap">
         <select id="v-site" style="min-width:140px"><option value="">${t("none")}</option></select>
@@ -955,6 +995,8 @@ async function viewVisit(v, arg) {
       ${canEdit ? `<div class="form-actions" style="justify-content:flex-start">
         <select id="v-status">${["scheduled", "in_progress", "completed", "cancelled"].map(s => `<option value="${s}" ${visit.status === s ? "selected" : ""}>${t(statusKey(s))}</option>`).join("")}</select>
         <button class="btn sm" id="v-status-btn">${t("change_status")}</button></div>` : ""}
+      ${visit.site_map_image ? `<div class="section-title" style="margin-top:12px"><h3>🗺️ ${t("site_map")}</h3></div>
+        <img src="/uploads/${esc(visit.site_map_image)}" alt="${esc(t("site_map"))}" style="width:100%;border:1px solid var(--line);border-radius:10px;display:block">` : ""}
       </div>
       <div class="panel"><div class="section-title"><h3>${t("report")}</h3>
         ${role() !== "client" && rep.id ? `<span class="badge b-${rep.status === "complete" ? "completed" : "draft"}">${t(rep.status === "complete" ? "report_complete" : "report_draft")}</span>` : ""}</div>
@@ -987,6 +1029,10 @@ async function viewVisit(v, arg) {
   v.querySelectorAll("[data-sign]").forEach(b => b.addEventListener("click", () => signatureDialog(id, b.dataset.sign)));
   if ($("v-status-btn")) $("v-status-btn").addEventListener("click", async () => {
     const saved = await API.put("/visits/" + id, { status: $("v-status").value }); if (handledOffline(saved)) return; toast(t("saved")); navigate("visit", { id });
+  });
+  if ($("v-visitnum")) $("v-visitnum").addEventListener("change", async () => {
+    const saved = await API.put("/visits/" + id, { visit_number: $("v-visitnum").value || null });
+    if (handledOffline(saved)) return; toast(t("saved"));
   });
   if ($("v-site")) {
     loadSiteOptions(visit.client_id, $("v-site"), visit.site_id, t("none"));
@@ -2125,22 +2171,126 @@ async function viewCalendar(v, arg) {
 }
 
 // ====================================================================
+// Locations — every site across all clients
+// ====================================================================
+async function viewLocations(v) {
+  // Every client is listed — with its sites, or a "no locations" row when it
+  // has none yet (independent of whether the client has any contracts).
+  const [clients, sites] = await Promise.all([API.get("/clients"), API.get("/sites")]);
+  const list = Array.isArray(clients) ? clients : (clients.items || []);
+  list.sort((a, b) => localized(a, "name").localeCompare(localized(b, "name")));
+  const byClient = {};
+  sites.forEach(s => { (byClient[s.client_id] = byClient[s.client_id] || []).push(s); });
+  const canEdit = can("clients.edit");
+  const clink = c => `<a href="#" class="link-btn" data-open="${c.id}">${esc(localized(c, "name"))}</a>`;
+  const locCell = addr => addr
+    ? `<a class="link-btn" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}" target="_blank" rel="noopener">📍 ${t("map_pin")}</a>` : "—";
+  // The site-map column: a thumbnail of the uploaded map picture (if any) plus
+  // an upload/replace button and a remove button (for editors).
+  const mapImgCell = s => {
+    const thumb = s.map_image
+      ? `<a href="/uploads/${esc(s.map_image)}" target="_blank" rel="noopener" title="${t("view_map_img")}"><img src="/uploads/${esc(s.map_image)}" alt="" style="height:36px;border-radius:6px;border:1px solid var(--line);vertical-align:middle"></a>` : "";
+    const editBtn = canEdit
+      ? `<button class="link-btn sm" data-mapedit="${s.id}">✏️ ${s.map_image ? t("replace") : t("upload_site_map")}</button>` : "";
+    const delBtn = (canEdit && s.map_image)
+      ? `<button class="link-btn danger sm" data-mapdel="${s.id}">✕</button>` : "";
+    const parts = [thumb, editBtn, delBtn].filter(Boolean);
+    return parts.length ? `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">${parts.join("")}</div>` : "—";
+  };
+  const rows = list.map(c => {
+    const cs = byClient[c.id] || [];
+    if (!cs.length) {
+      return `<tr data-client="${c.id}"><td>${clink(c)}</td>
+        <td colspan="4" class="muted">${t("no_locations")}</td><td>—</td></tr>`;
+    }
+    return cs.map(s => `<tr data-client="${c.id}"><td>${clink(c)}</td>
+      <td>${esc(s.name)}</td><td>${esc(s.address || "—")}</td><td>${esc(s.area || "—")}</td>
+      <td>${locCell(s.address)}</td><td>${mapImgCell(s)}</td></tr>`).join("");
+  }).join("");
+  v.innerHTML = `<div class="page-head"><h2>${t("locations_title")}</h2>
+    <span class="muted">${list.length} ${t("nav_clients")} · ${sites.length} ${t("sites_count")}</span></div>
+    <div class="panel">
+      <input id="loc-q" type="search" placeholder="${t("search")}…" style="margin-bottom:12px;max-width:340px;width:100%">
+      <table><thead><tr><th>${t("client")}</th><th>${t("site_name")}</th><th>${t("address_en")}</th>
+        <th>${t("area")}</th><th>${t("location_lbl")}</th><th>${t("site_map")}</th></tr></thead>
+      <tbody id="loc-body">${rows || `<tr><td colspan="6" class="empty">${t("none")}</td></tr>`}</tbody>
+      </table></div>`;
+  v.querySelectorAll("[data-open]").forEach(a => a.addEventListener("click", (e) => {
+    e.preventDefault(); navigate("client", { id: a.dataset.open });
+  }));
+  v.querySelectorAll("[data-mapedit]").forEach(b => b.addEventListener("click", () =>
+    siteMapDialog(b.dataset.mapedit, () => navigate("locations"))));
+  v.querySelectorAll("[data-mapdel]").forEach(b => b.addEventListener("click", async () => {
+    if (confirm(t("confirm_delete"))) { await API.del("/sites/" + b.dataset.mapdel + "/map"); navigate("locations"); }
+  }));
+  const q = $("loc-q");
+  if (q) q.addEventListener("input", () => {
+    const term = q.value.trim().toLowerCase();
+    v.querySelectorAll("#loc-body tr").forEach(tr =>
+      tr.classList.toggle("hidden", !!term && !tr.textContent.toLowerCase().includes(term)));
+  });
+}
+// Upload / replace the map-design picture for a single site.
+function siteMapDialog(siteId, after) {
+  openModal(t("upload_site_map"), `<form id="smf">
+    <div class="field"><label>${t("site_map")}</label>
+      <input type="file" name="file" accept="image/*" required />
+      <div class="muted small">${t("site_map_hint")}</div></div>
+    <div class="form-actions"><button type="button" class="btn secondary" id="smf-x">${t("cancel")}</button>
+    <button class="btn" type="submit">${t("upload")}</button></div></form>`, (root) => {
+    $("smf-x").addEventListener("click", closeModal);
+    root.querySelector("#smf").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const file = root.querySelector("[name=file]").files[0];
+      if (!file) return;
+      try { await API.uploadSiteMap(siteId, file); closeModal(); toast(t("saved")); after && after(); }
+      catch (err) { alert(err.message); }
+    });
+  });
+}
+
+// ====================================================================
 // Contracts (recurring)
 // ====================================================================
 const FREQS = ["weekly", "biweekly", "monthly", "quarterly", "semiannual", "annual"];
+// Maps a location string to a Google Maps URL (a maps link is used as-is;
+// anything else is treated as a search query / coordinates).
+function mapsUrl(loc) {
+  const v = (loc || "").trim();
+  return /^https?:\/\//i.test(v) ? v : "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(v);
+}
+// One contract: the summary row plus a hidden detail row listing its sites.
+function contractRow(c, ncols) {
+  const sites = c.sites || [];
+  const acts = can("contracts.edit") || can("contracts.delete");
+  const toggle = sites.length
+    ? `<button class="link-btn sm ct-toggle" data-toggle="${c.id}" style="margin-inline-end:6px">▸</button>` : "";
+  const main = `<tr data-row="${c.id}"><td>${toggle}${esc(localized(c, "client"))}
+      ${sites.length ? `<span class="muted small">(${sites.length} ${t("sites_count")})</span>` : ""}</td>
+    <td>${esc(localized(c, "service") || "—")}</td>
+    <td>${esc(c.agent_name || "—")}</td><td>${t("freq_" + c.frequency)}</td><td>${fmtDate(c.next_run_date)}</td>
+    <td>${money(c.price)}</td><td><span class="badge b-${c.status === "active" ? "active" : "inactive"}">${t("ct_" + c.status)}</span></td>
+    ${acts ? `<td>${can("contracts.edit") ? `<button class="link-btn sm" data-edit="${c.id}">${t("edit")}</button>` : ""}${(can("contracts.edit") && can("contracts.delete")) ? " · " : ""}${can("contracts.delete") ? `<button class="link-btn danger sm" data-del="${c.id}">${t("delete")}</button>` : ""}</td>` : ""}</tr>`;
+  if (!sites.length) return main;
+  const rows = sites.map(s => `<tr><td>${esc(s.site_name || t("unassigned"))}</td>
+    <td>${s.map_location ? `<a href="${esc(mapsUrl(s.map_location))}" target="_blank" rel="noopener">📍 ${esc(s.map_location)}</a>` : "—"}</td>
+    <td style="text-align:end">${money(s.price)}</td></tr>`).join("");
+  const detail = `<tr class="ct-sites-detail hidden" data-detail="${c.id}"><td colspan="${ncols}">
+    <table><thead><tr><th>${t("location_lbl")}</th><th>${t("map_pin")}</th><th style="text-align:end">${t("price")}</th></tr></thead>
+    <tbody>${rows}</tbody></table></td></tr>`;
+  return main + detail;
+}
 async function viewContracts(v) {
   const list = await API.get("/contracts");
+  const ncols = 7 + ((can("contracts.edit") || can("contracts.delete")) ? 1 : 0);
   v.innerHTML = `<div class="page-head"><h2>${t("contracts_title")}</h2>
     <div style="display:flex;gap:8px">
       ${can("contracts.edit") ? `<button class="btn secondary" id="run-ct">⚙ ${t("run_now")}</button>` : ""}
       ${can("contracts.create") ? `<button class="btn" id="add-ct">+ ${t("new_contract")}</button>` : ""}</div></div>
     <div class="panel"><table><thead><tr><th>${t("client")}</th><th>${t("service")}</th><th>${t("agent")}</th>
       <th>${t("frequency")}</th><th>${t("next_run")}</th><th>${t("price")}</th><th>${t("contract_status")}</th>${(can("contracts.edit") || can("contracts.delete")) ? `<th></th>` : ""}</tr></thead>
-      <tbody>${list.map(c => `<tr><td>${esc(localized(c, "client"))}</td><td>${esc(localized(c, "service") || "—")}</td>
-        <td>${esc(c.agent_name || "—")}</td><td>${t("freq_" + c.frequency)}</td><td>${fmtDate(c.next_run_date)}</td>
-        <td>${money(c.price)}</td><td><span class="badge b-${c.status === "active" ? "active" : "inactive"}">${t("ct_" + c.status)}</span></td>
-        ${(can("contracts.edit") || can("contracts.delete")) ? `<td>${can("contracts.edit") ? `<button class="link-btn sm" data-edit="${c.id}">${t("edit")}</button>` : ""}${(can("contracts.edit") && can("contracts.delete")) ? " · " : ""}${can("contracts.delete") ? `<button class="link-btn danger sm" data-del="${c.id}">${t("delete")}</button>` : ""}</td>` : ""}</tr>`).join("")
-        || `<tr><td colspan="8" class="empty">${t("none")}</td></tr>`}</tbody></table></div>`;
+      <tbody>${list.map(c => contractRow(c, ncols)).join("")
+        || `<tr><td colspan="${ncols}" class="empty">${t("none")}</td></tr>`}</tbody></table></div>`;
   if ($("add-ct")) $("add-ct").addEventListener("click", () => contractForm());
   if ($("run-ct")) $("run-ct").addEventListener("click", async () => {
     const r = await API.post("/contracts/run", {}); toast(`${r.created} ${t("generated")}`); navigate("contracts");
@@ -2149,31 +2299,135 @@ async function viewContracts(v) {
   v.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", async () => {
     if (confirm(t("confirm_delete"))) { const r = await API.del("/contracts/" + b.dataset.del); if (handledOffline(r, b.closest("tr"))) return; navigate("contracts"); }
   }));
+  v.querySelectorAll("[data-toggle]").forEach(b => b.addEventListener("click", () => {
+    const det = v.querySelector(`[data-detail="${b.dataset.toggle}"]`);
+    if (!det) return;
+    const open = det.classList.toggle("hidden");
+    b.textContent = open ? "▸" : "▾";
+  }));
 }
+// Lazily load the Google Maps JS API (Places library) using the key saved in
+// Settings. Resolves to the google namespace, or null when no key is configured.
+// The promise is cached so the script is only ever injected once.
+let _mapsPromise = null;
+function ensureMapsApi() {
+  const key = (typeof SETTINGS !== "undefined" && SETTINGS && SETTINGS.google_maps_api_key) || "";
+  if (!key) return Promise.resolve(null);
+  if (_mapsPromise) return _mapsPromise;
+  _mapsPromise = new Promise((resolve, reject) => {
+    if (window.google && window.google.maps && window.google.maps.places) return resolve(window.google);
+    window.__crmMapsReady = () => resolve(window.google);
+    const sc = document.createElement("script");
+    sc.src = "https://maps.googleapis.com/maps/api/js?key=" + encodeURIComponent(key) +
+             "&libraries=places&callback=__crmMapsReady";
+    sc.async = true;
+    sc.onerror = () => { _mapsPromise = null; reject(new Error("maps load failed")); };
+    document.head.appendChild(sc);
+  });
+  return _mapsPromise;
+}
+// Attach Places search to a contract site-location input (no-op without a key).
+function attachPlaces(input) {
+  ensureMapsApi().then(g => {
+    if (!g || input.dataset.ac) return;
+    input.dataset.ac = "1";
+    const ac = new g.maps.places.Autocomplete(input, { fields: ["formatted_address", "geometry", "name"] });
+    ac.addListener("place_changed", () => {
+      const p = ac.getPlace();
+      if (p && p.geometry) input.dataset.latlng = p.geometry.location.lat() + "," + p.geometry.location.lng();
+      if (p && !input.value && p.name) input.value = p.name;
+    });
+  }).catch(() => {});
+}
+
 function contractForm(c) {
   const isEdit = !!c; c = c || {};
   const clientOpts = cache.clients.map(x => ({ v: x.id, l: localized(x, "name") }));
-  const agentOpts = [{ v: "", l: t("none") }].concat(cache.agents.map(a => ({ v: a.id, l: a.full_name })));
   const svcOpts = [{ v: "", l: t("none") }].concat(cache.services.map(s => ({ v: s.id, l: localized(s, "name") })));
   const freqOpts = FREQS.map(f => ({ v: f, l: t("freq_" + f) }));
   const statusOpts = ["active", "paused", "ended"].map(s => ({ v: s, l: t("ct_" + s) }));
   openModal(isEdit ? t("edit") : t("new_contract"), `<form id="ctf"><div class="form-grid">
     ${field(t("client"), "client_id", { options: clientOpts, value: c.client_id, cls: "full" })}
     ${field(t("service"), "service_type_id", { options: svcOpts, value: c.service_type_id })}
-    ${field(t("agent"), "agent_id", { options: agentOpts, value: c.agent_id })}
     ${field(t("frequency"), "frequency", { options: freqOpts, value: c.frequency || "monthly" })}
-    ${field(t("price"), "price", { type: "number", value: c.price || 0 })}
     ${field(t("start_date"), "start_date", { type: "date", value: c.start_date })}
     ${field(t("end_date"), "end_date", { type: "date", value: c.end_date })}
     ${isEdit ? field(t("contract_status"), "status", { options: statusOpts, value: c.status }) : ""}
     ${field(t("notes"), "notes", { textarea: true, cls: "full", value: c.notes })}
-    </div><div class="form-actions"><button type="button" class="btn secondary" id="ctf-x">${t("cancel")}</button>
+    </div>
+    <div class="section-title" style="margin-top:14px"><h3>${t("sites_pricing")}</h3>
+      <button type="button" class="btn sm" id="ct-add-site">+ ${t("add_site_row")}</button></div>
+    <table class="table"><thead><tr>
+      <th>${t("location_lbl")}</th><th>${t("map_location")}</th><th style="width:110px">${t("price")}</th><th></th>
+    </tr></thead><tbody id="ct-sites-body"></tbody>
+    <tfoot><tr><td colspan="2" style="text-align:right"><b>${t("total")}</b></td>
+      <td><b id="ct-total">0</b></td><td></td></tr></tfoot></table>
+    <div class="form-actions"><button type="button" class="btn secondary" id="ctf-x">${t("cancel")}</button>
     <button class="btn" type="submit">${t("save")}</button></div></form>`, (root) => {
+    const clientSel = root.querySelector("[name=client_id]");
+    const tbody = root.querySelector("#ct-sites-body");
+    let clientSites = [];
+
+    const siteOptionsHtml = (selected) =>
+      [`<option value="">${esc(t("none"))}</option>`].concat(clientSites.map(s =>
+        `<option value="${esc(s.id)}" ${String(s.id) === String(selected || "") ? "selected" : ""}>${esc(s.name)}</option>`)).join("");
+
+    function recalc() {
+      let tot = 0;
+      tbody.querySelectorAll(".cs-price").forEach(i => { tot += parseFloat(i.value) || 0; });
+      root.querySelector("#ct-total").textContent = tot.toFixed(2);
+    }
+    function addRow(row) {
+      row = row || {};
+      const tr = document.createElement("tr");
+      tr.innerHTML =
+        `<td><select class="cs-site">${siteOptionsHtml(row.site_id)}</select></td>
+         <td style="display:flex;gap:4px;align-items:center">
+           <input class="cs-map" type="text" placeholder="https://maps.google.com/…" value="${esc(row.map_location || "")}" style="flex:1" />
+           <button type="button" class="link-btn cs-open" title="${esc(t("open_map"))}">📍</button></td>
+         <td><input class="cs-price" type="number" min="0" step="0.01" value="${esc(row.price != null ? row.price : 0)}" style="width:100px" /></td>
+         <td><button type="button" class="link-btn danger sm cs-rm">${esc(t("delete"))}</button></td>`;
+      tbody.appendChild(tr);
+      const mapInput = tr.querySelector(".cs-map");
+      tr.querySelector(".cs-rm").addEventListener("click", () => { tr.remove(); recalc(); });
+      tr.querySelector(".cs-price").addEventListener("input", recalc);
+      tr.querySelector(".cs-open").addEventListener("click", () => {
+        const v = mapInput.value.trim();
+        const q = mapInput.dataset.latlng || v;
+        if (!q) return;
+        const url = /^https?:\/\//i.test(q) ? q : "https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(q);
+        window.open(url, "_blank", "noopener");
+      });
+      if (row.latlng) mapInput.dataset.latlng = row.latlng;
+      attachPlaces(mapInput);   // Places search when a Maps API key is configured
+      recalc();
+    }
+    async function loadSites(clientId) {
+      clientSites = [];
+      if (clientId) { try { const cl = await API.get("/clients/" + clientId); clientSites = cl.sites || []; } catch (e) {} }
+      tbody.querySelectorAll(".cs-site").forEach(sel => { sel.innerHTML = siteOptionsHtml(sel.value); });
+    }
+
+    root.querySelector("#ct-add-site").addEventListener("click", () => addRow());
+    clientSel.addEventListener("change", () => loadSites(clientSel.value));
+
+    (async () => {
+      await loadSites(clientSel.value);
+      const existing = c.sites || [];
+      if (existing.length) existing.forEach(addRow);
+      else addRow();   // start with one empty row
+    })();
+
     $("ctf-x").addEventListener("click", closeModal);
     root.querySelector("#ctf").addEventListener("submit", async (e) => {
       e.preventDefault();
       const d = formData(root);
       Object.keys(d).forEach(k => { if (d[k] === "") delete d[k]; });
+      d.sites = Array.from(tbody.querySelectorAll("tr")).map(tr => ({
+        site_id: tr.querySelector(".cs-site").value || null,
+        map_location: tr.querySelector(".cs-map").value.trim() || null,
+        price: parseFloat(tr.querySelector(".cs-price").value) || 0,
+      })).filter(r => r.site_id || r.map_location || r.price);
       try { const saved = isEdit ? await API.put("/contracts/" + c.id, d) : await API.post("/contracts", d);
         if (handledOffline(saved)) return;
         closeModal(); navigate("contracts"); } catch (err) { alert(err.message); }
@@ -2261,7 +2515,9 @@ async function viewSettings(v) {
         ${field(t("vat_no"), "vat_no", { value: s.vat_no })}
         ${field(t("currency_label"), "currency", { value: s.currency })}
         ${field(t("tax_rate"), "tax_rate", { type: "number", value: s.tax_rate })}
+        ${field(t("google_maps_api_key"), "google_maps_api_key", { value: s.google_maps_api_key, cls: "full" })}
       </div>
+      <p class="muted small" style="margin:-4px 0 8px">${t("maps_key_hint")}</p>
       <div class="form-actions"><button class="btn" type="submit">${t("save_settings")}</button></div></form>
       <div class="section-title"><h3>${t("logo")}</h3></div>
       <div style="display:flex;align-items:center;gap:16px">

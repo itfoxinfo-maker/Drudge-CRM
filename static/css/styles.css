@@ -82,7 +82,21 @@ a:hover { text-decoration: underline; }
 .sidebar {
   width: 250px; background: var(--side-grad); color: #b8d8c8; display: flex; flex-direction: column;
   padding: 20px 0; position: sticky; top: 0; height: 100vh;
+  transition: width .2s ease; overflow: hidden;
 }
+.nav-toggle { font-size: 22px; line-height: 1; padding: 0 4px; }
+/* Collapsed sidebar: shrink to an icon-only rail (labels/foot text hidden). */
+.app.nav-collapsed .sidebar { width: 64px; }
+.app.nav-collapsed .nav-item span:last-child,
+.app.nav-collapsed .brand-sm span,
+.app.nav-collapsed .sidebar-foot .user-box,
+.app.nav-collapsed .sidebar-foot .link-btn,
+.app.nav-collapsed .powered-sm { display: none; }
+.app.nav-collapsed .nav-item { justify-content: center; padding-inline: 0; }
+.app.nav-collapsed .brand-sm { justify-content: center; padding-inline: 0; }
+.app.nav-collapsed #nav { padding: 10px 8px; }
+/* With the sidebar collapsed, let the page content fill the whole screen. */
+.app.nav-collapsed .view { max-width: none; }
 .brand-sm { display: flex; align-items: center; gap: 11px; font-weight: 800; font-size: 16px; padding: 0 22px 18px; color: #fff; letter-spacing: -.01em; }
 .brand-sm .logo { font-size: 20px; width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; border-radius: 12px; background: rgba(255,255,255,.12); }
 #nav { flex: 1; display: flex; flex-direction: column; gap: 3px; padding: 10px; overflow-y: auto; }
@@ -192,6 +206,12 @@ tr.clickable:hover { background: var(--green-l); }
 /* modal */
 .modal-overlay { position: fixed; inset: 0; background: rgba(15,31,46,.5); backdrop-filter: blur(3px); display: flex; align-items: flex-start; justify-content: center; padding: 44px 16px; z-index: 50; overflow:auto; }
 .modal { background: #fff; border-radius: 18px; width: 100%; max-width: 640px; box-shadow: var(--shadow-lg); animation: pop .18s ease; }
+/* Google Places autocomplete dropdown must float above the modal overlay (z-index 50). */
+.pac-container { z-index: 10000; }
+/* Per-site breakdown rows under a contract in the contracts list. */
+.ct-sites-detail td { background: var(--bg, #f7f9fb); padding: 0 14px 10px; }
+.ct-sites-detail table { width: 100%; margin: 0; }
+.ct-sites-detail th, .ct-sites-detail td { font-size: 12.5px; padding: 5px 8px; }
 @keyframes pop { from { transform: scale(.96) translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
 .modal-head { display: flex; justify-content: space-between; align-items: center; padding: 18px 22px; border-bottom: 1px solid var(--line); }
 .modal-head h3 { margin: 0; font-size: 17px; font-weight: 700; }

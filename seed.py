@@ -13,7 +13,7 @@ def run():
 
     # --- service types ---
     services = [
-        ("General Pest Control", "مكافحة الآفات العامة"),
+        ("IPM", "الإدارة المتكاملة للآفات"),
         ("Rodent Control", "مكافحة القوارض"),
         ("Termite Treatment", "مكافحة النمل الأبيض"),
         ("Cockroach Treatment", "مكافحة الصراصير"),
