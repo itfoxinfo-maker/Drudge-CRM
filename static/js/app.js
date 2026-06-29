@@ -463,7 +463,7 @@ async function viewClientFolder(v, arg) {
           <div>${t("address_en")}</div><div>${esc(localized(c, "address")) || "—"}</div>
           <div>${t("notes")}</div><div>${esc(c.notes) || "—"}</div>
         </div></div>
-      <div class="panel"><h3>${t("finance")}</h3>
+      ${fin ? `<div class="panel"><h3>${t("finance")}</h3>
         <div class="cards" style="grid-template-columns:1fr 1fr;">
           <div class="stat-card"><div class="v" style="font-size:18px">${money(fin.total_invoiced)}</div><div class="l">${t("total_invoiced")}</div></div>
           <div class="stat-card"><div class="v" style="font-size:18px">${money(fin.total_paid)}</div><div class="l">${t("total_paid")}</div></div>
@@ -471,7 +471,7 @@ async function viewClientFolder(v, arg) {
         </div>
         <table style="margin-top:8px"><thead><tr><th>${t("invoice_no")}</th><th>${t("total")}</th><th>${t("status")}</th></tr></thead>
         <tbody>${fin.invoices.map(i => `<tr class="clickable" data-inv="${i.id}"><td>${esc(i.number)}</td><td>${money(i.total)}</td><td>${statusBadge(i.status)}</td></tr>`).join("") || `<tr><td colspan="3" class="empty">${t("none")}</td></tr>`}</tbody></table>
-      </div>
+      </div>` : ""}
     </div>
 
     ${can("clients.edit") ? `<div class="panel"><div class="section-title"><h3>${t("sites")}</h3><button class="btn sm" id="add-site">+ ${t("add_site")}</button></div>
@@ -1148,7 +1148,10 @@ function clientReportView(rep) {
     <div id="report-files" class="photo-grid"></div>`;
 }
 function usageForm(visitId) {
-  const opts = cache.chemicals.map(c => ({ v: c.id, l: `${localized(c, "name")} (${c.quantity_in_stock} ${c.unit})` }));
+  // Consumable materials (UV lamps, glue boards, ...) are recorded via the
+  // report's counter fields, not here, so exclude them to avoid double-counting.
+  const opts = cache.chemicals.filter(c => !c.material_key)
+    .map(c => ({ v: c.id, l: `${localized(c, "name")} (${c.quantity_in_stock} ${c.unit})` }));
   openModal(t("add_chemical"), `<form id="uf">
     ${field(t("name_en"), "chemical_id", { options: opts })}
     ${field(t("quantity"), "quantity", { type: "number" })}
@@ -2080,7 +2083,7 @@ async function initNotifications() {
 }
 async function refreshNotifications() {
   try {
-    const d = await API.get("/notifications");
+    const d = await API.get(`/notifications?lang=${LANG}`);
     const c = $("bell-count");
     if (!c) return;
     if (d.unread > 0) { c.textContent = d.unread; c.classList.remove("hidden"); }

@@ -34,6 +34,36 @@ def login(email, pw):
     _, d = call("POST", "/auth/login", body={"email": email, "password": pw})
     return d["token"] if d else None
 
+def post_multipart(path, token, fields, filename, filebytes, ctype="image/png"):
+    """POST a multipart/form-data body (for photo upload tests)."""
+    boundary = "----pctest"
+    chunks = []
+    for k, v in fields.items():
+        chunks.append((f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n").encode())
+    chunks.append((f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
+                   f"filename=\"{filename}\"\r\nContent-Type: {ctype}\r\n\r\n").encode() + filebytes + b"\r\n")
+    chunks.append(f"--{boundary}--\r\n".encode())
+    body = b"".join(chunks)
+    req = urllib.request.Request(BASE + path, data=body, method="POST")
+    if token: req.add_header("Authorization", "Bearer " + token)
+    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, json.load(r)
+    except urllib.error.HTTPError as e:
+        return e.code, None
+
+def raw_get(path, token=None, cookie=None):
+    """GET a non-/api path (e.g. /uploads/..); returns (status, headers)."""
+    req = urllib.request.Request(f"http://localhost:{PORT}{path}", method="GET")
+    if token: req.add_header("Authorization", "Bearer " + token)
+    if cookie: req.add_header("Cookie", cookie)
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, r.headers
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers
+
 def main():
     tmp = tempfile.mkdtemp(prefix="pestcrm-test-")
     env = dict(os.environ, PESTCRM_DATA_DIR=tmp)
@@ -287,6 +317,145 @@ def main():
         _, audit = call("GET", "/audit", admin)
         check("audit log records permission changes",
               any(r["action"].startswith("permissions.") for r in audit))
+
+        print("UPLOADS ARE PRIVATE")
+        # The auth gate runs before file existence, so a non-existent name still
+        # reveals whether access control fires (403 vs the SPA fallback 200).
+        st, _ = raw_get("/uploads/whatever.jpg")
+        check("upload blocked without a session (403)", st == 403)
+        st, _ = raw_get("/uploads/whatever.jpg", token=admin)
+        check("upload allowed with Bearer token", st != 403)
+        st, _ = raw_get("/uploads/whatever.jpg", cookie=f"pc_upl={admin}")
+        check("upload allowed with access cookie", st != 403)
+        st, _ = raw_get("/uploads/whatever.jpg", cookie="pc_upl=garbage")
+        check("upload blocked with a bogus cookie (403)", st == 403)
+        # login seeds the scoped /uploads access cookie
+        req = urllib.request.Request(BASE + "/auth/login", method="POST",
+                                     data=json.dumps({"email": "admin@pestcrm.com", "password": "admin123"}).encode())
+        req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req) as r:
+            sc = r.headers.get("Set-Cookie") or ""
+        check("login sets scoped HttpOnly upload cookie",
+              "pc_upl=" in sc and "HttpOnly" in sc and "Path=/uploads" in sc)
+        # static assets stay public (login page must load before auth)
+        st, _ = raw_get("/index.html")
+        check("static assets stay public", st == 200)
+
+        print("CONTRACTS PER LOCATION")
+        # Nile View Hotel is seeded with 2 sites and one CLIENT-LEVEL active contract.
+        sun = next((c for c in clients if "Nile View" in (c.get("name_en") or "")), None)
+        check("found seeded multi-site client", bool(sun))
+        if sun:
+            _, an_all = call("GET", f"/clients/{sun['id']}/analytics", admin)
+            check("contract counted at client level (all locations)",
+                  an_all["totals"]["contracts"] >= 1)
+            sites = an_all.get("sites") or []
+            if sites:
+                _, an_site = call("GET", f"/clients/{sun['id']}/analytics?site_id={sites[0]['id']}", admin)
+                check("client-level contract not counted for a specific location",
+                      an_site["totals"]["contracts"] == 0)
+            _, an_un = call("GET", f"/clients/{sun['id']}/analytics?site_id=none", admin)
+            check("client-level contract counted under unassigned",
+                  an_un["totals"]["contracts"] >= 1)
+
+        print("MATERIALS AS INVENTORY ITEMS")
+        _, chems_all = call("GET", "/chemicals", admin)
+        lamp = next((c for c in chems_all if c.get("material_key") == "lamps_used"), None)
+        check("UV lamp seeded as a real inventory item",
+              bool(lamp) and lamp["name_en"] == "UV Lamp")
+        _, users = call("GET", "/users", admin)
+        yousef = next((u for u in users if u.get("full_name") == "Yousef Ali"), None)
+        _, allvisits = call("GET", "/visits", admin)
+        av = next((v for v in allvisits if v.get("agent_id") == (yousef or {}).get("id")), None)
+        check("found an agent and one of their visits", bool(yousef) and bool(av))
+        if lamp and yousef and av:
+            def lamp_bal():
+                _, b = call("GET", f"/issues/balance?agent_id={yousef['id']}", admin)
+                engs = b.get("engineers") or []
+                mats = engs[0]["materials"] if engs else []
+                return next((m for m in mats if m["chemical_id"] == lamp["id"]), None)
+            base = lamp_bal()
+            base_used = base["used"] if base else 0
+            # stock up, issue 10 lamps (deducts central stock), then use 3 on a visit
+            call("POST", f"/chemicals/{lamp['id']}/stock", admin, {"change": 50, "reason": "purchase"})
+            st, _ = call("POST", "/issues", admin,
+                         {"agent_id": yousef["id"], "items": [{"chemical_id": lamp["id"], "quantity": 10}]})
+            check("issued 10 lamps to the engineer", st == 200)
+            call("POST", f"/visits/{av['id']}/report", admin, {"lamps_used": 3, "severity": "low"})
+            lb = lamp_bal()
+            check("lamps show as issued on the engineer balance", lb and lb["issued"] == 10)
+            check("report lamp counter folds into used", lb and round(lb["used"] - base_used, 3) == 3)
+            check("lamp remaining = issued - used",
+                  lb and lb["remaining"] == round(lb["issued"] - lb["used"], 3))
+            # materials must NOT be loggable as chemical-usage (would double-count)
+            st, _ = call("POST", f"/visits/{av['id']}/usage", admin,
+                         {"chemical_id": lamp["id"], "quantity": 1})
+            check("material blocked from chemical-usage (no double count)", st == 400)
+
+        print("SETTINGS SECRECY")
+        call("PUT", "/settings", admin, {"smtp_host": "smtp.example.com", "smtp_pass": "s3cret"})
+        _, cset = call("GET", "/settings", client)
+        check("client cannot read SMTP secrets", "smtp_pass" not in cset and "smtp_host" not in cset)
+        _, aset = call("GET", "/settings", agent)
+        check("agent cannot read SMTP secrets", "smtp_pass" not in aset)
+        _, dset = call("GET", "/settings", admin)
+        check("admin can read SMTP secrets", dset.get("smtp_pass") == "s3cret")
+
+        print("USER MGMT ESCALATION GUARDS")
+        st, _ = call("POST", "/users", manager,
+                     {"full_name": "X", "email": "newadmin@x.com", "password": "pw123456", "role": "admin"})
+        check("manager cannot create an admin (403)", st == 403)
+        _, allusers = call("GET", "/users", admin)
+        mgr = next((u for u in allusers if u["email"] == "manager@pestcrm.com"), None)
+        adm = next((u for u in allusers if u["role"] == "admin"), None)
+        st, _ = call("PUT", f"/users/{mgr['id']}", manager, {"role": "admin"})
+        check("manager cannot promote a user to admin (403)", st == 403)
+        st, _ = call("PUT", f"/users/{adm['id']}", manager, {"phone": "123"})
+        check("manager cannot edit an admin account (403)", st == 403)
+        st, _ = call("POST", "/users", manager,
+                     {"full_name": "Reg", "email": "reg@x.com", "password": "pw123456", "role": "agent"})
+        check("manager can still create a non-admin user", st == 200)
+
+        print("INVOICE NUMBERING (no reuse on delete)")
+        _, i1 = call("POST", "/invoices", admin, {"client_id": sun["id"], "issue_date": "2026-01-01", "amount": 10})
+        _, i2 = call("POST", "/invoices", admin, {"client_id": sun["id"], "issue_date": "2026-01-01", "amount": 20})
+        call("DELETE", f"/invoices/{i2['id']}", admin)
+        _, i3 = call("POST", "/invoices", admin, {"client_id": sun["id"], "issue_date": "2026-01-01", "amount": 30})
+        check("invoice number not reused after a delete",
+              i3["number"] not in (i1["number"], i2["number"]))
+
+        print("PAYMENT VALIDATION")
+        _, pinv = call("POST", "/invoices", admin, {"client_id": sun["id"], "issue_date": "2026-01-01", "amount": 100})
+        st, _ = call("POST", f"/invoices/{pinv['id']}/payments", admin, {"amount": "abc"})
+        check("non-numeric payment rejected (400)", st == 400)
+        st, _ = call("POST", f"/invoices/{pinv['id']}/payments", admin, {"amount": -5})
+        check("negative payment rejected (400)", st == 400)
+        st, _ = call("POST", "/invoices/999999/payments", admin, {"amount": 5})
+        check("payment on a missing invoice (404)", st == 404)
+
+        print("QUOTE CONVERT KEEPS LOCATION")
+        _, an = call("GET", f"/clients/{sun['id']}/analytics", admin)
+        qsid = (an.get("sites") or [{}])[0].get("id")
+        _, quote = call("POST", "/invoices", admin,
+                        {"client_id": sun["id"], "issue_date": "2026-01-01",
+                         "doc_type": "quote", "amount": 50, "site_id": qsid})
+        st, conv = call("POST", f"/invoices/{quote['id']}/convert", admin)
+        check("converted invoice keeps its location", conv and conv.get("site_id") == qsid)
+
+        print("PHOTO WRITE SCOPING")
+        PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        omar = next((u for u in agusers if u["email"] == "agent2@pestcrm.com"), None)
+        _, vall = call("GET", "/visits", admin)
+        omar_v = next((v for v in vall if v.get("agent_id") == (omar or {}).get("id")), None)
+        own_v = next((v for v in vall if v.get("agent_id") == a1), None)
+        if omar_v:
+            st, _ = post_multipart("/photos", agent,
+                                   {"entity_type": "visit", "entity_id": omar_v["id"]}, "x.png", PNG)
+            check("agent cannot attach a photo to another agent's visit (403)", st == 403)
+        if own_v:
+            st, ph = post_multipart("/photos", agent,
+                                    {"entity_type": "visit", "entity_id": own_v["id"]}, "x.png", PNG)
+            check("agent can attach a photo to their own visit (200)", st == 200)
 
     finally:
         proc.terminate()

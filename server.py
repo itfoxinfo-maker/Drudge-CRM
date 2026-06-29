@@ -14,9 +14,11 @@ import threading
 import traceback
 import mimetypes
 import gzip
+import math
 import hashlib
 import urllib.request
 from urllib.parse import urlparse, parse_qs, quote
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import database as db
@@ -315,6 +317,12 @@ def _login_locked_for(key):
 def _login_register_fail(key):
     now = time.time()
     with _login_lock:
+        # Opportunistically drop stale entries so the map can't grow unbounded
+        # under a spray of distinct email|ip keys.
+        if len(_login_attempts) > 256:
+            for k in [k for k, v in _login_attempts.items()
+                      if v[2] < now and now - v[1] > LOGIN_WINDOW]:
+                _login_attempts.pop(k, None)
         rec = _login_attempts.get(key)
         if not rec or now - rec[1] > LOGIN_WINDOW:
             rec = [0, now, 0]
@@ -438,6 +446,10 @@ def create_user(ctx):
         raise ApiError(400, "Name, email and password are required")
     if b.get("role") not in ("admin", "manager", "agent", "client"):
         raise ApiError(400, "Invalid role")
+    # Only an admin may mint another admin (prevents privilege escalation by a
+    # manager who merely holds users.create).
+    if b["role"] == "admin" and ctx.user["role"] != "admin":
+        raise ApiError(403, "Only an admin can create an admin user")
     if db.query("SELECT id FROM users WHERE lower(email)=?", (b["email"].lower(),), one=True):
         raise ApiError(409, "Email already in use")
     uid = db.execute(
@@ -455,6 +467,16 @@ def update_user(ctx):
     require_perm(ctx.user, "users.edit")
     uid = int(ctx.params[0])
     b = ctx.body
+    target = db.query("SELECT role FROM users WHERE id=?", (uid,), one=True)
+    if not target:
+        raise ApiError(404, "User not found")
+    # Guard the admin role: only an admin may edit an admin account or grant the
+    # admin role — otherwise a manager could elevate themselves / reset the admin.
+    if ctx.user["role"] != "admin":
+        if target["role"] == "admin":
+            raise ApiError(403, "Only an admin can modify an admin account")
+        if b.get("role") == "admin":
+            raise ApiError(403, "Only an admin can grant the admin role")
     fields, vals = [], []
     for col in ("full_name", "phone", "role", "client_id", "specialization", "hire_date", "lang", "active"):
         if col in b:
@@ -478,6 +500,9 @@ def update_user(ctx):
 def deactivate_user(ctx):
     require_perm(ctx.user, "users.delete")
     uid = int(ctx.params[0])
+    target = db.query("SELECT role FROM users WHERE id=?", (uid,), one=True)
+    if target and target["role"] == "admin" and ctx.user["role"] != "admin":
+        raise ApiError(403, "Only an admin can deactivate an admin account")
     db.execute("UPDATE users SET active=0 WHERE id=?", (uid,))
     audit(ctx, "user.delete", "user", uid, "deactivated")
     return {"ok": True}
@@ -619,7 +644,12 @@ def get_client(ctx):
         "FROM visits v LEFT JOIN service_types s ON s.id=v.service_type_id "
         "LEFT JOIN users u ON u.id=v.agent_id WHERE v.client_id=? "
         "ORDER BY v.scheduled_start DESC LIMIT 10", (cid,))
-    client["finance"] = _finance_summary(cid)
+    # Finance is money data: clients see their own; staff need invoices.view
+    # (so an agent with only clients.view doesn't see the company's finances).
+    if ctx.user["role"] == "client" or has_perm(ctx.user, "invoices.view"):
+        client["finance"] = _finance_summary(cid)
+    else:
+        client["finance"] = None
     if ctx.user["role"] == "client":
         client["users"] = []
     else:
@@ -1195,6 +1225,13 @@ def record_usage(ctx):
     qty = float(b.get("quantity", 0))
     if not chem_id or qty <= 0:
         raise ApiError(400, "Chemical and a positive quantity are required")
+    chem = db.query("SELECT material_key FROM chemicals WHERE id=?", (chem_id,), one=True)
+    if not chem:
+        raise ApiError(400, "Unknown chemical")
+    if chem["material_key"]:
+        # Consumable materials are tracked via the report's counter fields; logging
+        # them here too would double-count against the engineer's on-hand balance.
+        raise ApiError(400, "This material is recorded on the report, not as chemical usage")
     # Material consumed on a visit comes out of the engineer's issued on-hand
     # balance (issued − used), NOT central warehouse stock — that was already
     # decremented when the material was issued to the engineer. So we only
@@ -1285,6 +1322,24 @@ def issues_balance(ctx):
     for r in used:
         eng.setdefault(r["agent_id"], {}).setdefault(
             r["chemical_id"], {"issued": 0.0, "used": 0.0})["used"] = r["qty"] or 0
+    # Consumable materials (lamps, glue boards, ...) are recorded as report
+    # counters rather than chemical_usage rows, so fold those into "used" too.
+    # material_key values are server-defined (see _migrate), never user input,
+    # so building the column list from them is safe.
+    mat_items = db.query("SELECT id, material_key FROM chemicals WHERE material_key IS NOT NULL")
+    if mat_items:
+        cols_sql = ",".join(f"COALESCE(SUM(r.{m['material_key']}),0) {m['material_key']}"
+                            for m in mat_items)
+        mat_rows = db.query(
+            "SELECT v.agent_id, " + cols_sql +
+            " FROM reports r JOIN visits v ON v.id=r.visit_id "
+            "WHERE v.agent_id IS NOT NULL" + use_where + " GROUP BY v.agent_id", use_params)
+        for r in mat_rows:
+            for m in mat_items:
+                q = r[m["material_key"]] or 0
+                if q:
+                    eng.setdefault(r["agent_id"], {}).setdefault(
+                        m["id"], {"issued": 0.0, "used": 0.0})["used"] += q
     out = []
     for aid, mats in eng.items():
         materials = []
@@ -1512,9 +1567,14 @@ def add_payment(ctx):
     require_perm(ctx.user, "payments.create")
     iid = int(ctx.params[0])
     b = ctx.body
-    amount = float(b.get("amount", 0))
-    if amount <= 0:
+    try:
+        amount = float(b.get("amount", 0))
+    except (TypeError, ValueError):
+        raise ApiError(400, "Invalid payment amount")
+    if not math.isfinite(amount) or amount <= 0:
         raise ApiError(400, "Payment amount must be positive")
+    if not db.query("SELECT id FROM invoices WHERE id=?", (iid,), one=True):
+        raise ApiError(404, "Invoice not found")
     with db.transaction() as cx:
         cx.execute("INSERT INTO payments(invoice_id,amount,method,note) VALUES(?,?,?,?)",
                    (iid, amount, b.get("method", "cash"), b.get("note")))
@@ -1532,6 +1592,8 @@ def add_payment(ctx):
 def client_finance(ctx):
     cid = int(ctx.params[0])
     _assert_client_access(ctx.user, cid)
+    if ctx.user["role"] != "client":
+        require_perm(ctx.user, "invoices.view")
     return _finance_summary(cid)
 
 
@@ -1546,9 +1608,10 @@ def convert_quote(ctx):
     items = db.query("SELECT * FROM invoice_items WHERE invoice_id=?", (qid,))
     with db.transaction() as cx:
         iid = cx.execute(
-            "INSERT INTO invoices(client_id,visit_id,contract_id,doc_type,number,issue_date,due_date,"
-            "amount,tax,total,status,notes) VALUES(?,?,?,?,?,date('now'),date('now','+15 days'),?,?,?,?,?)",
-            (q["client_id"], q["visit_id"], q["contract_id"], "invoice", _next_invoice_number("invoice"),
+            "INSERT INTO invoices(client_id,site_id,visit_id,contract_id,doc_type,number,issue_date,due_date,"
+            "amount,tax,total,status,notes) VALUES(?,?,?,?,?,?,date('now'),date('now','+15 days'),?,?,?,?,?)",
+            (q["client_id"], q["site_id"], q["visit_id"], q["contract_id"], "invoice",
+             _next_invoice_number("invoice"),
              q["amount"], q["tax"], q["total"], "draft", q["notes"])).lastrowid
         for it in items:
             cx.execute("INSERT INTO invoice_items(invoice_id,description,quantity,unit_price,amount) "
@@ -1586,15 +1649,33 @@ def get_settings():
     return s
 
 
+# Settings that must never be exposed to non-admin users (credentials).
+_SECRET_SETTING_KEYS = {"smtp_host", "smtp_port", "smtp_user", "smtp_pass",
+                        "smtp_from", "smtp_tls"}
+
+
 @route("GET", r"/api/settings")
 def read_settings(ctx):
-    return get_settings()
+    s = get_settings()
+    # Internal counters (invoice/quote sequences) are not user-facing settings.
+    for k in [k for k in s if k.startswith("seq_")]:
+        s.pop(k, None)
+    # Everyone can read branding/cert/company fields the UI needs, but secrets
+    # (SMTP credentials) are only returned to users who can manage settings.
+    if not has_perm(ctx.user, "settings.view"):
+        for k in _SECRET_SETTING_KEYS:
+            s.pop(k, None)
+        if ctx.user["role"] == "client":
+            s.pop("google_maps_api_key", None)
+    return s
 
 
 @route("PUT", r"/api/settings")
 def write_settings(ctx):
     require_perm(ctx.user, "settings.edit")
     for k, v in ctx.body.items():
+        if k.startswith("seq_"):
+            continue  # internal invoice/quote counters — not editable here
         db.execute("INSERT INTO settings(key,value) VALUES(?,?) "
                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (k, str(v)))
     return get_settings()
@@ -1778,6 +1859,14 @@ def list_notifications(ctx):
         _maybe_generate_reminders()  # keep the bell live without a manual trigger
     rows = db.query("SELECT * FROM notifications WHERE user_id=? ORDER BY created_at DESC LIMIT 50",
                     (ctx.user["id"],))
+    # Notification text is stored in English; show it in the user's language.
+    # _translate caches per string, so 60s polls don't keep hitting the network.
+    lang = ctx.query.get("lang")
+    if lang in ("en", "ar"):
+        for r in rows:
+            r["title"] = _translate(r.get("title"), lang)
+            if r.get("body"):
+                r["body"] = _translate(r["body"], lang)
     unread = sum(1 for r in rows if not r["is_read"])
     return {"items": rows, "unread": unread}
 
@@ -2022,7 +2111,7 @@ def client_analytics(ctx):
         "visits": db.query("SELECT COUNT(*) c FROM visits v WHERE client_id=?" + vf, (cid, *vp), one=True)["c"],
         "completed": db.query("SELECT COUNT(*) c FROM visits v WHERE client_id=?" + vf + " AND status='completed'", (cid, *vp), one=True)["c"],
         "invoiced": fin["total_invoiced"], "paid": fin["total_paid"], "outstanding": fin["outstanding"],
-        "contracts": db.query("SELECT COUNT(*) c FROM contracts WHERE client_id=? AND status='active'", (cid,), one=True)["c"],
+        "contracts": _active_contracts_for_site(cid, site_id),
     }
     sites = db.query("SELECT id, name FROM sites WHERE client_id=? ORDER BY name", (cid,))
     return {"months": months, "status": status, "services": services,
@@ -2190,6 +2279,7 @@ def upload_photo(ctx):
     if et not in ("client", "report", "visit", "chemical") or not eid:
         raise ApiError(400, "Valid entity_type and entity_id required")
     require_perm(ctx.user, _PHOTO_ENTITY_PERM[et])
+    _assert_entity_write_access(ctx.user, et, int(eid))
     f = files[0]
     ext = _validate_upload(f)
     fname = f"{uuid.uuid4().hex}{ext}"
@@ -2209,6 +2299,7 @@ def delete_photo(ctx):
     row = db.query("SELECT * FROM photos WHERE id=?", (pid,), one=True)
     if row:
         require_perm(ctx.user, _PHOTO_ENTITY_PERM.get(row["entity_type"], "clients.edit"))
+        _assert_entity_write_access(ctx.user, row["entity_type"], row["entity_id"])
         try:
             os.remove(os.path.join(UPLOAD_DIR, row["filename"]))
         except OSError:
@@ -2402,6 +2493,24 @@ def _assert_visit_access(user, visit):
         raise ApiError(403, "No permission")
 
 
+def _assert_entity_write_access(user, entity_type, entity_id):
+    """Per-tenant write guard for photo upload/delete: an agent may only touch
+    their own visits' (and reports') attachments; clients only their own."""
+    if entity_type in ("visit", "report"):
+        vid = entity_id
+        if entity_type == "report":
+            rep = db.query("SELECT visit_id FROM reports WHERE id=?", (entity_id,), one=True)
+            if not rep:
+                raise ApiError(404, "Not found")
+            vid = rep["visit_id"]
+        v = db.query("SELECT client_id, agent_id FROM visits WHERE id=?", (vid,), one=True)
+        if not v:
+            raise ApiError(404, "Not found")
+        _assert_visit_access(user, v)
+    elif entity_type == "client":
+        _assert_client_access(user, entity_id)
+
+
 def _assert_photo_access(user, entity_type, entity_id):
     """Authorize reading photos/attachments for an entity, enforcing per-company
     (client) and per-agent isolation the same way the parent records do."""
@@ -2451,6 +2560,29 @@ def _site_filter(site_id, col):
         return "", []
 
 
+def _active_contracts_for_site(cid, site_id):
+    """Count a client's active contracts, scoped to the selected location.
+
+    Contracts link to a location via contracts.site_id and/or per-site rows in
+    contract_sites, so a contract counts for a location if either matches.
+    'none'/'0' = contracts with no location at all; None/all = client total."""
+    base = ("SELECT COUNT(DISTINCT ct.id) c FROM contracts ct "
+            "WHERE ct.client_id=? AND ct.status='active'")
+    if site_id in (None, "", "all"):
+        return db.query(base, (cid,), one=True)["c"]
+    if str(site_id) in ("none", "0"):
+        return db.query(base + " AND ct.site_id IS NULL AND NOT EXISTS "
+                        "(SELECT 1 FROM contract_sites cs WHERE cs.contract_id=ct.id)",
+                        (cid,), one=True)["c"]
+    try:
+        sid = int(site_id)
+    except (TypeError, ValueError):
+        return db.query(base, (cid,), one=True)["c"]
+    return db.query(base + " AND (ct.site_id=? OR EXISTS "
+                    "(SELECT 1 FROM contract_sites cs WHERE cs.contract_id=ct.id AND cs.site_id=?))",
+                    (cid, sid, sid), one=True)["c"]
+
+
 def _finance_summary(cid, site_id=None):
     clause, params = _site_filter(site_id, "i.site_id")
     invoices = db.query(
@@ -2468,9 +2600,26 @@ def _finance_summary(cid, site_id=None):
 
 
 def _next_invoice_number(doc_type="invoice"):
+    # Monotonic counter persisted in settings so a number is NEVER reused — not
+    # after deletions (COUNT/MAX both reuse the tail) nor concurrently (the +1
+    # UPDATE is atomic under the write lock). Numbers look like INV-00042.
     prefix = "QUO" if doc_type == "quote" else "INV"
-    n = db.query("SELECT COUNT(*) c FROM invoices WHERE doc_type=?", (doc_type,), one=True)["c"] + 1
-    return f"{prefix}-{n:05d}"
+    key = f"seq_{doc_type}"
+    with db.transaction() as cx:
+        row = cx.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        if row is None:
+            # Seed once from any existing numbers so we don't restart at 1.
+            cur = 0
+            for r in cx.execute("SELECT number FROM invoices WHERE doc_type=? AND number LIKE ?",
+                                (doc_type, prefix + "-%")).fetchall():
+                try:
+                    cur = max(cur, int(str(r["number"]).rsplit("-", 1)[1]))
+                except (ValueError, IndexError):
+                    pass
+            cx.execute("INSERT INTO settings(key,value) VALUES(?,?)", (key, str(cur)))
+        cx.execute("UPDATE settings SET value = CAST(value AS INTEGER) + 1 WHERE key=?", (key,))
+        nxt = int(cx.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()["value"])
+    return f"{prefix}-{nxt:05d}"
 
 
 # --------------------------------------------------------------------------
@@ -2484,6 +2633,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # dispatch -------------------------------------------------------------
     def _handle(self, method):
+        # Reset per-request state (handler instances are reused on keep-alive).
+        self._auth_cookie_token = None
         parsed = urlparse(self.path)
         path = parsed.path
         # static + uploads
@@ -2521,6 +2672,9 @@ class Handler(BaseHTTPRequestHandler):
             ctx = Ctx(user, list(match.groups()), query, body, raw_body, content_type, ip=client_ip)
             try:
                 result = fn(ctx)
+                # Fresh login issues a token -> seed the /uploads access cookie.
+                if isinstance(result, dict) and result.get("token"):
+                    self._auth_cookie_token = result["token"]
                 if isinstance(result, dict) and "_csv" in result:
                     return self._csv(result["_csv"], result.get("_filename", "export.csv"))
                 return self._json(200, result)
@@ -2548,11 +2702,9 @@ class Handler(BaseHTTPRequestHandler):
         self._handle("DELETE")
 
     # helpers --------------------------------------------------------------
-    def _current_user(self):
-        hdr = self.headers.get("Authorization", "")
-        if not hdr.startswith("Bearer "):
-            return None
-        payload = auth.verify_token(hdr[7:])
+    def _user_from_token(self, token):
+        """Validate a session token string -> active user row (or None)."""
+        payload = auth.verify_token(token or "")
         if not payload:
             return None
         user = db.query("SELECT * FROM users WHERE id=? AND active=1", (payload["uid"],), one=True)
@@ -2563,13 +2715,58 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return user
 
+    def _current_user(self):
+        hdr = self.headers.get("Authorization", "")
+        if not hdr.startswith("Bearer "):
+            return None
+        user = self._user_from_token(hdr[7:])
+        if user:
+            # Refresh the /uploads access cookie so <img> tags (which can't send
+            # the Bearer header) stay authorised for the life of the session.
+            self._auth_cookie_token = hdr[7:]
+        return user
+
+    def _upload_authorised(self):
+        """Uploads are private: require a valid session via the scoped cookie
+        (sent automatically by <img> tags) or a Bearer header (direct fetch)."""
+        hdr = self.headers.get("Authorization", "")
+        if hdr.startswith("Bearer ") and self._user_from_token(hdr[7:]):
+            return True
+        raw = self.headers.get("Cookie", "")
+        if raw:
+            try:
+                jar = SimpleCookie()
+                jar.load(raw)
+                if "pc_upl" in jar and self._user_from_token(jar["pc_upl"].value):
+                    return True
+            except Exception:
+                pass
+        return False
+
     def _json(self, status, payload):
         data = json.dumps(payload, default=str).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        self._send_upload_cookie()
         self.end_headers()
         self.wfile.write(data)
+
+    def _send_upload_cookie(self):
+        # Scoped, HttpOnly, expiring access cookie for /uploads/. Sent on login
+        # and refreshed on every authenticated API call. (Add `Secure` once the
+        # site is served over HTTPS.)
+        tok = getattr(self, "_auth_cookie_token", None)
+        if tok:
+            # Mark Secure when the request arrived over HTTPS (directly or via a
+            # TLS-terminating proxy) so the cookie isn't sent in the clear.
+            https = (self.headers.get("X-Forwarded-Proto", "").split(",")[0].strip() == "https")
+            secure = "; Secure" if https else ""
+            self.send_header(
+                "Set-Cookie",
+                "pc_upl=%s; HttpOnly; SameSite=Lax; Path=/uploads; Max-Age=%d%s"
+                % (tok, auth.TOKEN_TTL, secure),
+            )
 
     def _csv(self, rows, filename):
         import csv, io
@@ -2590,6 +2787,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/" or path == "":
             path = "/index.html"
         if path.startswith("/uploads/"):
+            # Uploaded files (photos, signatures, maps, logos, attachments) are
+            # private — only a logged-in session may read them. Filenames are
+            # random UUIDs, but that alone is not access control.
+            if not self._upload_authorised():
+                return self._json(403, {"error": "Forbidden"})
             base, rel = UPLOAD_DIR, path[len("/uploads/"):]
         else:
             base, rel = STATIC_DIR, path.lstrip("/")

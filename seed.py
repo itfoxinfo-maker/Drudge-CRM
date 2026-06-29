@@ -152,6 +152,11 @@ def run():
     for k, v in settings.items():
         db.execute("INSERT INTO settings(key,value) VALUES(?,?)", (k, v))
 
+    # Consumable materials as inventory items (after the real chemicals so the
+    # demo chemical ids stay in seed order).
+    with db.transaction() as cx:
+        db.ensure_material_items(cx)
+
     print("Seed complete.")
     print("Logins:")
     print("  admin@pestcrm.com / admin123   (admin)")

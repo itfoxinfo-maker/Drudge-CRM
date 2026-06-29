@@ -14,7 +14,13 @@ def parse_multipart(body: bytes, content_type: str):
     delim = ("--" + boundary).encode()
     parts = body.split(delim)
     for part in parts:
-        part = part.strip(b"\r\n")
+        # Strip only the framing CRLF around the part — NOT every trailing
+        # \r/\n byte (strip(b"\r\n") would corrupt binary files whose content
+        # happens to end in 0x0A/0x0D).
+        if part.startswith(b"\r\n"):
+            part = part[2:]
+        if part.endswith(b"\r\n"):
+            part = part[:-2]
         if not part or part == b"--":
             continue
         if b"\r\n\r\n" not in part:
