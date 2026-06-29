@@ -100,8 +100,13 @@
         }
         if (res.ok) {
           await remove(entry.id); synced++;
+        } else if (res.status === 401) {
+          // Token expired/invalid (e.g. agent was offline past the token TTL).
+          // Keep the queue and stop — it'll retry after the next sign-in rather
+          // than silently discarding the agent's offline work.
+          break;
         } else if (res.status >= 400 && res.status < 500) {
-          // permanent client error (e.g. validation/permission) — drop it
+          // permanent client error (e.g. validation) — drop it
           await remove(entry.id);
           console.warn("Dropped un-syncable queued request", entry.path, res.status);
         } else {

@@ -474,6 +474,36 @@ def _migrate(conn):
             DROP TABLE inventory_transactions; ALTER TABLE inventory_transactions_new RENAME TO inventory_transactions;
             PRAGMA foreign_keys=ON;
         """)
+    # Consumable materials (UV lamps, glue boards, etc.) are real inventory items
+    # so they can be issued to engineers and tracked against the report counters
+    # that record their use. material_key ties an inventory row to its report
+    # column. Only ensure them here when the catalog already has rows (existing
+    # DBs); on a fresh DB seed.py adds them AFTER the real chemicals so ids stay
+    # in seed order.
+    if "material_key" not in cols("chemicals"):
+        conn.execute("ALTER TABLE chemicals ADD COLUMN material_key TEXT")
+    if conn.execute("SELECT COUNT(*) FROM chemicals").fetchone()[0] > 0:
+        ensure_material_items(conn)
+
+
+# Consumable inventory items, keyed to their report counter column.
+MATERIAL_ITEMS = (
+    ("lamps_used",        "UV Lamp",                  "مصباح UV",      "pcs"),
+    ("cables_used",       "Cable",                    "كابل",          "pcs"),
+    ("transformers_used", "Transformer",              "محول",          "pcs"),
+    ("light_sheets_used", "Light Sheet (Glue Board)", "لوح لاصق",      "pcs"),
+    ("glo_pieces",        "Glo Board Piece",          "قطعة جلو",      "pcs"),
+    ("flybase_bags",      "Flybase Bag",              "كيس فلاي بيس",  "bag"),
+)
+
+
+def ensure_material_items(conn):
+    """Idempotently create the consumable inventory items (keyed on material_key)."""
+    for key, en, ar, unit in MATERIAL_ITEMS:
+        if not conn.execute("SELECT 1 FROM chemicals WHERE material_key=?", (key,)).fetchone():
+            conn.execute(
+                "INSERT INTO chemicals(name_en,name_ar,unit,quantity_in_stock,reorder_level,material_key) "
+                "VALUES(?,?,?,0,0,?)", (en, ar, unit, key))
 
 
 def get_conn():

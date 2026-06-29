@@ -46,6 +46,39 @@ public class MainActivity extends AppCompatActivity {
     private static final String KEY_URL = "server_url";
     private static final int REQ_PERMS = 100;
 
+    /**
+     * Injected after every page load. The CRM is a single-page app, so this
+     * self-installs listeners (history, resize, DOM changes) and re-fits on its
+     * own as the agent navigates — no further injection needed.
+     *
+     * It measures the page at normal device width; if the content is wider than
+     * the screen (e.g. a wide data table or the calendar grid), it switches the
+     * viewport to that content width so the WebView zooms the WHOLE page down to
+     * fit — eliminating the sideways scroll while keeping everything in
+     * proportion. A 0.25 minimum-scale floor stops very wide pages becoming
+     * unreadably tiny (those keep pinch-zoom as a fallback). A short lock guards
+     * against the resize our own viewport change fires, so it can't oscillate.
+     */
+    private static final String FIT_JS =
+            "(function(){" +
+            "if(window.__pcFit)return;window.__pcFit=true;" +
+            "var BASE='width=device-width, initial-scale=1, minimum-scale=0.25, maximum-scale=5, user-scalable=yes';" +
+            "var t,lock=0;" +
+            "function mv(){var m=document.querySelector('meta[name=viewport]');" +
+            "if(!m){m=document.createElement('meta');m.name='viewport';(document.head||document.documentElement).appendChild(m);}return m;}" +
+            "function fit(){var m=mv();lock=Date.now();m.setAttribute('content',BASE);" +
+            "requestAnimationFrame(function(){var w=Math.ceil(document.documentElement.scrollWidth);var s=window.innerWidth;" +
+            "m.setAttribute('content', w>s+2 ? ('width='+w+', minimum-scale=0.25, maximum-scale=5, user-scalable=yes') : BASE);" +
+            "lock=Date.now();});}" +
+            "function sch(){if(Date.now()-lock<800)return;clearTimeout(t);t=setTimeout(fit,250);}" +
+            "addEventListener('resize',sch);addEventListener('orientationchange',sch);" +
+            "addEventListener('hashchange',sch);addEventListener('popstate',sch);" +
+            "var p=history.pushState;history.pushState=function(){var r=p.apply(this,arguments);sch();return r;};" +
+            "var rp=history.replaceState;history.replaceState=function(){var r=rp.apply(this,arguments);sch();return r;};" +
+            "var v=document.getElementById('view')||document.body;" +
+            "if(window.MutationObserver&&v){new MutationObserver(sch).observe(v,{childList:true,subtree:true});}" +
+            "fit();})();";
+
     private WebView web;
     private SwipeRefreshLayout swipe;
     private ValueCallback<Uri[]> filePathCallback;
@@ -66,9 +99,16 @@ public class MainActivity extends AppCompatActivity {
         s.setAllowFileAccess(true);
         s.setGeolocationEnabled(true);
         s.setMediaPlaybackRequiresUserGesture(false);
+        // Fit the web page to the screen width (no sideways scroll) and let the
+        // injected fit script (see FIT_JS) zoom the whole page down when its
+        // content is wider than the device. useWideViewPort + overview make the
+        // WebView honour the viewport width we set from JS and scale to fit.
         s.setLoadWithOverviewMode(true);
         s.setUseWideViewPort(true);
-        s.setSupportZoom(false);
+        // Keep pinch-zoom available as a manual backup, but hide the +/- buttons.
+        s.setSupportZoom(true);
+        s.setBuiltInZoomControls(true);
+        s.setDisplayZoomControls(false);
         s.setCacheMode(WebSettings.LOAD_DEFAULT);
 
         web.setWebViewClient(new WebViewClient() {
@@ -87,6 +127,9 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 swipe.setRefreshing(false);
+                // Squeeze the page to fit the screen width so there's no
+                // horizontal scrolling (re-runs itself on in-app navigation).
+                view.evaluateJavascript(FIT_JS, null);
             }
         });
 
