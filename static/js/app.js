@@ -92,9 +92,35 @@ function applyStaticLabels() {
   $("sidebar-powered").textContent = t("powered_by");
 }
 
+// Wrap data tables in a horizontal-scroll box so a wide table scrolls inside
+// itself instead of pushing the whole page sideways — WITHOUT changing the
+// table's layout (so narrow tables stay full-width, no blank gaps). Runs on
+// every render via a MutationObserver on the view + modal containers.
+function installTableScroll() {
+  const wrap = (t) => {
+    if (!t.parentNode || (t.parentNode.classList && t.parentNode.classList.contains("table-scroll"))) return;
+    const box = document.createElement("div");
+    box.className = "table-scroll";
+    t.parentNode.insertBefore(box, t);
+    box.appendChild(t);
+  };
+  const scan = (root) => { if (root.querySelectorAll) root.querySelectorAll("table").forEach(wrap); };
+  const obs = new MutationObserver((muts) => {
+    for (const m of muts) for (const n of m.addedNodes) {
+      if (n.nodeType !== 1) continue;
+      if (n.tagName === "TABLE") wrap(n); else scan(n);
+    }
+  });
+  ["view", "modal-body"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) { scan(el); obs.observe(el, { childList: true, subtree: true }); }
+  });
+}
+
 async function boot() {
   setLang(LANG);
   applyStaticLabels();
+  installTableScroll();
   if (API.token && API.user) {
     // Refresh the profile so the resolved permission map is always current.
     try {

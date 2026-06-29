@@ -161,10 +161,10 @@ html[dir="rtl"] .quick-search input { padding: 10px 38px 10px 16px; background-p
 
 table { width: 100%; border-collapse: collapse; }
 /* Wide tables (many columns / nowrap cells) scroll horizontally inside their
-   own box instead of pushing the whole page sideways on a phone. display:block
-   lets the inner rows form an anonymous table that overflows -> own scrollbar;
-   tables that already fit stay unaffected. */
-.view table { display: block; max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+   own box instead of pushing the whole page sideways on a phone. Tables are
+   wrapped in .table-scroll at runtime (see app.js); the table itself keeps its
+   normal full-width table layout, so narrow tables don't shrink/leave blank space. */
+.table-scroll { max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
 th, td { text-align: start; padding: 12px 14px; border-bottom: 1px solid var(--line); font-size: 13.5px; }
 th { color: var(--muted); font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; background: #f8fafc; }
 thead tr th:first-child { border-start-start-radius: 10px; }
