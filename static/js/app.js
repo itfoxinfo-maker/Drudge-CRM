@@ -1248,6 +1248,12 @@ async function viewReportDoc(v, arg) {
 // which pop-up blockers and the Android WebView routinely block. Replaces the
 // old `window.open("","_blank") + document.write` dance everywhere.
 function printHtmlDoc(doc) {
+  // Android app: WebViews don't implement window.print(), so hand the document
+  // to the native bridge (see PrintBridge in MainActivity.java) which renders it
+  // and routes to Android's PrintManager.
+  if (window.PestPrint && typeof window.PestPrint.printHtml === "function") {
+    try { window.PestPrint.printHtml(doc); return; } catch (e) { /* fall back to iframe */ }
+  }
   const prev = document.getElementById("print-frame");
   if (prev) prev.remove();
   const ifr = document.createElement("iframe");

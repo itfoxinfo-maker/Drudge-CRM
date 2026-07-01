@@ -2,15 +2,22 @@ package com.foxsystems.pestcare.agent;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.print.PrintAttributes;
+import android.print.PrintDocumentAdapter;
+import android.print.PrintManager;
 import android.provider.MediaStore;
 import android.text.InputType;
 import android.webkit.GeolocationPermissions;
+import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -83,6 +90,8 @@ public class MainActivity extends AppCompatActivity {
     private SwipeRefreshLayout swipe;
     private ValueCallback<Uri[]> filePathCallback;
     private Uri cameraImageUri;
+    // Held while a print job renders/spools so its WebView isn't garbage-collected.
+    private WebView printWeb;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -156,6 +165,12 @@ public class MainActivity extends AppCompatActivity {
                 runOnUiThread(() -> request.grant(request.getResources()));
             }
         });
+
+        // Native print bridge: WebViews don't implement window.print(), so the
+        // web app hands us the full print document and we route it to Android's
+        // PrintManager (see printHtmlDoc() in app.js). Safe because the WebView
+        // only ever loads our own CRM.
+        web.addJavascriptInterface(new PrintBridge(), "PestPrint");
 
         // Pull-to-refresh reloads the current page.
         swipe.setOnRefreshListener(() -> web.reload());
@@ -283,5 +298,46 @@ public class MainActivity extends AppCompatActivity {
     protected void onSaveInstanceState(@NonNull Bundle outState) {
         super.onSaveInstanceState(outState);
         web.saveState(outState);
+    }
+
+    // ---- native printing bridge (exposed to the CRM as window.PestPrint) ----
+    private class PrintBridge {
+        /** Called from JS with a complete HTML document to print. */
+        @JavascriptInterface
+        public void printHtml(final String html) {
+            runOnUiThread(() -> startWebPrint(html));
+        }
+    }
+
+    /**
+     * Render the given HTML in an off-screen WebView and, once loaded, hand it
+     * to Android's PrintManager. Uses the current server as the base URL so the
+     * document's relative assets (logo, /uploads/…) resolve.
+     */
+    private void startWebPrint(String html) {
+        final WebView pw = new WebView(this);
+        pw.getSettings().setJavaScriptEnabled(true);
+        pw.getSettings().setAllowFileAccess(true);
+        pw.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                // Give web fonts / the logo a moment to paint before spooling.
+                new Handler(Looper.getMainLooper()).postDelayed(
+                        () -> createPrintJob(view), 700);
+            }
+        });
+        printWeb = pw;   // keep a strong reference during the job
+        pw.loadDataWithBaseURL(getServerUrl(), html, "text/html", "UTF-8", null);
+    }
+
+    private void createPrintJob(WebView view) {
+        PrintManager pm = (PrintManager) getSystemService(Context.PRINT_SERVICE);
+        if (pm == null) {
+            Toast.makeText(this, R.string.print_unavailable, Toast.LENGTH_LONG).show();
+            return;
+        }
+        String jobName = getString(R.string.app_name) + " Document";
+        PrintDocumentAdapter adapter = view.createPrintDocumentAdapter(jobName);
+        pm.print(jobName, adapter, new PrintAttributes.Builder().build());
     }
 }

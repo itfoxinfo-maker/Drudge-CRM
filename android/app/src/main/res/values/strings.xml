@@ -6,4 +6,5 @@
     <string name="cancel">Cancel</string>
     <string name="choose">Choose</string>
     <string name="cant_reach">Cannot reach the server. Check your connection, or long-press the top-left corner to change the server URL.</string>
+    <string name="print_unavailable">Printing is not available on this device.</string>
 </resources>
