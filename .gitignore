@@ -11,6 +11,8 @@ env/
 
 # App data & secrets (do NOT commit)
 data/crm.db
+data/crm.db.bak-*
+data/*.sqlite
 data/secret.key
 data/backups/
 

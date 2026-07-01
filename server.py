@@ -373,7 +373,8 @@ def _me_payload(u):
 
 def _public_user(u):
     return {k: u[k] for k in ("id", "full_name", "email", "role", "phone",
-                              "client_id", "specialization", "lang")}
+                              "client_id", "specialization", "license_no",
+                              "license_expiry", "lang")}
 
 
 # --------------------------------------------------------------------------
@@ -414,7 +415,52 @@ def dashboard(ctx):
         stats["my_visits"] = db.query(
             "SELECT COUNT(*) c FROM visits WHERE agent_id=? AND status IN('scheduled','in_progress')",
             (u["id"],), one=True)["c"]
+    # Owner cockpit: a single-glance KPI block (revenue, overdue billing, SLA
+    # health, technician utilization) for admins/managers who can see finance +
+    # analytics. Agents/clients never get it.
+    if has_perm(u, "analytics.view"):
+        stats["cockpit"] = _owner_cockpit()
     return stats
+
+
+def _owner_cockpit():
+    """Aggregate owner KPIs: revenue (this vs last month), overdue receivables,
+    SLA health, and per-technician utilization for the current month."""
+    rev_month = db.query(
+        "SELECT COALESCE(SUM(amount),0) v FROM payments "
+        "WHERE strftime('%Y-%m', paid_at)=strftime('%Y-%m','now')", one=True)["v"]
+    rev_prev = db.query(
+        "SELECT COALESCE(SUM(amount),0) v FROM payments "
+        "WHERE strftime('%Y-%m', paid_at)=strftime('%Y-%m','now','start of month','-1 month')",
+        one=True)["v"]
+    overdue = db.query(
+        "SELECT COUNT(*) c, COALESCE(SUM(total - COALESCE("
+        "(SELECT SUM(amount) FROM payments p WHERE p.invoice_id=i.id),0)),0) amt "
+        "FROM invoices i WHERE doc_type='invoice' AND status IN('sent','overdue') "
+        "AND due_date IS NOT NULL AND date(due_date) < date('now')", one=True)
+    sla_counts = {"ok": 0, "due_soon": 0, "overdue": 0}
+    for r in _sla_rows():
+        sla_counts[r["status"]] += 1
+    # Technician utilization for the current calendar month: assigned vs completed.
+    util = []
+    for a in db.query(
+            "SELECT u.id, u.full_name, COUNT(v.id) total, "
+            "SUM(CASE WHEN v.status='completed' THEN 1 ELSE 0 END) completed "
+            "FROM users u LEFT JOIN visits v ON v.agent_id=u.id "
+            "AND strftime('%Y-%m', v.scheduled_start)=strftime('%Y-%m','now') "
+            "WHERE u.role='agent' AND u.active=1 GROUP BY u.id ORDER BY total DESC, completed DESC"):
+        total = a["total"] or 0
+        completed = a["completed"] or 0
+        util.append({
+            "agent_id": a["id"], "name": a["full_name"], "total": total,
+            "completed": completed,
+            "rate": round(completed * 100.0 / total) if total else 0,
+        })
+    return {
+        "revenue_month": rev_month, "revenue_prev": rev_prev,
+        "overdue_invoices": overdue["c"], "overdue_amount": overdue["amt"],
+        "sla": sla_counts, "utilization": util,
+    }
 
 
 # --------------------------------------------------------------------------
@@ -453,11 +499,11 @@ def create_user(ctx):
     if db.query("SELECT id FROM users WHERE lower(email)=?", (b["email"].lower(),), one=True):
         raise ApiError(409, "Email already in use")
     uid = db.execute(
-        "INSERT INTO users(full_name,email,password_hash,role,phone,client_id,specialization,hire_date,lang) "
-        "VALUES(?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO users(full_name,email,password_hash,role,phone,client_id,specialization,"
+        "hire_date,license_no,license_expiry,lang) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         (b["full_name"], b["email"], auth.hash_password(b["password"]), b["role"],
          b.get("phone"), b.get("client_id"), b.get("specialization"), b.get("hire_date"),
-         b.get("lang", "en")))
+         b.get("license_no"), b.get("license_expiry"), b.get("lang", "en")))
     audit(ctx, "user.create", "user", uid, f"{b['role']} {b['email']}")
     return _public_user(db.query("SELECT * FROM users WHERE id=?", (uid,), one=True))
 
@@ -478,7 +524,8 @@ def update_user(ctx):
         if b.get("role") == "admin":
             raise ApiError(403, "Only an admin can grant the admin role")
     fields, vals = [], []
-    for col in ("full_name", "phone", "role", "client_id", "specialization", "hire_date", "lang", "active"):
+    for col in ("full_name", "phone", "role", "client_id", "specialization", "hire_date",
+                "license_no", "license_expiry", "lang", "active"):
         if col in b:
             fields.append(f"{col}=?")
             vals.append(b[col])
@@ -707,8 +754,8 @@ def list_all_sites(ctx):
         where.append("s.client_id=?"); params.append(u["client_id"])
     if ctx.query.get("client"):
         where.append("s.client_id=?"); params.append(ctx.query["client"])
-    sql = ("SELECT s.id, s.client_id, s.name, s.address, s.area, s.map_image, s.created_at, "
-           "c.name_en client_en, c.name_ar client_ar "
+    sql = ("SELECT s.id, s.client_id, s.name, s.address, s.area, s.map_image, "
+           "s.lat, s.lng, s.created_at, c.name_en client_en, c.name_ar client_ar "
            "FROM sites s JOIN clients c ON c.id=s.client_id")
     if where:
         sql += " WHERE " + " AND ".join(where)
@@ -723,8 +770,30 @@ def add_site(ctx):
     b = ctx.body
     if not b.get("name"):
         raise ApiError(400, "Site name is required")
-    sid = db.execute("INSERT INTO sites(client_id,name,address,area) VALUES(?,?,?,?)",
-                     (cid, b["name"], b.get("address"), b.get("area")))
+    lat, lng = _coerce_latlng(b)
+    sid = db.execute("INSERT INTO sites(client_id,name,address,area,lat,lng) VALUES(?,?,?,?,?,?)",
+                     (cid, b["name"], b.get("address"), b.get("area"), lat, lng))
+    return db.query("SELECT * FROM sites WHERE id=?", (sid,), one=True)
+
+
+@route("PUT", r"/api/sites/(\d+)")
+def update_site(ctx):
+    require_perm(ctx.user, "clients.edit")
+    sid = int(ctx.params[0])
+    if not db.query("SELECT 1 FROM sites WHERE id=?", (sid,), one=True):
+        raise ApiError(404, "Site not found")
+    b = ctx.body
+    fields, vals = [], []
+    for col in ("name", "address", "area"):
+        if col in b:
+            fields.append(f"{col}=?"); vals.append(b[col])
+    if "lat" in b or "lng" in b or "geo" in b:
+        lat, lng = _coerce_latlng(b)
+        fields += ["lat=?", "lng=?"]; vals += [lat, lng]
+    if not fields:
+        raise ApiError(400, "Nothing to update")
+    vals.append(sid)
+    db.execute(f"UPDATE sites SET {','.join(fields)} WHERE id=?", vals)
     return db.query("SELECT * FROM sites WHERE id=?", (sid,), one=True)
 
 
@@ -821,6 +890,7 @@ def list_visits(ctx):
         params.append(ctx.query["to"])
     sql = ("SELECT v.*, c.name_en client_en, c.name_ar client_ar, "
            "s.name_en service_en, s.name_ar service_ar, u.full_name agent_name, st.name site_name, "
+           "st.lat site_lat, st.lng site_lng, "
            "EXISTS(SELECT 1 FROM reports r WHERE r.visit_id=v.id AND r.status='complete') has_report "
            "FROM visits v JOIN clients c ON c.id=v.client_id "
            "LEFT JOIN service_types s ON s.id=v.service_type_id "
@@ -1008,7 +1078,7 @@ def upsert_report(ctx):
 
 
 # Fields (and signatures) required before a report can be marked complete.
-REPORT_REQUIRED_FIELDS = ("summary", "findings", "pests_found", "severity")
+REPORT_REQUIRED_FIELDS = ("summary", "findings", "pests_found")
 
 
 def _report_incomplete_fields(rep):
@@ -1621,14 +1691,179 @@ def convert_quote(ctx):
 
 
 # --------------------------------------------------------------------------
+# ONLINE PAYMENTS — gateway-agnostic adapters + checkout/callback flow
+# --------------------------------------------------------------------------
+# Each provider implements two steps of the standard hosted-checkout dance:
+#   create_intent(intent, invoice, return_url) -> (checkout_url, provider_ref)
+#   parse_callback(ctx)                         -> (provider_ref, status, raw)
+# Drop a new class in PAYMENT_PROVIDERS and select it via the payment_provider
+# setting to support Paymob / Fawry / Stripe / etc. once merchant keys + HTTPS
+# are in place. The built-in "manual" provider needs neither and is used to
+# exercise the whole loop end-to-end (it confirms via an in-app prompt).
+class PaymentProvider:
+    name = "base"
+
+    def create_intent(self, intent, invoice, return_url):
+        raise ApiError(501, "Payment provider not implemented")
+
+    def parse_callback(self, ctx):
+        raise ApiError(501, "Payment provider not implemented")
+
+
+class ManualProvider(PaymentProvider):
+    """Sandbox provider: no external gateway. The client confirms in-app and the
+    callback marks the intent paid. Stands in until a real gateway is wired."""
+    name = "manual"
+
+    def create_intent(self, intent, invoice, return_url):
+        return return_url, intent["token"]
+
+    def parse_callback(self, ctx):
+        tok = ctx.body.get("token") or ctx.query.get("token")
+        if not tok:
+            raise ApiError(400, "token required")
+        return tok, "paid", json.dumps(ctx.body)[:2000]
+
+
+class PaymobProvider(PaymentProvider):
+    """Skeleton for Paymob (Egypt). The flow is: auth token -> register order ->
+    request a payment key -> redirect to the iframe; success arrives on the
+    callback as an HMAC-signed transaction. Wire the TODOs once keys + HTTPS are
+    available; until then it fails clearly rather than pretending to work."""
+    name = "paymob"
+
+    def create_intent(self, intent, invoice, return_url):
+        s = get_settings()
+        if not s.get("paymob_api_key") or not s.get("paymob_integration_id"):
+            raise ApiError(400, "Paymob keys not configured in Settings")
+        # TODO: POST /api/auth/tokens -> POST /api/ecommerce/orders ->
+        #       POST /api/acceptance/payment_keys -> build the iframe URL.
+        raise ApiError(501, "Paymob integration not finished — keys present, flow pending HTTPS")
+
+    def parse_callback(self, ctx):
+        s = get_settings()
+        secret = s.get("paymob_hmac")
+        if not secret:
+            raise ApiError(400, "Paymob HMAC not configured")
+        # TODO: recompute the HMAC over the ordered Paymob fields and compare to
+        #       ctx.query['hmac']; map obj.success -> 'paid'/'failed'.
+        raise ApiError(501, "Paymob callback verification not finished")
+
+
+PAYMENT_PROVIDERS = {p.name: p for p in (ManualProvider(), PaymobProvider())}
+
+
+def _active_payment_provider():
+    name = (get_settings().get("payment_provider") or "manual").strip()
+    return PAYMENT_PROVIDERS.get(name, PAYMENT_PROVIDERS["manual"])
+
+
+@route("POST", r"/api/invoices/(\d+)/pay")
+def start_payment(ctx):
+    """Begin an online payment for an invoice. Clients may pay their own
+    invoices; staff need payments.create (e.g. to hand a customer a pay link).
+    Returns a checkout_url to send the payer to (or, for the manual provider, an
+    in-app confirm path) plus the intent token to poll."""
+    iid = int(ctx.params[0])
+    inv = db.query("SELECT * FROM invoices WHERE id=?", (iid,), one=True)
+    if not inv:
+        raise ApiError(404, "Invoice not found")
+    if ctx.user["role"] == "client":
+        _assert_client_access(ctx.user, inv["client_id"])
+    else:
+        require_perm(ctx.user, "payments.create")
+    if inv["doc_type"] != "invoice":
+        raise ApiError(400, "Only invoices can be paid")
+    if inv["status"] == "cancelled":
+        raise ApiError(400, "Invoice is cancelled")
+    paid = db.query("SELECT COALESCE(SUM(amount),0) p FROM payments WHERE invoice_id=?",
+                    (iid,), one=True)["p"]
+    remaining = round(inv["total"] - paid, 2)
+    if remaining <= 0:
+        raise ApiError(400, "Invoice already paid")
+    provider = _active_payment_provider()
+    currency = get_settings().get("currency") or "EGP"
+    token = uuid.uuid4().hex
+    intent_id = db.execute(
+        "INSERT INTO payment_intents(invoice_id,client_id,provider,token,amount,currency,status) "
+        "VALUES(?,?,?,?,?,?, 'pending')",
+        (iid, inv["client_id"], provider.name, token, remaining, currency))
+    intent = db.query("SELECT * FROM payment_intents WHERE id=?", (intent_id,), one=True)
+    checkout_url, provider_ref = provider.create_intent(intent, inv, f"/pay/{token}")
+    db.execute("UPDATE payment_intents SET provider_ref=? WHERE id=?", (provider_ref, intent_id))
+    audit(ctx, "payment.intent", "invoice", iid, f"{provider.name} {remaining:g} {currency}")
+    return {"token": token, "provider": provider.name, "checkout_url": checkout_url,
+            "amount": remaining, "currency": currency}
+
+
+@route("GET", r"/api/payment-intents/([0-9a-fA-F]+)")
+def get_payment_intent(ctx):
+    """Poll a payment intent's status (after returning from checkout)."""
+    intent = db.query("SELECT * FROM payment_intents WHERE token=?", (ctx.params[0],), one=True)
+    if not intent:
+        raise ApiError(404, "Not found")
+    if ctx.user["role"] == "client":
+        _assert_client_access(ctx.user, intent["client_id"])
+    else:
+        require_perm(ctx.user, "invoices.view")
+    return {"token": intent["token"], "status": intent["status"], "amount": intent["amount"],
+            "invoice_id": intent["invoice_id"]}
+
+
+@route("POST", r"/api/payments/callback/(\w+)", auth_required=False)
+def payment_callback(ctx):
+    """Gateway callback / webhook (unauthenticated — the provider calls it). The
+    adapter validates the payload; on success we record the payment, mark the
+    invoice paid when fully covered, and flag the intent. Idempotent."""
+    provider = PAYMENT_PROVIDERS.get(ctx.params[0])
+    if not provider:
+        raise ApiError(404, "Unknown payment provider")
+    ref, status, raw = provider.parse_callback(ctx)
+    intent = db.query("SELECT * FROM payment_intents WHERE provider_ref=? OR token=?",
+                      (ref, ref), one=True)
+    if not intent:
+        raise ApiError(404, "Unknown payment reference")
+    if intent["status"] == "paid":
+        return {"ok": True, "status": "paid"}      # already processed
+    if status != "paid":
+        db.execute("UPDATE payment_intents SET status=?, updated_at=datetime('now') WHERE id=?",
+                   (status if status in ("failed", "cancelled") else "failed", intent["id"]))
+        return {"ok": True, "status": status}
+    iid = intent["invoice_id"]
+    with db.transaction() as cx:
+        pid = cx.execute(
+            "INSERT INTO payments(invoice_id,amount,method,note) VALUES(?,?,?,?)",
+            (iid, intent["amount"], f"online:{provider.name}",
+             f"Online payment {intent['token'][:8]}")).lastrowid
+        inv = cx.execute("SELECT number, total, status FROM invoices WHERE id=?", (iid,)).fetchone()
+        tot = cx.execute("SELECT COALESCE(SUM(amount),0) p FROM payments WHERE invoice_id=?",
+                         (iid,)).fetchone()["p"]
+        if inv and tot >= inv["total"] and inv["status"] != "cancelled":
+            cx.execute("UPDATE invoices SET status='paid' WHERE id=?", (iid,))
+        cx.execute("UPDATE payment_intents SET status='paid', payment_id=?, "
+                   "updated_at=datetime('now') WHERE id=?", (pid, intent["id"]))
+    _notify_roles(("admin", "manager"), "payment_received", "Payment received",
+                  f"Invoice {inv['number'] if inv else iid} paid online "
+                  f"({intent['amount']:g} {intent['currency']})", "invoices", iid,
+                  f"paid:{intent['id']}")
+    return {"ok": True, "status": "paid"}
+
+
+# --------------------------------------------------------------------------
 # SETTINGS (company profile / branding)
 # --------------------------------------------------------------------------
 DEFAULT_SETTINGS = {
     "company_name_en": "PestCare Pest Control Co.", "company_name_ar": "شركة بيست كير لمكافحة الآفات",
     "address_en": "Riyadh, Saudi Arabia", "address_ar": "الرياض، المملكة العربية السعودية",
     "phone": "+966 11 000 0000", "email": "billing@pestcare.com", "vat_no": "300000000000003",
-    "currency": "EGP", "tax_rate": "14", "logo": "",
+    "currency": "EGP", "tax_rate": "14", "payment_terms_days": "14", "logo": "",
+    # Online payments. payment_provider selects the active gateway adapter
+    # ("manual" = built-in sandbox that records a payment on confirm, no keys).
+    # Real adapters (paymob/…) read their keys from these slots once supplied.
+    "payment_provider": "manual",
+    "paymob_api_key": "", "paymob_integration_id": "", "paymob_iframe_id": "", "paymob_hmac": "",
     "google_maps_api_key": "",   # enables Places search on contract site locations
+    "company_geo": "",   # depot "lat,lng" — start point for route optimization
     # Service-certificate template (editable in Settings, used on every certificate).
     "cert_statement_en": "This is to certify that pest control services were carried out at the "
                          "premises detailed below, in accordance with professional standards and applicable regulations.",
@@ -1651,7 +1886,7 @@ def get_settings():
 
 # Settings that must never be exposed to non-admin users (credentials).
 _SECRET_SETTING_KEYS = {"smtp_host", "smtp_port", "smtp_user", "smtp_pass",
-                        "smtp_from", "smtp_tls"}
+                        "smtp_from", "smtp_tls", "paymob_api_key", "paymob_hmac"}
 
 
 @route("GET", r"/api/settings")
@@ -1760,12 +1995,16 @@ def create_contract(ctx):
     # location, summed price) so existing lists and visit-generation still work.
     site_id = (sites[0].get("site_id") or None) if sites else b.get("site_id")
     price = sum(float(s.get("price") or 0) for s in sites) if sites else float(b.get("price", 0))
+    auto = 1 if b.get("auto_invoice") in (1, "1", True, "true", "on") else 0
+    next_bill = (b.get("next_bill_date") or b["start_date"]) if auto else None
     cid = db.execute(
         "INSERT INTO contracts(client_id,site_id,service_type_id,agent_id,frequency,start_date,"
-        "end_date,next_run_date,price,status,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        "end_date,next_run_date,price,status,notes,bill_every,next_bill_date,auto_invoice) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (b["client_id"], site_id, b.get("service_type_id"), b.get("agent_id"),
          b["frequency"], b["start_date"], b.get("end_date"), b["start_date"],
-         price, b.get("status", "active"), b.get("notes")))
+         price, b.get("status", "active"), b.get("notes"),
+         b.get("bill_every") or None, next_bill, auto))
     _save_contract_sites(cid, sites)
     cl = db.query("SELECT name_en FROM clients WHERE id=?", (b["client_id"],), one=True)
     _notify_roles(("admin", "manager"), "contract_new", "New contract",
@@ -1784,8 +2023,18 @@ def update_contract(ctx):
         # Derive headline site/price from the rows, then persist the rows below.
         b["site_id"] = (sites[0].get("site_id") or None) if sites else None
         b["price"] = sum(float(s.get("price") or 0) for s in sites)
+    if "auto_invoice" in b:
+        b["auto_invoice"] = 1 if b["auto_invoice"] in (1, "1", True, "true", "on") else 0
+        if b["auto_invoice"] and not b.get("next_bill_date"):
+            cur = db.query("SELECT next_bill_date, start_date FROM contracts WHERE id=?",
+                           (cid,), one=True) or {}
+            b["next_bill_date"] = cur.get("next_bill_date") or cur.get("start_date") \
+                or db.query("SELECT date('now') d", one=True)["d"]
+    if b.get("bill_every") == "":
+        b["bill_every"] = None
     cols = ("site_id", "service_type_id", "agent_id", "frequency", "start_date",
-            "end_date", "next_run_date", "price", "status", "notes")
+            "end_date", "next_run_date", "price", "status", "notes",
+            "bill_every", "next_bill_date", "auto_invoice")
     fields = [f"{c}=?" for c in cols if c in b]
     vals = [b[c] for c in cols if c in b]
     if not fields and sites is None:
@@ -1811,6 +2060,13 @@ def run_contracts(ctx):
     require_perm(ctx.user, "contracts.edit")
     created = _generate_due_visits()
     return {"created": created}
+
+
+@route("POST", r"/api/contracts/bill")
+def run_billing(ctx):
+    """Generate any due recurring invoices for auto-billed contracts."""
+    require_perm(ctx.user, "invoices.create")
+    return {"created": _generate_due_invoices()}
 
 
 def _generate_due_visits(lookahead_days=14):
@@ -1848,6 +2104,364 @@ def _generate_due_visits(lookahead_days=14):
             run = nxt
         db.execute("UPDATE contracts SET next_run_date=? WHERE id=?", (run, ct["id"]))
     return count
+
+
+def _contract_invoice_items(ct):
+    """Build invoice line items for a contract's billing cycle. One line per
+    per-site row when present (so each location is itemized), else a single line
+    at the contract's headline price."""
+    svc = db.query("SELECT name_en FROM service_types WHERE id=?",
+                   (ct["service_type_id"],), one=True) if ct["service_type_id"] else None
+    label = (svc["name_en"] if svc else "Pest control") + f" — {ct['frequency']} service"
+    sites = db.query(
+        "SELECT cs.price, s.name site_name FROM contract_sites cs "
+        "LEFT JOIN sites s ON s.id=cs.site_id WHERE cs.contract_id=? AND cs.price > 0 "
+        "ORDER BY cs.id", (ct["id"],))
+    if sites:
+        return [{"description": f"{label}" + (f" — {s['site_name']}" if s["site_name"] else ""),
+                 "quantity": 1, "unit_price": s["price"]} for s in sites]
+    return [{"description": label, "quantity": 1, "unit_price": ct["price"]}]
+
+
+def _generate_due_invoices(lookahead_days=0):
+    """Auto-generate invoices for contracts opted into recurring billing whose
+    next_bill_date has arrived. Advances next_bill_date by the billing cadence
+    (bill_every, falling back to the service frequency). Idempotent: skips a
+    cycle that already has a non-cancelled invoice for that contract + date."""
+    horizon = f"+{lookahead_days} days"
+    s = get_settings()
+    try:
+        tax_rate = float(s.get("tax_rate") or 0)
+    except (TypeError, ValueError):
+        tax_rate = 0.0
+    try:
+        terms = int(float(s.get("payment_terms_days") or 14))
+    except (TypeError, ValueError):
+        terms = 14
+    due = db.query(
+        "SELECT * FROM contracts WHERE status='active' AND auto_invoice=1 "
+        "AND next_bill_date IS NOT NULL AND date(next_bill_date) <= date('now',?) "
+        "AND (end_date IS NULL OR date(next_bill_date) <= date(end_date))", (horizon,))
+    count = 0
+    for ct in due:
+        days = FREQ_DAYS.get(ct["bill_every"] or ct["frequency"], 30)
+        bill = ct["next_bill_date"]
+        for _ in range(36):  # safety cap on catch-up
+            row = db.query("SELECT date(?) d, date('now',?) h", (bill, horizon), one=True)
+            if row["d"] > row["h"]:
+                break
+            if ct["end_date"]:
+                er = db.query("SELECT date(?) d, date(?) e", (bill, ct["end_date"]), one=True)
+                if er["d"] > er["e"]:
+                    break
+            exists = db.query(
+                "SELECT id FROM invoices WHERE contract_id=? AND doc_type='invoice' "
+                "AND date(issue_date)=date(?) AND status!='cancelled'",
+                (ct["id"], bill), one=True)
+            if not exists:
+                items = _contract_invoice_items(ct)
+                number = _next_invoice_number("invoice")
+                due_date = db.query("SELECT date(?, ?) n", (bill, f"+{terms} days"), one=True)["n"]
+                with db.transaction() as cx:
+                    iid = cx.execute(
+                        "INSERT INTO invoices(client_id,site_id,contract_id,doc_type,number,issue_date,"
+                        "due_date,amount,tax,total,status,notes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (ct["client_id"], ct["site_id"], ct["id"], "invoice", number, bill,
+                         due_date, 0, 0, 0, "sent",
+                         f"Auto-generated from contract #{ct['id']}")).lastrowid
+                    amount = _save_items(iid, items, cx)
+                    tax = round(amount * tax_rate / 100, 2)
+                    cx.execute("UPDATE invoices SET amount=?, tax=?, total=? WHERE id=?",
+                               (amount, tax, amount + tax, iid))
+                count += 1
+                # surface the new invoice to the client portal
+                cl = db.query("SELECT name_en FROM clients WHERE id=?", (ct["client_id"],), one=True)
+                for cu in db.query(
+                        "SELECT id FROM users WHERE role='client' AND client_id=? AND active=1",
+                        (ct["client_id"],)):
+                    _notify(cu["id"], "invoice_new", "New invoice",
+                            f"{number} — {amount + tax:g}", "invoices", iid,
+                            f"autoinv:{iid}:{cu['id']}")
+            bill = db.query("SELECT date(?, ?) n", (bill, f"+{days} days"), one=True)["n"]
+        db.execute("UPDATE contracts SET next_bill_date=? WHERE id=?", (bill, ct["id"]))
+    return count
+
+
+# --------------------------------------------------------------------------
+# SMART DISPATCH — route optimization + SLA tracking
+# --------------------------------------------------------------------------
+DISPATCH_SLOT_MIN = 90   # minutes between visits when applying an optimized route
+
+
+def _coerce_latlng(b):
+    """Pull (lat, lng) from a request body: a free-text `geo` field (lat,lng or
+    a maps URL) or explicit numeric lat/lng. Returns (None, None) when absent."""
+    geo = b.get("geo")
+    if geo:
+        ll = db._parse_latlng(geo)
+        if ll:
+            return ll
+    lat, lng = b.get("lat"), b.get("lng")
+    if lat in (None, "") or lng in (None, ""):
+        return (None, None)
+    try:
+        lat, lng = float(lat), float(lng)
+    except (TypeError, ValueError):
+        return (None, None)
+    if -90 <= lat <= 90 and -180 <= lng <= 180:
+        return (lat, lng)
+    return (None, None)
+
+
+def _haversine(a, b):
+    """Great-circle distance in km between two (lat, lng) tuples."""
+    R = 6371.0
+    lat1, lng1, lat2, lng2 = map(math.radians, (a[0], a[1], b[0], b[1]))
+    dlat, dlng = lat2 - lat1, lng2 - lng1
+    h = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlng / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(h))
+
+
+def _visit_geo(v):
+    """Resolve a visit's coordinates: its site's lat/lng, else parse the visit's
+    free-text location. Returns (lat, lng) or None."""
+    if v.get("site_lat") is not None and v.get("site_lng") is not None:
+        return (v["site_lat"], v["site_lng"])
+    return db._parse_latlng(v.get("location"))
+
+
+def _route_km(points):
+    """Total path length (km) visiting `points` (list of (lat,lng)) in order."""
+    return sum(_haversine(points[i], points[i + 1]) for i in range(len(points) - 1))
+
+
+@route("POST", r"/api/dispatch/optimize")
+def dispatch_optimize(ctx):
+    """Order one agent's visits for a day to minimize driving (nearest-neighbour
+    on site coordinates). Preview by default; pass apply=true to rewrite the
+    visits' scheduled times into the optimized sequence."""
+    require_perm(ctx.user, "visits.edit")
+    b = ctx.body
+    agent_id, date = b.get("agent_id"), b.get("date")
+    if not agent_id or not date:
+        raise ApiError(400, "agent_id and date are required")
+    rows = db.query(
+        "SELECT v.id, v.scheduled_start, v.scheduled_end, v.location, "
+        "c.name_en client_en, c.name_ar client_ar, st.name site_name, "
+        "st.lat site_lat, st.lng site_lng "
+        "FROM visits v JOIN clients c ON c.id=v.client_id "
+        "LEFT JOIN sites st ON st.id=v.site_id "
+        "WHERE v.agent_id=? AND date(v.scheduled_start)=date(?) "
+        "AND v.status IN ('scheduled','in_progress') ORDER BY v.scheduled_start",
+        (agent_id, date))
+    geo, ungeo = [], []
+    for v in rows:
+        g = _visit_geo(v)
+        if g:
+            v["lat"], v["lng"] = g
+            geo.append(v)
+        else:
+            ungeo.append(v)
+    # start point: explicit in body, else company HQ coords, else the first stop
+    start = _coerce_latlng(b)
+    if start == (None, None):
+        start = db._parse_latlng(get_settings().get("company_geo"))
+    if not start and geo:
+        start = (geo[0]["lat"], geo[0]["lng"])
+    pre = ([start] if start else [])
+
+    def length(seq):
+        return _route_km(pre + [(g["lat"], g["lng"]) for g in seq])
+
+    km_before = length(geo)
+    # nearest-neighbour ordering
+    remaining, optimized = geo[:], []
+    cur = start or (remaining[0]["lat"], remaining[0]["lng"]) if remaining else None
+    while remaining:
+        nxt = min(remaining, key=lambda g: _haversine(cur, (g["lat"], g["lng"])))
+        optimized.append(nxt); cur = (nxt["lat"], nxt["lng"]); remaining.remove(nxt)
+    km_after = length(optimized)
+
+    final = optimized + ungeo
+    applied = False
+    if b.get("apply") and final:
+        starts = [v["scheduled_start"] for v in rows if v.get("scheduled_start")]
+        first_t = min(starts)[11:16] if starts else "09:00"
+        import datetime as _dt
+        try:
+            base = _dt.datetime.strptime(f"{date} {first_t}", "%Y-%m-%d %H:%M")
+        except ValueError:
+            base = _dt.datetime.strptime(f"{date} 09:00", "%Y-%m-%d %H:%M")
+        with db.transaction() as cx:
+            for i, v in enumerate(final):
+                ns = (base + _dt.timedelta(minutes=i * DISPATCH_SLOT_MIN)).strftime("%Y-%m-%d %H:%M:00")
+                cx.execute("UPDATE visits SET scheduled_start=? WHERE id=?", (ns, v["id"]))
+        applied = True
+        audit(ctx, "dispatch.optimize", "user", int(agent_id),
+              f"{len(final)} visits on {date}, saved {round(km_before - km_after, 1)} km")
+
+    def card(v, i):
+        return {"id": v["id"], "seq": i + 1, "client_en": v["client_en"],
+                "client_ar": v["client_ar"], "site_name": v["site_name"],
+                "scheduled_start": v["scheduled_start"],
+                "lat": v.get("lat"), "lng": v.get("lng")}
+    return {
+        "agent_id": int(agent_id), "date": date, "applied": applied,
+        "km_before": round(km_before, 2), "km_after": round(km_after, 2),
+        "km_saved": round(max(0, km_before - km_after), 2),
+        "stops": len(geo), "ungeocoded": len(ungeo),
+        "order": [card(v, i) for i, v in enumerate(final)],
+        "has_start": bool(start),
+    }
+
+
+def _sla_rows():
+    """Per active-contract SLA status. Tiered: ok / due_soon (period end
+    approaching) / overdue (past period end + ~20% grace). Compares the contract
+    cadence against the last COMPLETED visit for that client (+ site if set)."""
+    out = []
+    for ct in db.query(
+            "SELECT ct.*, c.name_en client_en, c.name_ar client_ar, s.name site_name "
+            "FROM contracts ct JOIN clients c ON c.id=ct.client_id "
+            "LEFT JOIN sites s ON s.id=ct.site_id WHERE ct.status='active'"):
+        period = FREQ_DAYS.get(ct["frequency"], 30)
+        site_clause, sp = "", []
+        if ct["site_id"]:
+            site_clause = " AND site_id=?"; sp = [ct["site_id"]]
+        last = db.query(
+            "SELECT MAX(date(COALESCE(completed_at, scheduled_start))) d FROM visits "
+            "WHERE client_id=? AND status='completed'" + site_clause,
+            (ct["client_id"], *sp), one=True)["d"]
+        ref = last or ct["start_date"]
+        days_since = db.query("SELECT CAST(julianday('now') - julianday(?) AS INT) d",
+                              (ref,), one=True)["d"] or 0
+        if days_since < period * 0.8:
+            status = "ok"
+        elif days_since <= period * 1.2:
+            status = "due_soon"
+        else:
+            status = "overdue"
+        out.append({
+            "contract_id": ct["id"], "client_id": ct["client_id"],
+            "client_en": ct["client_en"], "client_ar": ct["client_ar"],
+            "site_name": ct["site_name"], "frequency": ct["frequency"],
+            "period_days": period, "last_service": last, "days_since": days_since,
+            "days_overdue": max(0, days_since - period), "next_run_date": ct["next_run_date"],
+            "status": status,
+        })
+    out.sort(key=lambda r: (-r["days_since"]))
+    return out
+
+
+@route("GET", r"/api/dispatch/sla")
+def dispatch_sla(ctx):
+    require_perm(ctx.user, "contracts.view")
+    rows = _sla_rows()
+    if ctx.user["role"] == "client":
+        rows = [r for r in rows if r["client_id"] == ctx.user["client_id"]]
+    counts = {"ok": 0, "due_soon": 0, "overdue": 0}
+    for r in rows:
+        counts[r["status"]] += 1
+    return {"items": rows, "counts": counts}
+
+
+# --------------------------------------------------------------------------
+# VISIT REQUESTS — client self-service ("request a visit")
+# --------------------------------------------------------------------------
+@route("GET", r"/api/visit-requests")
+def list_visit_requests(ctx):
+    u = ctx.user
+    where, params = [], []
+    if u["role"] == "client":
+        where.append("vr.client_id=?"); params.append(u["client_id"])
+    else:
+        require_perm(u, "visits.view")
+        if ctx.query.get("status"):
+            where.append("vr.status=?"); params.append(ctx.query["status"])
+    sql = ("SELECT vr.*, c.name_en client_en, c.name_ar client_ar, s.name site_name, "
+           "u.full_name requested_by FROM visit_requests vr "
+           "JOIN clients c ON c.id=vr.client_id "
+           "LEFT JOIN sites s ON s.id=vr.site_id "
+           "LEFT JOIN users u ON u.id=vr.created_by")
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY CASE vr.status WHEN 'pending' THEN 0 ELSE 1 END, vr.created_at DESC"
+    return db.query(sql, params)
+
+
+@route("POST", r"/api/visit-requests")
+def create_visit_request(ctx):
+    u, b = ctx.user, ctx.body
+    if u["role"] == "client":
+        cid = u["client_id"]
+    else:
+        require_perm(u, "visits.create")
+        cid = b.get("client_id")
+    if not cid:
+        raise ApiError(400, "Client is required")
+    _assert_client_access(u, cid)
+    site_id = b.get("site_id") or None
+    if site_id and not db.query("SELECT 1 FROM sites WHERE id=? AND client_id=?", (site_id, cid), one=True):
+        raise ApiError(400, "Invalid location for this client")
+    rid = db.execute(
+        "INSERT INTO visit_requests(client_id,site_id,preferred_date,note,created_by) "
+        "VALUES(?,?,?,?,?)", (cid, site_id, b.get("preferred_date"), b.get("note"), u["id"]))
+    cl = db.query("SELECT name_en FROM clients WHERE id=?", (cid,), one=True)
+    _notify_roles(("admin", "manager"), "visit_request", "New visit request",
+                  f"{cl['name_en'] if cl else 'A client'} requested a visit"
+                  + (f" for {b['preferred_date']}" if b.get("preferred_date") else ""),
+                  "requests", rid, f"vreq:{rid}", exclude=u["id"])
+    return db.query("SELECT * FROM visit_requests WHERE id=?", (rid,), one=True)
+
+
+def _get_request_or_404(rid):
+    r = db.query("SELECT * FROM visit_requests WHERE id=?", (rid,), one=True)
+    if not r:
+        raise ApiError(404, "Request not found")
+    return r
+
+
+@route("POST", r"/api/visit-requests/(\d+)/approve")
+def approve_visit_request(ctx):
+    require_perm(ctx.user, "visits.create")
+    r = _get_request_or_404(int(ctx.params[0]))
+    if r["status"] != "pending":
+        raise ApiError(400, "Request already handled")
+    b = ctx.body
+    day = r["preferred_date"] or db.query("SELECT date('now') d", one=True)["d"]
+    start = b.get("scheduled_start") or (day + " 09:00:00")
+    site_id = b.get("site_id", r["site_id"]) or None
+    with db.transaction() as cx:
+        vid = cx.execute(
+            "INSERT INTO visits(client_id,site_id,agent_id,service_type_id,scheduled_start,"
+            "status,notes) VALUES(?,?,?,?,?,?,?)",
+            (r["client_id"], site_id, b.get("agent_id"), b.get("service_type_id"), start,
+             "scheduled", r["note"])).lastrowid
+        cx.execute("UPDATE visit_requests SET status='approved', visit_id=?, handled_by=?, "
+                   "handled_at=datetime('now') WHERE id=?", (vid, ctx.user["id"], r["id"]))
+    audit(ctx, "visit_request.approve", "visit", vid, f"from request #{r['id']}")
+    # tell the requester their request was scheduled
+    if r["created_by"]:
+        _notify(r["created_by"], "request_approved", "Visit scheduled",
+                f"Your visit request was scheduled for {start[:16]}", "visit", vid,
+                f"vreqok:{r['id']}")
+    return db.query("SELECT * FROM visits WHERE id=?", (vid,), one=True)
+
+
+@route("POST", r"/api/visit-requests/(\d+)/decline")
+def decline_visit_request(ctx):
+    require_perm(ctx.user, "visits.create")
+    r = _get_request_or_404(int(ctx.params[0]))
+    if r["status"] != "pending":
+        raise ApiError(400, "Request already handled")
+    db.execute("UPDATE visit_requests SET status='declined', handled_by=?, handled_at=datetime('now') "
+               "WHERE id=?", (ctx.user["id"], r["id"]))
+    audit(ctx, "visit_request.decline", "visit_request", r["id"])
+    if r["created_by"]:
+        _notify(r["created_by"], "request_declined", "Visit request declined",
+                ctx.body.get("reason") or "Your visit request was declined.", "requests", r["id"],
+                f"vreqno:{r['id']}")
+    return {"ok": True}
 
 
 # --------------------------------------------------------------------------
@@ -1958,6 +2572,7 @@ def _maybe_generate_reminders():
             return
         _reminder_last = now
     try:
+        _generate_due_invoices()  # recurring billing, alongside reminders (idempotent)
         _generate_reminders()
     except Exception as e:
         print("reminder gen:", e)
@@ -2009,6 +2624,31 @@ def _generate_reminders():
             if _notify(m["id"], "invoice_overdue", "Invoice overdue",
                        f"{inv['number']} — {inv['name_en']} ({inv['total']})", "invoice", inv["id"],
                        f"ovd:{inv['id']}:{m['id']}"):
+                created += 1
+    # SLA breaches: a contract site whose service has slipped past its cadence
+    # (period + grace) -> alert managers/admins. Dedup per contract per month so
+    # a standing breach re-alerts monthly rather than every scan.
+    bucket = db.query("SELECT strftime('%Y-%m','now') m", one=True)["m"]
+    for r in _sla_rows():
+        if r["status"] != "overdue":
+            continue
+        name = r["client_en"] + (f" — {r['site_name']}" if r["site_name"] else "")
+        for m in managers:
+            if _notify(m["id"], "sla_breach", "SLA breach — service overdue",
+                       f"{name}: {r['frequency']} service is {r['days_overdue']} days overdue",
+                       "dispatch", r["contract_id"], f"sla:{r['contract_id']}:{bucket}:{m['id']}"):
+                created += 1
+    # low-stock items -> alert managers/admins to reorder. Only flag items that
+    # have a reorder level set (reorder_level=0 means "not tracked"). Dedup per
+    # item per month so a standing shortage re-alerts monthly, not every scan.
+    for ch in db.query(
+        "SELECT id, name_en, unit, quantity_in_stock, reorder_level FROM chemicals "
+        "WHERE reorder_level > 0 AND quantity_in_stock <= reorder_level"):
+        for m in managers:
+            if _notify(m["id"], "low_stock", "Low stock — reorder",
+                       f"{ch['name_en']}: {ch['quantity_in_stock']:g} {ch['unit']} left "
+                       f"(reorder at {ch['reorder_level']:g} {ch['unit']})",
+                       "chemicals", ch["id"], f"restock:{ch['id']}:{bucket}:{m['id']}"):
                 created += 1
     return created
 
@@ -2171,6 +2811,165 @@ def client_pest_trends(ctx):
             "totals": totals, "last_inspection": last["v"] if last else None}
 
 
+def _months_between(d_from, d_to, cap=24):
+    """Continuous 'YYYY-MM' buckets spanning [d_from, d_to], capped to the most
+    recent `cap` months so an open-ended range can't produce a huge series."""
+    import datetime
+    a = datetime.date.fromisoformat(d_from).replace(day=1)
+    b = datetime.date.fromisoformat(d_to).replace(day=1)
+    out, y, m = [], a.year, a.month
+    while (y, m) <= (b.year, b.month):
+        out.append(f"{y:04d}-{m:02d}")
+        m += 1
+        if m > 12:
+            m = 1; y += 1
+    return out[-cap:]
+
+
+@route("GET", r"/api/clients/(\d+)/audit-pack")
+def client_audit_pack(ctx):
+    """One aggregated payload for the auditor "Audit Pack" binder: per-site
+    service history, device/pest-activity trends, the chemical usage log (with
+    application rates + SDS/label attachments), technician licence/cert numbers,
+    and corrective actions derived from report findings + flagged devices. The
+    frontend renders this into a single branded printable PDF."""
+    cid = int(ctx.params[0])
+    _assert_client_access(ctx.user, cid)
+    if ctx.user["role"] != "client":
+        require_perm(ctx.user, "analytics.view")
+    site_id = ctx.query.get("site_id")
+    import datetime
+    today = datetime.date.today()
+
+    def _d(s, default):
+        try:
+            return datetime.date.fromisoformat((s or "")[:10]).isoformat()
+        except (ValueError, TypeError):
+            return default
+    try:
+        year_ago = today.replace(year=today.year - 1).isoformat()
+    except ValueError:           # Feb 29 guard
+        year_ago = today.replace(month=today.month, day=28, year=today.year - 1).isoformat()
+    d_from = _d(ctx.query.get("from"), year_ago)
+    d_to = _d(ctx.query.get("to"), today.isoformat())
+    vf, vp = _site_filter(site_id, "v.site_id")
+    dr = " AND date(v.scheduled_start) BETWEEN ? AND ?"
+    drp = (d_from, d_to)
+
+    client = db.query(
+        "SELECT id,name_en,name_ar,contact_person,phone,email,address_en,address_ar,city "
+        "FROM clients WHERE id=?", (cid,), one=True)
+    if not client:
+        raise ApiError(404, "Client not found")
+    site = None
+    if site_id and site_id not in ("none", "0", ""):
+        site = db.query("SELECT id,name,address,area FROM sites WHERE id=? AND client_id=?",
+                        (site_id, cid), one=True)
+
+    # --- service history (per site): each visit + its report summary -----------
+    history = db.query(
+        "SELECT v.id, v.scheduled_start, v.status, v.visit_number, "
+        "s.name site_name, st.name_en svc_en, st.name_ar svc_ar, u.full_name agent, "
+        "r.severity, r.summary, r.findings, r.recommendations, r.pests_found, "
+        "r.branch_issue, r.status report_status, "
+        "r.customer_signature, r.technician_signature "
+        "FROM visits v LEFT JOIN sites s ON s.id=v.site_id "
+        "LEFT JOIN service_types st ON st.id=v.service_type_id "
+        "LEFT JOIN users u ON u.id=v.agent_id "
+        "LEFT JOIN reports r ON r.visit_id=v.id "
+        "WHERE v.client_id=?" + vf + dr + " ORDER BY v.scheduled_start DESC",
+        (cid, *vp, *drp))
+
+    # --- chemical usage log (application rate = quantity / area_treated) -------
+    chem_log = db.query(
+        "SELECT v.scheduled_start, s.name site_name, u.full_name agent, "
+        "ch.name_en, ch.name_ar, ch.active_ingredient, ch.reg_no, ch.hazard_class, "
+        "cu.quantity, ch.unit, cu.area_treated "
+        "FROM chemical_usage cu JOIN visits v ON v.id=cu.visit_id "
+        "JOIN chemicals ch ON ch.id=cu.chemical_id "
+        "LEFT JOIN sites s ON s.id=v.site_id LEFT JOIN users u ON u.id=v.agent_id "
+        "WHERE v.client_id=?" + vf + dr + " ORDER BY v.scheduled_start DESC",
+        (cid, *vp, *drp))
+
+    # distinct products used + their SDS / label attachments (chemical photos)
+    products = db.query(
+        "SELECT DISTINCT ch.id, ch.name_en, ch.name_ar, ch.active_ingredient, "
+        "ch.reg_no, ch.hazard_class, ch.unit "
+        "FROM chemical_usage cu JOIN chemicals ch ON ch.id=cu.chemical_id "
+        "JOIN visits v ON v.id=cu.visit_id "
+        "WHERE v.client_id=?" + vf + dr + " ORDER BY ch.name_en", (cid, *vp, *drp))
+    for p in products:
+        p["attachments"] = db.query(
+            "SELECT filename, original_name, caption FROM photos "
+            "WHERE entity_type='chemical' AND entity_id=? ORDER BY uploaded_at", (p["id"],))
+
+    # --- technicians who serviced + their licence / certification -------------
+    technicians = db.query(
+        "SELECT u.id, u.full_name, u.specialization, u.license_no, u.license_expiry, "
+        "COUNT(v.id) visits, MAX(v.scheduled_start) last_visit "
+        "FROM visits v JOIN users u ON u.id=v.agent_id "
+        "WHERE v.client_id=?" + vf + dr + " GROUP BY u.id ORDER BY u.full_name",
+        (cid, *vp, *drp))
+
+    # --- corrective actions, derived from report findings ---------------------
+    corrective = db.query(
+        "SELECT v.scheduled_start, s.name site_name, u.full_name agent, "
+        "r.severity, r.findings, r.pests_found, r.recommendations, r.branch_issue, "
+        "v.status visit_status "
+        "FROM reports r JOIN visits v ON v.id=r.visit_id "
+        "LEFT JOIN sites s ON s.id=v.site_id LEFT JOIN users u ON u.id=v.agent_id "
+        "WHERE v.client_id=?" + vf + dr +
+        " AND (COALESCE(r.recommendations,'')<>'' OR COALESCE(r.branch_issue,'')<>'' "
+        "      OR r.severity IN ('high','critical')) "
+        "ORDER BY v.scheduled_start DESC", (cid, *vp, *drp))
+
+    # devices currently flagged (needs service / live activity) — open actions
+    mf, mpx = _site_filter(site_id, "mp.site_id")
+    device_alerts = db.query(
+        "SELECT k.label, k.type, k.status, mp.name map_name, "
+        "MAX(e.recorded_at) last_seen FROM map_markers k JOIN maps mp ON mp.id=k.map_id "
+        "LEFT JOIN marker_events e ON e.marker_id=k.id "
+        "WHERE mp.client_id=?" + mf + " AND k.status IN ('needs_service','activity') "
+        "GROUP BY k.id ORDER BY k.status DESC", (cid, *mpx))
+
+    # --- pest-activity trend over the range (device monitoring) ---------------
+    months = _months_between(d_from, d_to)
+    ef, ep = _site_filter(site_id, "(SELECT site_id FROM maps WHERE id=marker_events.map_id)")
+    md = " AND date(recorded_at) BETWEEN ? AND ?"
+    insp_by = {r["m"]: r["v"] for r in db.query(
+        "SELECT strftime('%Y-%m',recorded_at) m, COUNT(*) v FROM marker_events "
+        "WHERE client_id=?" + ef + md + " GROUP BY m", (cid, *ep, d_from, d_to))}
+    act_by = {r["m"]: r["v"] for r in db.query(
+        "SELECT strftime('%Y-%m',recorded_at) m, COUNT(*) v FROM marker_events "
+        "WHERE client_id=? AND status='activity'" + ef + md + " GROUP BY m",
+        (cid, *ep, d_from, d_to))}
+    trend_months = [{"m": k, "inspections": insp_by.get(k, 0) or 0,
+                     "detections": act_by.get(k, 0) or 0} for k in months]
+    by_type = db.query(
+        "SELECT type, COUNT(*) detections FROM marker_events "
+        "WHERE client_id=? AND status='activity'" + ef + md +
+        " GROUP BY type ORDER BY detections DESC", (cid, *ep, d_from, d_to))
+
+    completed = sum(1 for h in history if h["status"] == "completed")
+    signed = sum(1 for h in history if h["customer_signature"] and h["technician_signature"])
+    summary = {
+        "visits": len(history), "completed": completed, "signed": signed,
+        "products": len(products), "chem_records": len(chem_log),
+        "technicians": len(technicians), "corrective": len(corrective),
+        "detections": sum(m["detections"] for m in trend_months),
+        "open_devices": len(device_alerts),
+    }
+    return {
+        "client": client, "site": site,
+        "range": {"from": d_from, "to": d_to},
+        "summary": summary,
+        "history": history, "chem_log": chem_log, "products": products,
+        "technicians": technicians, "corrective": corrective,
+        "device_alerts": device_alerts,
+        "trend": {"months": trend_months, "by_type": by_type},
+    }
+
+
 # --------------------------------------------------------------------------
 # E-SIGNATURE (capture on report)
 # --------------------------------------------------------------------------
@@ -2311,6 +3110,24 @@ def delete_photo(ctx):
 # --------------------------------------------------------------------------
 # SITE MAPS + DEVICE MARKERS (traps, bait stations, monitors …)
 # --------------------------------------------------------------------------
+@route("GET", r"/api/maps")
+def list_all_maps(ctx):
+    """Every map the user may see (staff: all; client: own), with client/site
+    names and device counts. Powers the central Devices / QR-labels page."""
+    if ctx.user["role"] != "client":
+        require_perm(ctx.user, "maps.view")
+    where, params = "", []
+    cid = client_scope_id(ctx.user)
+    if cid is not None:
+        where, params = " WHERE m.client_id=?", [cid]
+    return db.query(
+        "SELECT m.*, c.name_en client_en, c.name_ar client_ar, s.name site_name, "
+        "(SELECT COUNT(*) FROM map_markers k WHERE k.map_id=m.id) marker_count "
+        "FROM maps m JOIN clients c ON c.id=m.client_id "
+        "LEFT JOIN sites s ON s.id=m.site_id" + where +
+        " ORDER BY c.name_en, m.created_at DESC", params)
+
+
 @route("GET", r"/api/clients/(\d+)/maps")
 def list_maps(ctx):
     cid = int(ctx.params[0])
@@ -2374,15 +3191,18 @@ def delete_map(ctx):
     return {"ok": True}
 
 
-def _log_marker_event(marker_id, map_id, status, note, user_id):
-    """Append a monitoring record for a device (feeds pest-trend analytics)."""
+def _log_marker_event(marker_id, map_id, status, note, user_id,
+                      source="manual", lat=None, lng=None):
+    """Append a monitoring record for a device (feeds pest-trend analytics).
+    source='scan' marks a record made via the QR tap-to-inspect flow; lat/lng
+    geo-stamp where the technician was standing when they scanned."""
     client_id = db.query("SELECT client_id FROM maps WHERE id=?", (map_id,), one=True)
     mk = db.query("SELECT type FROM map_markers WHERE id=?", (marker_id,), one=True)
     db.execute(
-        "INSERT INTO marker_events(marker_id,map_id,client_id,type,status,note,recorded_by) "
-        "VALUES(?,?,?,?,?,?,?)",
+        "INSERT INTO marker_events(marker_id,map_id,client_id,type,status,note,"
+        "source,lat,lng,recorded_by) VALUES(?,?,?,?,?,?,?,?,?,?)",
         (marker_id, map_id, client_id["client_id"] if client_id else None,
-         mk["type"] if mk else None, status, note, user_id))
+         mk["type"] if mk else None, status, note, source, lat, lng, user_id))
 
 
 @route("POST", r"/api/maps/(\d+)/markers")
@@ -2394,9 +3214,10 @@ def add_marker(ctx):
     b = ctx.body
     status = b.get("status", "ok")
     nid = db.execute(
-        "INSERT INTO map_markers(map_id,type,label,x,y,status,notes) VALUES(?,?,?,?,?,?,?)",
+        "INSERT INTO map_markers(map_id,type,label,x,y,status,notes,qr_token) "
+        "VALUES(?,?,?,?,?,?,?,?)",
         (mid, b.get("type", "other"), b.get("label"), float(b.get("x", 0)),
-         float(b.get("y", 0)), status, b.get("notes")))
+         float(b.get("y", 0)), status, b.get("notes"), uuid.uuid4().hex))
     _log_marker_event(nid, mid, status, b.get("notes") or "Device installed", ctx.user["id"])
     return db.query("SELECT * FROM map_markers WHERE id=?", (nid,), one=True)
 
@@ -2429,6 +3250,362 @@ def delete_marker(ctx):
     require_perm(ctx.user, "maps.delete")
     db.execute("DELETE FROM map_markers WHERE id=?", (int(ctx.params[0]),))
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------
+# QR-CODED DEVICES — scan a station's label to inspect it in two seconds.
+# A marker's qr_token is printed as a QR that deep-links to /scan/<token>.
+# --------------------------------------------------------------------------
+_SCAN_STATUSES = ("ok", "needs_service", "activity", "missing")
+
+
+def _marker_by_token(token):
+    """Resolve a QR token to its device + map/client/site context (or None)."""
+    return db.query(
+        "SELECT k.*, m.client_id, m.site_id, m.name map_name, m.filename map_filename, "
+        "c.name_en client_en, c.name_ar client_ar, s.name site_name "
+        "FROM map_markers k JOIN maps m ON m.id=k.map_id "
+        "JOIN clients c ON c.id=m.client_id LEFT JOIN sites s ON s.id=m.site_id "
+        "WHERE k.qr_token=?", (token,), one=True)
+
+
+@route("GET", r"/api/scan/([0-9a-fA-F]+)")
+def scan_device(ctx):
+    """Landing data for a scanned device: identity + recent inspection trail."""
+    mk = _marker_by_token(ctx.params[0])
+    if not mk:
+        raise ApiError(404, "Unknown device code")
+    _assert_client_access(ctx.user, mk["client_id"])
+    if ctx.user["role"] != "client":
+        require_perm(ctx.user, "maps.view")
+    mk["history"] = db.query(
+        "SELECT e.status, e.note, e.source, e.lat, e.lng, e.recorded_at, u.full_name recorded_by_name "
+        "FROM marker_events e LEFT JOIN users u ON u.id=e.recorded_by "
+        "WHERE e.marker_id=? ORDER BY e.recorded_at DESC, e.id DESC LIMIT 20", (mk["id"],))
+    return mk
+
+
+@route("POST", r"/api/scan/([0-9a-fA-F]+)")
+def scan_inspect(ctx):
+    """Tap-to-inspect: record one auto time- & geo-stamped inspection event and
+    set the device's current status. The fast path a technician uses on site."""
+    mk = _marker_by_token(ctx.params[0])
+    if not mk:
+        raise ApiError(404, "Unknown device code")
+    _assert_client_access(ctx.user, mk["client_id"])
+    require_perm(ctx.user, "maps.edit")
+    b = ctx.body
+    status = b.get("status", "ok")
+    if status not in _SCAN_STATUSES:
+        raise ApiError(400, "Invalid status")
+
+    def _coord(v):
+        try:
+            f = float(v)
+            return f if math.isfinite(f) else None
+        except (TypeError, ValueError):
+            return None
+    lat, lng = _coord(b.get("lat")), _coord(b.get("lng"))
+    with db.transaction() as cx:
+        cx.execute("UPDATE map_markers SET status=? WHERE id=?", (status, mk["id"]))
+        cx.execute(
+            "INSERT INTO marker_events(marker_id,map_id,client_id,type,status,note,"
+            "source,lat,lng,recorded_by) VALUES(?,?,?,?,?,?,'scan',?,?,?)",
+            (mk["id"], mk["map_id"], mk["client_id"], mk["type"], status,
+             (b.get("note") or "").strip() or None, lat, lng, ctx.user["id"]))
+    audit(ctx, "device.inspect", "marker", mk["id"], f"{mk.get('label') or mk['type']} -> {status}")
+    return {"ok": True, "status": status, "marker_id": mk["id"]}
+
+
+# --------------------------------------------------------------------------
+# QR-CODED DEVICES — standalone codes (LIT0001…) printed onto traps. Admin
+# generates a batch per type + assigns to a client; agents scan on a visit to
+# file each device's report (proof-of-presence). Independent of site maps.
+# --------------------------------------------------------------------------
+DEVICE_TYPES = {                       # device type -> printed code prefix
+    "light_trap":   "LIT",
+    "glue_station": "GLU",
+    "bait_station": "BAI",
+    "fly_trap":     "FLY",
+}
+_DEV_STATUSES = ("ok", "activity", "needs_service", "missing")
+
+# The per-type follow-up fields captured on a scan (mirrors the printed follow-up
+# form). Values are validated only for shape here — the client renders the inputs
+# from an equivalent DEVICE_FIELDS map. Keys not listed for a type are dropped.
+# Numeric fields are coerced with _finite; everything else is stored as a string.
+DEVICE_FIELD_KEYS = {
+    "bait_station": {"bait_status", "consumption_pct", "station_condition", "cleaned"},
+    "fly_trap":     {"washed", "water_refilled", "trap_condition", "fly_density"},
+    "glue_station": {"glue_status", "caught", "station_condition", "cleaned"},
+    "light_trap":   {"trap_condition", "electricity", "lamp_status", "sheet_status", "fly_count"},
+}
+_DEVICE_NUM_FIELDS = {"consumption_pct", "fly_density", "fly_count"}
+
+
+def _clean_device_details(dtype, raw):
+    """Keep only the whitelisted follow-up fields for this device type, coercing
+    numeric fields. Returns a JSON string, or None when nothing usable is given."""
+    if not isinstance(raw, dict):
+        return None
+    allowed = DEVICE_FIELD_KEYS.get(dtype, set())
+    out = {}
+    for k in allowed:
+        if k not in raw:
+            continue
+        v = raw[k]
+        if v is None or v == "":
+            continue
+        if k in _DEVICE_NUM_FIELDS:
+            n = _finite(v)
+            if n is not None:
+                out[k] = n
+        else:
+            out[k] = str(v)[:80]
+    return json.dumps(out) if out else None
+
+
+def _finite(v):
+    try:
+        f = float(v)
+        return f if math.isfinite(f) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _device_by_code(code):
+    return db.query(
+        "SELECT d.*, c.name_en client_en, c.name_ar client_ar, s.name site_name "
+        "FROM devices d LEFT JOIN clients c ON c.id=d.client_id "
+        "LEFT JOIN sites s ON s.id=d.site_id WHERE d.code=?", (code.upper(),), one=True)
+
+
+def _agent_active_visit(user, client_id):
+    """The visit a scan attaches to: an in-progress visit at this client,
+    preferring one owned by the scanning agent. None if there isn't one."""
+    if not client_id:
+        return None
+    rows = db.query("SELECT id, agent_id FROM visits WHERE client_id=? AND "
+                    "status='in_progress' ORDER BY scheduled_start DESC", (client_id,))
+    if not rows:
+        return None
+    own = next((r for r in rows if r["agent_id"] == user["id"]), None)
+    return (own or rows[0])["id"]
+
+
+@route("GET", r"/api/devices")
+def list_devices(ctx):
+    if ctx.user["role"] != "client":
+        require_perm(ctx.user, "maps.view")
+    where, params = [], []
+    cid = client_scope_id(ctx.user)
+    if cid is not None:
+        where.append("d.client_id=?"); params.append(cid)
+    q = ctx.query
+    if q.get("client_id"):
+        where.append("d.client_id=?"); params.append(int(q["client_id"]))
+    if q.get("type") in DEVICE_TYPES:
+        where.append("d.type=?"); params.append(q["type"])
+    if q.get("unassigned") == "1":
+        where.append("d.client_id IS NULL")
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    return db.query(
+        "SELECT d.*, c.name_en client_en, c.name_ar client_ar, s.name site_name, "
+        "(SELECT MAX(recorded_at) FROM device_inspections di WHERE di.device_id=d.id) last_seen "
+        "FROM devices d LEFT JOIN clients c ON c.id=d.client_id "
+        "LEFT JOIN sites s ON s.id=d.site_id" + clause + " ORDER BY d.type, d.code", params)
+
+
+@route("POST", r"/api/devices/generate")
+def generate_devices(ctx):
+    """Mint the next N sequential codes for a device type (LIT0001, LIT0002…).
+    Numbers continue from the highest existing code and are never reused."""
+    require_perm(ctx.user, "maps.create")
+    b = ctx.body
+    dtype = b.get("type")
+    if dtype not in DEVICE_TYPES:
+        raise ApiError(400, "Invalid device type")
+    try:
+        count = int(b.get("count", 0))
+    except (TypeError, ValueError):
+        count = 0
+    if count < 1 or count > 500:
+        raise ApiError(400, "Count must be between 1 and 500")
+    prefix = DEVICE_TYPES[dtype]
+    cid = b.get("client_id") or None
+    sid = b.get("site_id") or None
+    if cid is not None:
+        cid = int(cid); _assert_client_access(ctx.user, cid)
+    created = []
+    with db.transaction() as cx:
+        row = cx.execute(
+            "SELECT MAX(CAST(substr(code,?) AS INTEGER)) m FROM devices WHERE type=?",
+            (len(prefix) + 1, dtype)).fetchone()
+        start = (row["m"] or 0) + 1
+        for i in range(start, start + count):
+            code = f"{prefix}{i:04d}"
+            cx.execute("INSERT INTO devices(code,type,client_id,site_id) VALUES(?,?,?,?)",
+                       (code, dtype, cid, sid))
+            created.append(code)
+    audit(ctx, "device.generate", "device", None,
+          f"{count}x {dtype} ({created[0]}..{created[-1]})")
+    return {"ok": True, "type": dtype, "codes": created}
+
+
+@route("POST", r"/api/devices/assign")
+def assign_devices(ctx):
+    require_perm(ctx.user, "maps.edit")
+    b = ctx.body
+    ids = b.get("ids") or []
+    if not isinstance(ids, list) or not ids:
+        raise ApiError(400, "No devices selected")
+    if not b.get("client_id"):
+        raise ApiError(400, "client_id required")
+    cid = int(b["client_id"]); _assert_client_access(ctx.user, cid)
+    sid = b.get("site_id") or None
+    with db.transaction() as cx:
+        for did in ids:
+            cx.execute("UPDATE devices SET client_id=?, site_id=? WHERE id=?",
+                       (cid, sid, int(did)))
+    audit(ctx, "device.assign", "device", None, f"{len(ids)} -> client {cid}")
+    return {"ok": True, "count": len(ids)}
+
+
+@route("PUT", r"/api/devices/(\d+)")
+def update_device(ctx):
+    require_perm(ctx.user, "maps.edit")
+    did = int(ctx.params[0])
+    if not db.query("SELECT id FROM devices WHERE id=?", (did,), one=True):
+        raise ApiError(404, "Device not found")
+    b = ctx.body
+    nullable = ("label", "client_id", "site_id")
+    fields, vals = [], []
+    for c in ("label", "status", "client_id", "site_id", "active"):
+        if c in b:
+            fields.append(f"{c}=?")
+            vals.append((b[c] or None) if c in nullable else b[c])
+    if not fields:
+        raise ApiError(400, "Nothing to update")
+    vals.append(did)
+    db.execute(f"UPDATE devices SET {','.join(fields)} WHERE id=?", vals)
+    return db.query("SELECT * FROM devices WHERE id=?", (did,), one=True)
+
+
+@route("DELETE", r"/api/devices/(\d+)")
+def delete_device(ctx):
+    require_perm(ctx.user, "maps.delete")
+    db.execute("DELETE FROM devices WHERE id=?", (int(ctx.params[0]),))
+    return {"ok": True}
+
+
+@route("GET", r"/api/scan/([A-Za-z]{3}\d{4,})")
+def scan_device_code(ctx):
+    """Landing data when a printed device code is scanned: identity + recent
+    inspections + which in-progress visit this scan would file against."""
+    d = _device_by_code(ctx.params[0])
+    if not d:
+        raise ApiError(404, "Unknown device code")
+    if d["client_id"]:
+        _assert_client_access(ctx.user, d["client_id"])
+    if ctx.user["role"] != "client":
+        require_perm(ctx.user, "maps.view")
+    d["history"] = db.query(
+        "SELECT di.status, di.findings, di.note, di.source, di.lat, di.lng, di.recorded_at, "
+        "di.visit_id, di.details, u.full_name recorded_by_name FROM device_inspections di "
+        "LEFT JOIN users u ON u.id=di.recorded_by WHERE di.device_id=? "
+        "ORDER BY di.recorded_at DESC, di.id DESC LIMIT 20", (d["id"],))
+    d["active_visit_id"] = (_agent_active_visit(ctx.user, d["client_id"])
+                            if ctx.user["role"] != "client" else None)
+    return d
+
+
+@route("POST", r"/api/scan/([A-Za-z]{3}\d{4,})")
+def inspect_device_code(ctx):
+    """File one device's inspection for a visit (the scan-to-report action)."""
+    d = _device_by_code(ctx.params[0])
+    if not d:
+        raise ApiError(404, "Unknown device code")
+    if not d["client_id"]:
+        raise ApiError(409, "Device not assigned to a client yet")
+    _assert_client_access(ctx.user, d["client_id"])
+    require_perm(ctx.user, "maps.edit")
+    b = ctx.body
+    status = b.get("status", "ok")
+    if status not in _DEV_STATUSES:
+        raise ApiError(400, "Invalid status")
+    vid = b.get("visit_id") or _agent_active_visit(ctx.user, d["client_id"])
+    if vid:
+        v = db.query("SELECT client_id FROM visits WHERE id=?", (int(vid),), one=True)
+        if not v or v["client_id"] != d["client_id"]:
+            vid = None                      # ignore a visit that isn't this client's
+    lat, lng = _finite(b.get("lat")), _finite(b.get("lng"))
+    details = _clean_device_details(d["type"], b.get("details"))
+    with db.transaction() as cx:
+        cx.execute("UPDATE devices SET status=? WHERE id=?", (status, d["id"]))
+        cx.execute(
+            "INSERT INTO device_inspections(device_id,visit_id,client_id,status,findings,"
+            "note,source,lat,lng,recorded_by,details) VALUES(?,?,?,?,?,?,'scan',?,?,?,?)",
+            (d["id"], int(vid) if vid else None, d["client_id"], status,
+             (b.get("findings") or "").strip() or None,
+             (b.get("note") or "").strip() or None, lat, lng, ctx.user["id"], details))
+    audit(ctx, "device.inspect", "device", d["id"], f"{d['code']} -> {status}")
+    return {"ok": True, "status": status, "code": d["code"],
+            "visit_id": int(vid) if vid else None}
+
+
+@route("GET", r"/api/visits/(\d+)/devices")
+def visit_device_coverage(ctx):
+    """Per-visit device coverage: how many of the client's devices were scanned
+    on this visit, and which are still pending."""
+    vid = int(ctx.params[0])
+    v = db.query("SELECT * FROM visits WHERE id=?", (vid,), one=True)
+    if not v:
+        raise ApiError(404, "Visit not found")
+    _assert_visit_access(ctx.user, v)
+    conds, cparams = ["d.client_id=?", "d.active=1"], [v["client_id"]]
+    if v["site_id"]:
+        conds.append("(d.site_id=? OR d.site_id IS NULL)"); cparams.append(v["site_id"])
+    devs = db.query(
+        "SELECT d.id, d.code, d.type, d.label, d.status, "
+        "(SELECT MAX(recorded_at) FROM device_inspections di "
+        " WHERE di.device_id=d.id AND di.visit_id=?) scanned_at "
+        "FROM devices d WHERE " + " AND ".join(conds) + " ORDER BY d.type, d.code",
+        [vid] + cparams)
+    scanned = sum(1 for d in devs if d["scanned_at"])
+    return {"total": len(devs), "scanned": scanned, "devices": devs}
+
+
+@route("GET", r"/api/visits/(\d+)/followup")
+def visit_followup(ctx):
+    """Data for the printable follow-up report: visit/client header + each device
+    scanned on this visit, grouped by type, with its latest inspection's fields."""
+    vid = int(ctx.params[0])
+    v = db.query(
+        "SELECT v.id, v.scheduled_start, v.visit_number, v.client_id, v.site_id, "
+        "c.name_en client_en, c.name_ar client_ar, u.full_name agent_name, "
+        "st.name site_name FROM visits v JOIN clients c ON c.id=v.client_id "
+        "LEFT JOIN users u ON u.id=v.agent_id "
+        "LEFT JOIN sites st ON st.id=v.site_id WHERE v.id=?", (vid,), one=True)
+    if not v:
+        raise ApiError(404, "Visit not found")
+    require_perm(ctx.user, "visits.view")
+    _assert_visit_access(ctx.user, v)
+    # Latest inspection per device recorded on THIS visit (proof-of-visit).
+    rows = db.query(
+        "SELECT d.code, d.type, d.label, di.status, di.findings, di.details, di.recorded_at "
+        "FROM device_inspections di JOIN devices d ON d.id=di.device_id "
+        "WHERE di.visit_id=? AND di.id=("
+        "  SELECT MAX(di2.id) FROM device_inspections di2 "
+        "  WHERE di2.device_id=di.device_id AND di2.visit_id=di.visit_id) "
+        "ORDER BY d.type, d.code", (vid,))
+    groups = {}
+    for r in rows:
+        try:
+            r["details"] = json.loads(r["details"]) if r.get("details") else {}
+        except (ValueError, TypeError):
+            r["details"] = {}
+        groups.setdefault(r["type"], []).append(r)
+    return {"visit": v, "groups": groups}
 
 
 # --------------------------------------------------------------------------
@@ -2535,6 +3712,49 @@ def _assert_photo_access(user, entity_type, entity_id):
         require_perm(user, "chemicals.view")
     else:
         raise ApiError(400, "Invalid entity_type")
+
+
+def authorize_upload_file(user, filename):
+    """Per-file read authorization for /uploads/<filename>. Closes the last
+    cross-tenant leak: a logged-in user guessing another tenant's file UUID.
+    Returns True if `user` may read this specific file.
+
+    Shared, non-tenant assets (the company logo + chemical SDS/label docs) are
+    readable by any authenticated user; everything else is scoped to the owning
+    client/visit the same way the API enforces it. Admins/managers see all."""
+    if user["role"] in ("admin", "manager"):
+        return True
+    if filename and filename == get_settings().get("logo"):
+        return True  # branding, shown on client-facing certificates/docs
+    # attachments tracked in the photos table
+    ph = db.query("SELECT entity_type, entity_id FROM photos WHERE filename=?", (filename,), one=True)
+    if ph:
+        if ph["entity_type"] == "chemical":
+            return True  # product safety docs (SDS/labels) — shared catalog
+        try:
+            _assert_photo_access(user, ph["entity_type"], ph["entity_id"])
+            return True
+        except ApiError:
+            return False
+    # uploaded site-map picture -> scope to the owning client
+    site = db.query("SELECT client_id FROM sites WHERE map_image=?", (filename,), one=True)
+    if site:
+        try:
+            _assert_client_access(user, site["client_id"]); return True
+        except ApiError:
+            return False
+    # captured e-signatures live on the report -> scope to the visit
+    rep = db.query("SELECT visit_id FROM reports WHERE customer_signature=? OR "
+                   "technician_signature=?", (filename, filename), one=True)
+    if rep:
+        v = db.query("SELECT client_id, agent_id FROM visits WHERE id=?", (rep["visit_id"],), one=True)
+        if v:
+            try:
+                _assert_visit_access(user, v); return True
+            except ApiError:
+                return False
+    # Unknown / orphaned file: deny for restricted roles (fail closed).
+    return False
 
 
 def _client_outstanding(cid):
@@ -2726,22 +3946,25 @@ class Handler(BaseHTTPRequestHandler):
             self._auth_cookie_token = hdr[7:]
         return user
 
-    def _upload_authorised(self):
-        """Uploads are private: require a valid session via the scoped cookie
-        (sent automatically by <img> tags) or a Bearer header (direct fetch)."""
+    def _upload_user(self):
+        """Resolve the session behind an /uploads request -> user row or None.
+        Accepts a Bearer header (direct fetch) or the scoped pc_upl cookie that
+        <img>/<a> tags send automatically."""
         hdr = self.headers.get("Authorization", "")
-        if hdr.startswith("Bearer ") and self._user_from_token(hdr[7:]):
-            return True
+        if hdr.startswith("Bearer "):
+            u = self._user_from_token(hdr[7:])
+            if u:
+                return u
         raw = self.headers.get("Cookie", "")
         if raw:
             try:
                 jar = SimpleCookie()
                 jar.load(raw)
-                if "pc_upl" in jar and self._user_from_token(jar["pc_upl"].value):
-                    return True
+                if "pc_upl" in jar:
+                    return self._user_from_token(jar["pc_upl"].value)
             except Exception:
                 pass
-        return False
+        return None
 
     def _json(self, status, payload):
         data = json.dumps(payload, default=str).encode()
@@ -2788,11 +4011,15 @@ class Handler(BaseHTTPRequestHandler):
             path = "/index.html"
         if path.startswith("/uploads/"):
             # Uploaded files (photos, signatures, maps, logos, attachments) are
-            # private — only a logged-in session may read them. Filenames are
-            # random UUIDs, but that alone is not access control.
-            if not self._upload_authorised():
+            # private and per-file authorized: a logged-in session AND permission
+            # to read that specific file (random UUID filenames are not authz).
+            user = self._upload_user()
+            if not user:
                 return self._json(403, {"error": "Forbidden"})
-            base, rel = UPLOAD_DIR, path[len("/uploads/"):]
+            rel = path[len("/uploads/"):]
+            if not authorize_upload_file(user, os.path.basename(rel)):
+                return self._json(403, {"error": "Forbidden"})
+            base = UPLOAD_DIR
         else:
             base, rel = STATIC_DIR, path.lstrip("/")
         full = os.path.normpath(os.path.join(base, rel))
@@ -2845,9 +4072,10 @@ def main():
     if db.query("SELECT COUNT(*) c FROM users", one=True)["c"] == 0:
         import seed
         seed.run()
-    # generate any due recurring visits + reminders at startup
+    # generate any due recurring visits + invoices + reminders at startup
     try:
         _generate_due_visits()
+        _generate_due_invoices()
         _generate_reminders()
     except Exception as e:
         print("startup generation:", e)

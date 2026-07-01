@@ -436,3 +436,104 @@ tr.clickable:hover { background: var(--green-l); }
 .offline-status.hidden { display: none !important; }
 /* Engineer materials balance: a depleted / over-used line. */
 tr.bal-empty td { background: var(--red-l); color: var(--red); }
+
+/* QR-coded devices: scan-to-inspect landing + label print preview. */
+.scan-wrap { max-width: 540px; margin: 0 auto; padding: 6px; }
+.scan-card { background: #fff; border-radius: var(--radius); box-shadow: var(--shadow); padding: 18px; }
+.scan-head { display: flex; gap: 14px; align-items: center; }
+.scan-ic { width: 54px; height: 54px; border-radius: 14px; display: flex; align-items: center;
+  justify-content: center; font-size: 26px; color: #fff; flex: none; }
+.scan-title { font-size: 19px; font-weight: 700; }
+.scan-now { margin: 14px 0; padding: 10px 14px; background: var(--bg); border-radius: 10px; }
+.scan-q { font-weight: 600; margin: 6px 0 8px; }
+.scan-sts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.scan-st { padding: 16px 10px; border-radius: 12px; border: 2px solid var(--c); color: var(--c);
+  background: #fff; font-size: 15px; font-weight: 700; cursor: pointer; transition: .12s; }
+.scan-st:hover { background: var(--c); color: #fff; }
+.scan-st:active { transform: scale(.97); }
+.scan-note { width: 100%; margin-top: 10px; padding: 10px; border: 1.5px solid var(--line);
+  border-radius: 10px; font: inherit; resize: vertical; }
+.scan-geo { display: flex; align-items: center; gap: 8px; margin-top: 10px; color: var(--muted); font-size: 13px; }
+.scan-hist { margin-top: 18px; }
+.scan-hist h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 8px; }
+.scan-ev { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.scan-ev .dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 5px; flex: none; }
+.scan-ev .se-main { flex: 1; min-width: 0; }
+.qr-mini { display: flex; align-items: center; gap: 12px; margin: 4px 0 10px; }
+.qr-mini-img { width: 84px; height: 84px; flex: none; }
+.qr-mini-img svg { width: 100%; height: 100%; }
+
+/* Device QR registry toolbar + scan status lines. */
+.dev-toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+.dev-toolbar .spacer { flex: 1; }
+.toolbar-select { padding: 7px 10px; border: 1.5px solid var(--line); border-radius: 9px; font: inherit; background: #fff; }
+.scan-now.ok-line { background: var(--green-l); color: var(--green-d); }
+.scan-now.warn-line { background: #fef3c7; color: #b45309; }
+.warn-line { color: #b45309; }
+
+/* Visit device-coverage progress bar + pending rows. */
+.cov-bar { background: var(--line); border-radius: 6px; height: 8px; overflow: hidden; }
+.cov-bar span { display: block; height: 100%; background: var(--green); transition: width .3s; }
+tr.cov-pending td { background: #fff7ed; }
+
+/* ===== Smart Dispatch board ===== */
+.dispatch-board { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 8px; align-items: flex-start; }
+.dp-col { flex: 0 0 240px; background: var(--bg); border: 1px solid var(--line); border-radius: 12px; }
+.dp-col-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.dp-col-head strong { font-size: 13.5px; }
+.dp-col-head .btn { margin-inline-start: auto; }
+.dp-col-body { padding: 10px; min-height: 90px; display: flex; flex-direction: column; gap: 8px; border-radius: 0 0 12px 12px; transition: background .15s; }
+.dp-col-body.dp-over { background: rgba(31,116,214,.10); outline: 2px dashed var(--brand, #1f74d6); outline-offset: -4px; }
+.dp-card { background: #fff; border: 1px solid var(--line); border-inline-start: 4px solid var(--muted); border-radius: 9px; padding: 9px 10px; cursor: grab; box-shadow: var(--shadow); }
+.dp-card:active { cursor: grabbing; }
+.dp-card.dragging { opacity: .45; }
+.dp-card.b-scheduled { border-inline-start-color: #2563eb; }
+.dp-card.b-in_progress { border-inline-start-color: #d97706; }
+.dp-card.b-completed { border-inline-start-color: #16a34a; }
+.dp-card.b-cancelled { border-inline-start-color: #dc2626; }
+.dp-card-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.dp-time { font-weight: 700; font-size: 13px; }
+.dp-client { font-weight: 600; font-size: 13px; }
+.dp-empty { color: var(--muted); font-size: 12.5px; text-align: center; padding: 16px 6px; border: 1px dashed var(--line); border-radius: 8px; }
+
+/* SLA strip */
+.sla-strip { margin-bottom: 12px; }
+.sla-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.sla-chip { font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 20px; }
+.sla-chip.sla-overdue { background: #fde8e8; color: #b91c1c; }
+.sla-chip.sla-due { background: #fef3e2; color: #b45309; }
+.sla-chip.sla-ok { background: #e7f6ec; color: #15803d; }
+.sla-row { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding: 8px 10px; margin-top: 6px; border-radius: 8px; cursor: pointer; }
+.sla-row.sla-overdue { background: #fef2f2; border-inline-start: 3px solid #dc2626; }
+.sla-row.sla-due { background: #fffbeb; border-inline-start: 3px solid #d97706; }
+
+/* Optimize-route preview modal */
+.opt-summary { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 12px; }
+.opt-summary > div { flex: 1; min-width: 100px; background: var(--bg); border-radius: 10px; padding: 10px 12px; }
+.opt-summary .opt-saved { background: #e7f6ec; }
+.opt-summary strong { font-size: 18px; }
+.opt-order { margin: 4px 0 14px; padding-inline-start: 22px; line-height: 1.9; }
+
+/* ===== Agent "My Day" route list ===== */
+.md-stop { display: flex; align-items: center; gap: 12px; background: #fff; border: 1px solid var(--line); border-inline-start: 4px solid var(--muted); border-radius: 11px; padding: 12px 14px; margin-bottom: 10px; box-shadow: var(--shadow); }
+.md-stop.b-scheduled { border-inline-start-color: #2563eb; }
+.md-stop.b-in_progress { border-inline-start-color: #d97706; }
+.md-stop.b-completed { border-inline-start-color: #16a34a; }
+.md-stop.b-cancelled { border-inline-start-color: #dc2626; opacity: .7; }
+.md-seq { flex: 0 0 30px; height: 30px; border-radius: 50%; background: var(--brand-grad); color: #fff; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+.md-main { flex: 1; min-width: 0; }
+.md-time { font-size: 12.5px; color: var(--muted); margin-bottom: 2px; }
+.md-client { font-weight: 600; font-size: 14px; }
+.md-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
+@media (max-width: 640px) { .md-stop { flex-wrap: wrap; } .md-actions { width: 100%; justify-content: flex-start; } }
+
+/* Owner dashboard cockpit */
+.cockpit-kpis { margin-top: 4px; }
+.sc-trend { font-size: 12px; font-weight: 600; color: var(--muted); margin-top: 3px; }
+.sc-trend.up { color: var(--green); }
+.sc-trend.down { color: var(--red); }
+.util-table td.num, .util-table th.num { text-align: right; white-space: nowrap; }
+.util-table td { vertical-align: middle; }
+.util-bar { height: 8px; border-radius: 6px; background: #e6edf3; overflow: hidden; min-width: 80px; }
+.util-bar span { display: block; height: 100%; border-radius: 6px;
+  background: linear-gradient(90deg, var(--cyan), var(--green)); }

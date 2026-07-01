@@ -151,8 +151,18 @@ async function showApp() {
   renderNav();
   initNotifications();
   initOfflineUI();
+  // A QR deep link (/scan/<token>) opens the scanned device straight away.
+  const scanTok = scanTokenFromUrl();
+  if (scanTok) { navigate("scan", { token: scanTok }); return; }
   navigate("dashboard");
   promptDraftReports();
+}
+
+// Pull the device code/token out of a /scan/<x> deep link, if we're on one.
+// Matches both printed device codes (LIT0001) and legacy marker hex tokens.
+function scanTokenFromUrl() {
+  const m = location.pathname.match(/^\/scan\/([A-Za-z0-9]+)/);
+  return m ? m[1] : null;
 }
 
 // On login, if the user has unfinished (draft) reports, pop up a reminder to
@@ -245,19 +255,24 @@ function navItems() {
   const items = [{ k: "dashboard", i: "📊", t: "nav_dashboard" }];
   if (role() === "client") {
     if (can("visits.view")) items.push({ k: "visits", i: "🗓️", t: "nav_visits" });
+    if (can("visits.view")) items.push({ k: "requests", i: "📨", t: "nav_requests" });
     if (can("contracts.view")) items.push({ k: "contracts", i: "🔁", t: "nav_contracts" });
     if (can("invoices.view")) items.push({ k: "invoices", i: "💳", t: "nav_invoices" });
     if (can("certificates.view")) items.push({ k: "certificates", i: "📄", t: "nav_certificates" });
     items.push({ k: "folder", i: "📁", t: "company_folder" });
   } else {
+    if (role() === "agent") items.push({ k: "myday", i: "🧭", t: "nav_myday" });
     if (can("clients.view")) items.push({ k: "clients", i: "🏢", t: "nav_clients" });
     if (can("clients.view")) items.push({ k: "locations", i: "📍", t: "nav_locations" });
     if (can("visits.view")) items.push({ k: "schedule", i: "🗓️", t: "nav_schedule" });
+    if (can("visits.edit")) items.push({ k: "dispatch", i: "🚚", t: "nav_dispatch" });
+    if (can("visits.view")) items.push({ k: "requests", i: "📨", t: "nav_requests" });
     if (can("visits.view")) items.push({ k: "reports", i: "📋", t: "nav_reports" });
     if (can("calendar.view")) items.push({ k: "calendar", i: "📅", t: "nav_calendar" });
     if (can("contracts.view")) items.push({ k: "contracts", i: "🔁", t: "nav_contracts" });
     if (can("chemicals.view")) items.push({ k: "chemicals", i: "🧪", t: "nav_chemicals" });
     if (can("issues.view")) items.push({ k: "issues", i: "📦", t: "nav_issues" });
+    if (can("maps.view")) items.push({ k: "devices", i: "🏷️", t: "nav_devices" });
     if (can("invoices.view")) items.push({ k: "invoices", i: "💳", t: "nav_invoices" });
     if (can("analytics.view")) items.push({ k: "analytics", i: "📈", t: "nav_analytics" });
     if (can("users.view")) items.push({ k: "agents", i: "👷", t: "nav_agents" });
@@ -277,6 +292,11 @@ function renderNav() {
 let currentView = null;
 async function navigate(view, arg) {
   currentView = view;
+  // Once the user leaves a scanned-device deep link, drop /scan/<token> from the
+  // address bar so a reload returns to the app rather than re-opening the device.
+  if (view !== "scan" && location.pathname.startsWith("/scan/")) {
+    try { history.replaceState({}, "", "/"); } catch (e) { /* ignore */ }
+  }
   $("nav").querySelectorAll(".nav-item").forEach(a =>
     a.classList.toggle("active", a.dataset.view === view));
   const v = $("view");
@@ -288,7 +308,12 @@ async function navigate(view, arg) {
     else if (view === "client" || view === "folder") await viewClientFolder(v, arg);
     else if (view === "client-analytics") await viewClientAnalytics(v, arg);
     else if (view === "map") await viewMap(v, arg);
+    else if (view === "devices") await viewDevices(v);
+    else if (view === "scan") await viewScan(v, arg);
     else if (view === "schedule" || view === "visits") await viewSchedule(v);
+    else if (view === "dispatch") await viewDispatch(v, arg);
+    else if (view === "requests") await viewRequests(v);
+    else if (view === "myday") await viewMyDay(v, arg);
     else if (view === "reports") await viewReports(v);
     else if (view === "report") await viewReportDoc(v, arg);
     else if (view === "visit") await viewVisit(v, arg);
@@ -401,13 +426,54 @@ async function viewDashboard(v) {
       card(money(d.outstanding), t("dash_outstanding"), "💰", "danger");
     if (d.my_visits !== undefined) cards += card(d.my_visits, t("dash_my_visits"), "📋", "c-blue");
   }
-  v.innerHTML = `<div class="page-head"><h2>${t("welcome")}, ${esc(API.user.full_name)}</h2></div>
+  const isClient = d.role === "client";
+  v.innerHTML = `<div class="page-head"><h2>${t("welcome")}, ${esc(API.user.full_name)}</h2>
+    ${isClient ? `<button class="btn" id="dash-req">+ ${t("request_visit")}</button>` : ""}</div>
     <div class="cards">${cards}</div>
+    ${d.cockpit ? cockpitSection(d.cockpit) : ""}
+    ${isClient ? `<div id="dash-sla"></div>` : ""}
     <div class="panel"><h3>${t("nav_schedule")}</h3><div id="dash-visits">${t("loading")}</div></div>`;
+  if ($("dash-req")) $("dash-req").addEventListener("click", requestForm);
+  if (isClient) loadSlaStrip("dash-sla");
   // upcoming visits table
   const visits = await API.get("/visits");
-  $("dash-visits").innerHTML = visitsTable(visits.slice(0, 8));
+  const vlist = Array.isArray(visits) ? visits : (visits.items || []);
+  $("dash-visits").innerHTML = visitsTable(vlist.slice(0, 8));
   wireVisitRows($("dash-visits"));
+}
+
+// Owner cockpit: revenue / overdue billing / SLA health KPI strip + a
+// per-technician utilization panel for the current month.
+function cockpitSection(c) {
+  const prev = Number(c.revenue_prev) || 0, cur = Number(c.revenue_month) || 0;
+  const delta = cur - prev;
+  const pct = prev ? Math.round(delta * 100 / prev) : (cur ? 100 : 0);
+  const arrow = delta > 0 ? "▲" : (delta < 0 ? "▼" : "—");
+  const trendCls = delta > 0 ? "up" : (delta < 0 ? "down" : "");
+  const kpi = (val, label, icon, cls, extra = "") =>
+    `<div class="stat-card ${cls}"><div class="sc-ic">${icon}</div><div>
+      <div class="v">${val}</div><div class="l">${label}</div>${extra}</div></div>`;
+  const cards =
+    kpi(money(c.revenue_month), t("dash_revenue_month"), "💵", "c-green",
+        `<div class="sc-trend ${trendCls}">${arrow} ${Math.abs(pct)}% ${t("vs_last_month")}</div>`) +
+    kpi(c.overdue_invoices, t("dash_overdue_invoices"), "⏰",
+        c.overdue_invoices > 0 ? "danger" : "c-green",
+        `<div class="sc-trend">${money(c.overdue_amount)}</div>`) +
+    kpi(c.sla.overdue, t("dash_sla_overdue"), "🚨", c.sla.overdue > 0 ? "danger" : "c-green") +
+    kpi(c.sla.due_soon, t("dash_sla_due_soon"), "🕒", c.sla.due_soon > 0 ? "warn" : "c-green");
+  const u = c.utilization || [];
+  const rows = u.length ? u.map(a => `<tr>
+      <td>${esc(a.name)}</td>
+      <td class="num">${a.completed}/${a.total}</td>
+      <td><div class="util-bar"><span style="width:${a.rate}%"></span></div></td>
+      <td class="num">${a.rate}%</td></tr>`).join("")
+    : `<tr><td colspan="4" class="empty">${t("none")}</td></tr>`;
+  return `<div class="cards cockpit-kpis">${cards}</div>
+    <div class="panel"><h3>${t("tech_utilization")} <span class="muted">· ${t("this_month")}</span></h3>
+      <table class="util-table"><thead><tr>
+        <th>${t("nav_agents")}</th><th class="num">${t("col_completed_assigned")}</th>
+        <th>${t("rate")}</th><th class="num">%</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>`;
 }
 
 // ====================================================================
@@ -533,19 +599,56 @@ async function viewClientFolder(v, arg) {
   if ($("add-photo")) $("add-photo").addEventListener("click", () => uploadPhotoDialog("client", c.id, () => navigate("client", { id: c.id })));
 }
 
-function siteForm(clientId) {
-  openModal(t("add_site"), `<form id="sf">
-    ${field(t("site_name"), "name")}${field(t("address_en"), "address")}${field(t("area"), "area")}
+function siteForm(clientId, site, after) {
+  const s = site || {};
+  const isEdit = !!site;
+  openModal(isEdit ? t("edit") : t("add_site"), `<form id="sf">
+    ${field(t("site_name"), "name", { value: s.name })}
+    ${field(t("address_en"), "address", { value: s.address })}
+    ${field(t("area"), "area", { value: s.area })}
+    <div class="field"><label>${esc(t("coordinates"))} <span class="muted small">(${esc(t("coords_hint"))})</span></label>
+      <div style="display:flex;gap:6px">
+        <input type="text" name="lat" placeholder="lat" value="${esc(s.lat ?? "")}" style="flex:1" />
+        <input type="text" name="lng" placeholder="lng" value="${esc(s.lng ?? "")}" style="flex:1" />
+        <button type="button" class="btn secondary sm" id="sf-geo">📍 ${esc(t("use_my_location"))}</button>
+      </div>
+      <input type="text" id="sf-paste" placeholder="${esc(t("paste_maps_link"))}" style="margin-top:6px;width:100%" /></div>
     <div class="form-actions"><button type="button" class="btn secondary" id="sf-x">${t("cancel")}</button>
     <button class="btn" type="submit">${t("save")}</button></div></form>`, (root) => {
     $("sf-x").addEventListener("click", closeModal);
+    const latI = root.querySelector("[name=lat]"), lngI = root.querySelector("[name=lng]");
+    // paste a "lat,lng" or a Google Maps link -> fill the coordinate fields
+    root.querySelector("#sf-paste").addEventListener("input", (e) => {
+      const ll = parseLatLng(e.target.value);
+      if (ll) { latI.value = ll[0]; lngI.value = ll[1]; }
+    });
+    $("sf-geo").addEventListener("click", () => {
+      if (!navigator.geolocation) { alert(t("geo_unsupported")); return; }
+      $("sf-geo").textContent = "…";
+      navigator.geolocation.getCurrentPosition(
+        (p) => { latI.value = p.coords.latitude.toFixed(6); lngI.value = p.coords.longitude.toFixed(6); $("sf-geo").textContent = "📍 " + t("use_my_location"); },
+        () => { alert(t("geo_failed")); $("sf-geo").textContent = "📍 " + t("use_my_location"); });
+    });
     root.querySelector("#sf").addEventListener("submit", async (e) => {
       e.preventDefault();
-      const saved = await API.post(`/clients/${clientId}/sites`, formData(root));
+      const d = formData(root);
+      const saved = isEdit ? await API.put(`/sites/${s.id}`, d) : await API.post(`/clients/${clientId}/sites`, d);
       if (handledOffline(saved)) return;
-      closeModal(); navigate("client", { id: clientId });
+      closeModal();
+      if (after) after(); else navigate("client", { id: clientId });
     });
   });
+}
+
+// Parse "lat,lng" or a Google Maps URL into [lat, lng] (mirrors the server).
+function parseLatLng(text) {
+  if (!text) return null;
+  const pats = [/@(-?\d{1,3}\.\d+),(-?\d{1,3}\.\d+)/, /[?&]q=(-?\d{1,3}\.\d+),(-?\d{1,3}\.\d+)/, /^\s*(-?\d{1,3}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)\s*$/];
+  for (const p of pats) {
+    const m = text.match(p);
+    if (m) { const la = +m[1], ln = +m[2]; if (la >= -90 && la <= 90 && ln >= -180 && ln <= 180) return [la, ln]; }
+  }
+  return null;
 }
 
 // ---- photos ----
@@ -659,25 +762,333 @@ async function viewSchedule(v) {
   refresh(1);
 }
 
+// ====================================================================
+// Smart Dispatch — drag-drop board, geographic route optimization, SLA
+// ====================================================================
+function shiftDate(d, delta) { const x = new Date(d + "T00:00:00"); x.setDate(x.getDate() + delta); return ymd(x); }
+
+async function viewDispatch(v, arg) {
+  if (!cache.agents.length) { try { cache.agents = await API.get("/agents"); } catch (e) {} }
+  const date = (arg && arg.date) || ymd(new Date());
+  v.innerHTML = `<div class="page-head"><h2>🚚 ${t("nav_dispatch")}</h2>
+    <div style="display:flex;gap:8px;align-items:center">
+      <button class="btn secondary sm" id="dp-prev">${t("prev")}</button>
+      <input type="date" id="dp-date" value="${date}">
+      <button class="btn secondary sm" id="dp-next">${t("next")}</button>
+      <button class="btn secondary sm" id="dp-today">${t("today")}</button></div></div>
+    <div id="dp-sla"></div>
+    <p class="muted small">${t("dispatch_hint")}</p>
+    <div id="dp-board" class="dispatch-board">${t("loading")}</div>`;
+  $("dp-prev").addEventListener("click", () => navigate("dispatch", { date: shiftDate(date, -1) }));
+  $("dp-next").addEventListener("click", () => navigate("dispatch", { date: shiftDate(date, 1) }));
+  $("dp-today").addEventListener("click", () => navigate("dispatch"));
+  $("dp-date").addEventListener("change", (e) => navigate("dispatch", { date: e.target.value }));
+  loadSlaStrip();
+  await renderBoard(date);
+}
+
+async function loadSlaStrip(targetId = "dp-sla") {
+  const box = $(targetId);
+  if (!box) return;
+  let sla;
+  try { sla = await API.get("/dispatch/sla"); } catch (e) { return; }
+  const c = sla.counts;
+  const chip = (n, cls, label) => `<span class="sla-chip ${cls}">${n} ${label}</span>`;
+  const rows = sla.items.filter(r => r.status !== "ok");
+  box.innerHTML = `<div class="panel sla-strip">
+    <div class="sla-head"><strong>📡 ${t("sla_tracking")}</strong>
+      ${chip(c.overdue, "sla-overdue", t("sla_overdue"))}
+      ${chip(c.due_soon, "sla-due", t("sla_due_soon"))}
+      ${chip(c.ok, "sla-ok", t("sla_on_track"))}
+      ${rows.length ? `<button class="link-btn sm" id="sla-toggle">${t("view")}</button>` : ""}</div>
+    <div id="sla-list" class="hidden">${rows.map(r => `<div class="sla-row ${r.status === "overdue" ? "sla-overdue" : "sla-due"}" data-client="${r.client_id}">
+      <span><strong>${esc(localized(r, "client"))}</strong>${r.site_name ? " — " + esc(r.site_name) : ""}</span>
+      <span class="muted small">${t("freq_" + r.frequency)} · ${r.last_service ? t("last_service") + ": " + fmtDate(r.last_service) : t("never_serviced")}${r.days_overdue > 0 ? " · " + r.days_overdue + " " + t("days_overdue") : ""}</span>
+    </div>`).join("") || `<div class="muted small">${t("none")}</div>`}</div></div>`;
+  if ($("sla-toggle")) $("sla-toggle").addEventListener("click", () => $("sla-list").classList.toggle("hidden"));
+  box.querySelectorAll(".sla-row[data-client]").forEach(r =>
+    r.addEventListener("click", () => navigate("client-analytics", { id: r.dataset.client })));
+}
+
+async function renderBoard(date) {
+  const board = $("dp-board");
+  if (!board) return;
+  board.innerHTML = `<div class="empty">${t("loading")}</div>`;
+  const res = await API.get(`/visits?from=${date}&to=${date}`);
+  const items = Array.isArray(res) ? res : (res.items || []);
+  const cols = [{ id: "", name: "🚩 " + t("unassigned") }]
+    .concat((cache.agents || []).map(a => ({ id: String(a.id), name: a.full_name })));
+  const byAgent = {};
+  cols.forEach(c => byAgent[c.id] = []);
+  items.forEach(vi => { const k = vi.agent_id ? String(vi.agent_id) : ""; (byAgent[k] = byAgent[k] || []).push(vi); });
+  Object.values(byAgent).forEach(list => list.sort((a, b) => (a.scheduled_start || "").localeCompare(b.scheduled_start || "")));
+  board.innerHTML = cols.map(c => dispatchColumn(c, byAgent[c.id] || [])).join("");
+  wireDispatchDnD(date);
+}
+
+function dispatchGeocoded(v) { return v.site_lat != null && v.site_lng != null ? true : !!parseLatLng(v.location); }
+
+function dispatchColumn(col, list) {
+  const geo = list.filter(dispatchGeocoded).length;
+  const optBtn = (col.id && list.length > 1)
+    ? `<button class="btn secondary sm" data-optimize="${col.id}">🧭 ${t("optimize")}</button>` : "";
+  const cards = list.map(dispatchCard).join("") || `<div class="dp-empty">${t("drop_here")}</div>`;
+  return `<div class="dp-col"><div class="dp-col-head">
+      <strong>${esc(col.name)}</strong>
+      <span class="muted small">${list.length} · 📍${geo}/${list.length}</span>${optBtn}</div>
+    <div class="dp-col-body" data-agent="${col.id}">${cards}</div></div>`;
+}
+
+function dispatchCard(v) {
+  const loc = v.site_name || v.location || "";
+  const time = (v.scheduled_start || "").slice(11, 16);
+  return `<div class="dp-card b-${v.status}" draggable="true" data-visit="${v.id}">
+    <div class="dp-card-top"><span class="dp-time">${time || "—"}</span>
+      <span class="badge b-${v.status}">${t(statusKey(v.status))}</span></div>
+    <div class="dp-client">${esc(localized(v, "client"))}</div>
+    ${loc ? `<div class="muted small">${dispatchGeocoded(v) ? "📍" : "⚠️"} ${esc(loc)}</div>` : ""}</div>`;
+}
+
+function wireDispatchDnD(date) {
+  let dragId = null;
+  document.querySelectorAll(".dp-card").forEach(card => {
+    card.addEventListener("dragstart", (e) => { dragId = card.dataset.visit; card.classList.add("dragging"); e.dataTransfer.effectAllowed = "move"; });
+    card.addEventListener("dragend", () => card.classList.remove("dragging"));
+    card.addEventListener("click", () => navigate("visit", { id: card.dataset.visit }));
+  });
+  document.querySelectorAll(".dp-col-body").forEach(body => {
+    body.addEventListener("dragover", (e) => { e.preventDefault(); body.classList.add("dp-over"); });
+    body.addEventListener("dragleave", () => body.classList.remove("dp-over"));
+    body.addEventListener("drop", async (e) => {
+      e.preventDefault(); body.classList.remove("dp-over");
+      if (dragId == null) return;
+      const id = dragId; dragId = null;
+      try {
+        const saved = await API.put(`/visits/${id}`, { agent_id: body.dataset.agent || null });
+        if (handledOffline(saved)) return;
+        await renderBoard(date); loadSlaStrip();
+      } catch (err) { alert(err.message); }
+    });
+  });
+  document.querySelectorAll("[data-optimize]").forEach(b => b.addEventListener("click", (e) => {
+    e.stopPropagation(); optimizeRoute(b.dataset.optimize, date);
+  }));
+}
+
+async function optimizeRoute(agentId, date) {
+  let res;
+  try { res = await API.post("/dispatch/optimize", { agent_id: agentId, date, apply: false }); }
+  catch (err) { alert(err.message); return; }
+  if (!res.order.length) { alert(t("no_visits_to_optimize")); return; }
+  const orderList = res.order.map(o => `<li><strong>${(o.scheduled_start || "").slice(11, 16) || "—"}</strong> ${esc(localized(o, "client"))}${o.site_name ? ` <span class="muted">(${esc(o.site_name)})</span>` : ""}${o.lat == null ? " ⚠️" : ""}</li>`).join("");
+  openModal(`🧭 ${t("optimize_route")}`, `
+    <div class="opt-summary">
+      <div><div class="muted small">${t("distance_before")}</div><strong>${res.km_before} km</strong></div>
+      <div><div class="muted small">${t("distance_after")}</div><strong>${res.km_after} km</strong></div>
+      <div class="opt-saved"><div class="muted small">${t("distance_saved")}</div><strong>${res.km_saved} km</strong></div>
+    </div>
+    ${res.ungeocoded ? `<p class="muted small">⚠️ ${res.ungeocoded} ${t("ungeocoded_note")}</p>` : ""}
+    ${!res.has_start ? `<p class="muted small">${t("no_start_note")}</p>` : ""}
+    <ol class="opt-order">${orderList}</ol>
+    <div class="form-actions"><button type="button" class="btn secondary" id="opt-x">${t("cancel")}</button>
+    <button type="button" class="btn" id="opt-apply">✅ ${t("apply_route")}</button></div>`, () => {
+    $("opt-x").addEventListener("click", closeModal);
+    $("opt-apply").addEventListener("click", async () => {
+      try { await API.post("/dispatch/optimize", { agent_id: agentId, date, apply: true }); }
+      catch (err) { alert(err.message); return; }
+      closeModal(); await renderBoard(date); toast(t("route_applied"));
+    });
+  });
+}
+
+// ====================================================================
+// Visit requests — client self-service "request a visit" + staff inbox
+// ====================================================================
+async function viewRequests(v) {
+  const isClient = role() === "client";
+  const canAct = can("visits.create");
+  const rows = await API.get("/visit-requests");
+  v.innerHTML = `<div class="page-head"><h2>📨 ${t("nav_requests")}</h2>
+    ${isClient ? `<button class="btn" id="req-add">+ ${t("request_visit")}</button>` : ""}</div>
+    <div class="panel" id="req-list">${requestsTable(rows, isClient, canAct)}</div>`;
+  if ($("req-add")) $("req-add").addEventListener("click", requestForm);
+  wireRequestRows(v);
+}
+
+function requestsTable(rows, isClient, canAct) {
+  if (!rows.length) return `<div class="empty">${t("no_requests")}</div>`;
+  const badge = s => `<span class="badge b-${s === "approved" ? "completed" : s === "declined" ? "cancelled" : "scheduled"}">${t("rq_" + s)}</span>`;
+  const head = `<tr><th>${t("date_requested")}</th>${isClient ? "" : `<th>${t("client")}</th>`}<th>${t("location_lbl")}</th>
+    <th>${t("preferred_date")}</th><th>${t("notes")}</th><th>${t("status")}</th><th></th></tr>`;
+  const body = rows.map(r => `<tr>
+    <td>${fmtDate(r.created_at)}</td>
+    ${isClient ? "" : `<td>${esc(localized(r, "client"))}</td>`}
+    <td>${esc(r.site_name || "—")}</td>
+    <td>${r.preferred_date ? fmtDate(r.preferred_date) : "—"}</td>
+    <td>${esc((r.note || "").slice(0, 60)) || "—"}</td>
+    <td>${badge(r.status)}</td>
+    <td>${(canAct && r.status === "pending")
+      ? `<button class="btn sm" data-approve="${r.id}">✅ ${t("approve")}</button> <button class="btn secondary sm" data-decline="${r.id}">${t("decline")}</button>`
+      : (r.visit_id ? `<button class="link-btn sm" data-open="${r.visit_id}">${t("view")}</button>` : "")}</td>
+  </tr>`).join("");
+  return `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+}
+
+function wireRequestRows(root) {
+  root.querySelectorAll("[data-open]").forEach(b => b.addEventListener("click", () => navigate("visit", { id: b.dataset.open })));
+  root.querySelectorAll("[data-approve]").forEach(b => b.addEventListener("click", () => approveRequestDialog(b.dataset.approve)));
+  root.querySelectorAll("[data-decline]").forEach(b => b.addEventListener("click", async () => {
+    if (!confirm(t("confirm_decline"))) return;
+    try { await API.post(`/visit-requests/${b.dataset.decline}/decline`, {}); navigate("requests"); }
+    catch (e) { alert(e.message); }
+  }));
+}
+
+async function requestForm() {
+  const cid = API.user.client_id;
+  openModal(`📨 ${t("request_visit")}`, `<form id="rqf">
+    <div class="field"><label>${t("location_lbl")}</label><select name="site_id" id="rqf-site"><option value="">${t("loading")}…</option></select></div>
+    ${field(t("preferred_date"), "preferred_date", { type: "date" })}
+    ${field(t("notes"), "note", { textarea: true })}
+    <div class="form-actions"><button type="button" class="btn secondary" id="rqf-x">${t("cancel")}</button>
+    <button class="btn" type="submit">${t("submit_request")}</button></div></form>`, async (root) => {
+    $("rqf-x").addEventListener("click", closeModal);
+    await loadSiteOptions(cid, $("rqf-site"), "", t("none"));
+    root.querySelector("#rqf").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      try {
+        const saved = await API.post("/visit-requests", formData(root));
+        if (handledOffline(saved)) return;
+        closeModal(); toast(t("request_sent")); navigate("requests");
+      } catch (err) { alert(err.message); }
+    });
+  });
+}
+
+function approveRequestDialog(id) {
+  const agentOpts = [{ v: "", l: t("none") }].concat((cache.agents || []).map(a => ({ v: a.id, l: a.full_name })));
+  const svcOpts = [{ v: "", l: t("none") }].concat((cache.services || []).map(s => ({ v: s.id, l: localized(s, "name") })));
+  openModal(`✅ ${t("approve_request")}`, `<form id="apr"><div class="form-grid">
+    ${field(t("scheduled_start"), "scheduled_start", { type: "datetime-local" })}
+    ${field(t("agent"), "agent_id", { options: agentOpts })}
+    ${field(t("service"), "service_type_id", { options: svcOpts })}
+    </div><p class="muted small">${t("approve_hint")}</p>
+    <div class="form-actions"><button type="button" class="btn secondary" id="apr-x">${t("cancel")}</button>
+    <button class="btn" type="submit">✅ ${t("approve")}</button></div></form>`, (root) => {
+    $("apr-x").addEventListener("click", closeModal);
+    root.querySelector("#apr").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const d = formData(root);
+      if (d.scheduled_start) d.scheduled_start = d.scheduled_start.replace("T", " ") + ":00";
+      try { await API.post(`/visit-requests/${id}/approve`, d); closeModal(); toast(t("request_approved_msg")); navigate("requests"); }
+      catch (err) { alert(err.message); }
+    });
+  });
+}
+
+// ====================================================================
+// Agent "My Day" — today's route as an ordered list, with a map toggle
+// ====================================================================
+function coordsOf(v) {
+  if (v.site_lat != null && v.site_lng != null) return [v.site_lat, v.site_lng];
+  return parseLatLng(v.location);
+}
+function haversineKm(a, b) {
+  const R = 6371, r = Math.PI / 180;
+  const dLa = (b[0] - a[0]) * r, dLn = (b[1] - a[1]) * r;
+  const h = Math.sin(dLa / 2) ** 2 + Math.cos(a[0] * r) * Math.cos(b[0] * r) * Math.sin(dLn / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+function routeKmJs(pts) { let s = 0; for (let i = 0; i < pts.length - 1; i++) s += haversineKm(pts[i], pts[i + 1]); return s; }
+
+async function viewMyDay(v, arg) {
+  const date = (arg && arg.date) || ymd(new Date());
+  const res = await API.get(`/visits?from=${date}&to=${date}`);
+  const items = (Array.isArray(res) ? res : (res.items || []))
+    .slice().sort((a, b) => (a.scheduled_start || "").localeCompare(b.scheduled_start || ""));
+  v.innerHTML = `<div class="page-head"><h2>🧭 ${t("nav_myday")}</h2>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button class="btn secondary sm" id="md-prev">${t("prev")}</button>
+      <input type="date" id="md-date" value="${date}">
+      <button class="btn secondary sm" id="md-next">${t("next")}</button>
+      <button class="btn secondary sm" id="md-today">${t("today")}</button>
+      <button class="btn secondary sm" id="md-toggle">🗺️ ${t("map_view")}</button></div></div>
+    <div id="md-body"></div><div id="md-map" class="hidden"></div>`;
+  $("md-prev").addEventListener("click", () => navigate("myday", { date: shiftDate(date, -1) }));
+  $("md-next").addEventListener("click", () => navigate("myday", { date: shiftDate(date, 1) }));
+  $("md-today").addEventListener("click", () => navigate("myday"));
+  $("md-date").addEventListener("change", (e) => navigate("myday", { date: e.target.value }));
+  renderMyDayList(items);
+  let mapShown = false;
+  $("md-toggle").addEventListener("click", async () => {
+    mapShown = !mapShown;
+    $("md-map").classList.toggle("hidden", !mapShown);
+    $("md-body").classList.toggle("hidden", mapShown);
+    $("md-toggle").textContent = mapShown ? "📋 " + t("list_view") : "🗺️ " + t("map_view");
+    if (mapShown) await renderMyDayMap(items);
+  });
+}
+
+function renderMyDayList(items) {
+  const body = $("md-body");
+  if (!items.length) { body.innerHTML = `<div class="empty">${t("no_visits_today")}</div>`; return; }
+  const geo = items.map(coordsOf).filter(Boolean);
+  const km = geo.length > 1 ? Math.round(routeKmJs(geo)) : 0;
+  const rows = items.map((vi, i) => {
+    const c = coordsOf(vi);
+    const dir = c ? `<a class="btn secondary sm" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=${c[0]},${c[1]}">🧭 ${t("navigate")}</a>` : "";
+    const start = vi.status === "scheduled" ? `<button class="btn sm" data-start="${vi.id}">▶️ ${t("start_visit")}</button>` : "";
+    return `<div class="md-stop b-${vi.status}">
+      <div class="md-seq">${i + 1}</div>
+      <div class="md-main">
+        <div class="md-time">${(vi.scheduled_start || "").slice(11, 16) || "—"} · <span class="badge b-${vi.status}">${t(statusKey(vi.status))}</span></div>
+        <div class="md-client">${esc(localized(vi, "client"))}</div>
+        ${(vi.site_name || vi.location) ? `<div class="muted small">${c ? "📍" : "⚠️"} ${esc(vi.site_name || vi.location)}</div>` : ""}</div>
+      <div class="md-actions">${start}${dir}<button class="link-btn sm" data-open="${vi.id}">${t("view")}</button></div></div>`;
+  }).join("");
+  body.innerHTML = `${km ? `<p class="muted small">${t("route_distance")}: <strong>${km} km</strong> · ${items.length} ${t("stops")}</p>` : ""}${rows}`;
+  body.querySelectorAll("[data-open]").forEach(b => b.addEventListener("click", () => navigate("visit", { id: b.dataset.open })));
+  body.querySelectorAll("[data-start]").forEach(b => b.addEventListener("click", async () => {
+    try { const s = await API.put(`/visits/${b.dataset.start}`, { status: "in_progress" }); if (handledOffline(s)) return; navigate("visit", { id: b.dataset.start }); }
+    catch (e) { alert(e.message); }
+  }));
+}
+
+async function renderMyDayMap(items) {
+  const box = $("md-map");
+  box.innerHTML = `<div class="empty">${t("loading")}</div>`;
+  let g;
+  try { g = await ensureMapsApi(); } catch (e) { g = null; }
+  if (!g) { box.innerHTML = `<div class="empty">🗺️ ${t("map_needs_key")}</div>`; return; }
+  const pts = items.map(v => ({ v, c: coordsOf(v) })).filter(x => x.c);
+  if (!pts.length) { box.innerHTML = `<div class="empty">${t("no_geocoded_today")}</div>`; return; }
+  box.innerHTML = `<div id="md-canvas" style="height:62vh;border-radius:12px;border:1px solid var(--line)"></div>`;
+  const map = new g.maps.Map($("md-canvas"), { zoom: 11, center: { lat: pts[0].c[0], lng: pts[0].c[1] }, mapTypeControl: false, streetViewControl: false });
+  const bounds = new g.maps.LatLngBounds(), path = [];
+  pts.forEach((p, i) => {
+    const pos = { lat: p.c[0], lng: p.c[1] };
+    new g.maps.Marker({ position: pos, map, label: String(i + 1), title: localized(p.v, "client") });
+    bounds.extend(pos); path.push(pos);
+  });
+  new g.maps.Polyline({ path, map, strokeColor: "#1f74d6", strokeWeight: 3, strokeOpacity: .85 });
+  map.fitBounds(bounds);
+}
+
 // ---- central reports list (admin/owner: all reports, filterable + printable) ----
-const SEV_COLORS = { low: "#16a34a", medium: "#d97706", high: "#ef4444", critical: "#b91c1c" };
 function reportsTable(rows, forPrint) {
   if (!rows || !rows.length) return `<div class="empty">${t("none")}</div>`;
   const head = `<tr><th>${t("scheduled_start")}</th><th>${t("client")}</th><th>${t("location_lbl")}</th>
-    <th>${t("agent")}</th><th>${t("severity")}</th><th>${t("status")}</th><th>${t("summary")}</th></tr>`;
+    <th>${t("agent")}</th><th>${t("status")}</th><th>${t("summary")}</th></tr>`;
   const body = rows.map(r => {
-    const sev = r.severity || "low";
-    const sevB = `<span style="display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:700;color:#fff;background:${SEV_COLORS[sev] || "#64748b"}">${t("sev_" + sev)}</span>`;
     const stB = `<span class="badge b-${r.status === "complete" ? "completed" : "draft"}">${t(r.status === "complete" ? "report_complete" : "report_draft")}</span>`;
     const attr = forPrint ? "" : `class="clickable" data-visit="${r.visit_id}"`;
     return `<tr ${attr}><td>${fmtDateTime(r.scheduled_start)}</td><td>${esc(localized(r, "client") || "")}</td>
       <td>${esc(r.site_name || "—")}</td><td>${esc(r.agent_name || "—")}</td>
-      <td>${sevB}</td><td>${stB}</td><td>${esc((r.summary || "").slice(0, 70))}</td></tr>`;
+      <td>${stB}</td><td>${esc((r.summary || "").slice(0, 70))}</td></tr>`;
   }).join("");
   return `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
 }
 async function viewReports(v) {
-  const sevs = ["", "low", "medium", "high", "critical"];
   const stats = ["", "complete", "draft"];
   const clientOpts = `<option value="">${t("all")}</option>` +
     cache.clients.map(c => `<option value="${c.id}">${esc(localized(c, "name"))}</option>`).join("");
@@ -689,7 +1100,6 @@ async function viewReports(v) {
       <label>${t("client")}: <select id="rf-client">${clientOpts}</select></label>
       <label>${t("location_lbl")}: <select id="rf-site"><option value="">${t("all")}</option></select></label>
       ${agentSel}
-      <label>${t("severity")}: <select id="rf-sev">${sevs.map(s => `<option value="${s}">${s ? t("sev_" + s) : t("all")}</option>`).join("")}</select></label>
       <label>${t("status")}: <select id="rf-status">${stats.map(s => `<option value="${s}">${s ? t(s === "complete" ? "report_complete" : "report_draft") : t("all")}</option>`).join("")}</select></label>
       <label>${t("from")}: <input type="date" id="rf-from"></label>
       <label>${t("to")}: <input type="date" id="rf-to"></label>
@@ -702,7 +1112,6 @@ async function viewReports(v) {
     if (val("rf-client")) p.push("client=" + val("rf-client"));
     if (val("rf-site")) p.push("site=" + val("rf-site"));
     if (val("rf-agent")) p.push("agent=" + val("rf-agent"));
-    if (val("rf-sev")) p.push("severity=" + val("rf-sev"));
     if (val("rf-status")) p.push("status=" + val("rf-status"));
     if (val("rf-from")) p.push("from=" + val("rf-from"));
     if (val("rf-to")) p.push("to=" + val("rf-to"));
@@ -722,7 +1131,7 @@ async function viewReports(v) {
     if (sel.dataset.hasSites === "1") sel.insertAdjacentHTML("beforeend", `<option value="none">${t("unassigned")}</option>`);
     refresh(1);
   });
-  ["rf-site", "rf-agent", "rf-sev", "rf-status", "rf-from", "rf-to"].forEach(id => {
+  ["rf-site", "rf-agent", "rf-status", "rf-from", "rf-to"].forEach(id => {
     if ($(id)) $(id).addEventListener("change", () => refresh(1));
   });
   $("rf-print").addEventListener("click", async () => {
@@ -768,16 +1177,11 @@ async function viewReportDoc(v, arg) {
     return `<div class="rdoc-row" data-empty="${Number(val) > 0 ? "0" : "1"}"><label>${esc(t(k))}</label>
       <input type="number" step="any" data-rep="${k}" value="${esc(Number(val) > 0 ? val : "")}"></div>`;
   };
-  const sevSel = `<div class="rdoc-row"><label>${esc(t("severity"))}</label>
-    <select data-rep="severity">${["low", "medium", "high", "critical"].map(s =>
-      `<option value="${s}" ${(rep.severity || "low") === s ? "selected" : ""}>${t("sev_" + s)}</option>`).join("")}</select></div>`;
-  const dateRow = `<div class="rdoc-row" data-empty="${has(rep.next_visit_due) ? "0" : "1"}"><label>${esc(t("next_visit_due"))}</label>
-    <input type="date" data-rep="next_visit_due" value="${esc(rep.next_visit_due || "")}"></div>`;
   const sig = (f, label) => f ? `<div class="rdoc-sig"><img src="/uploads/${esc(f)}"><div class="ln">${esc(label)}</div></div>` : "";
   const chemRows = (visit.chemicals || []).map(cu =>
     `<tr><td>${esc(localized(cu, "name"))}</td><td>${cu.quantity} ${esc(cu.unit || "")}</td><td>${esc(cu.area_treated || "—")}</td></tr>`).join("");
 
-  const allRows = [sevSel, ...REPORT_TEXT_FIELDS.map(textRow), dateRow, ...REPORT_MAT_FIELDS.map(matRow)].join("");
+  const allRows = [...REPORT_TEXT_FIELDS.map(textRow), ...REPORT_MAT_FIELDS.map(matRow)].join("");
   const statusBadgeHtml = `<span class="badge b-${rep.status === "complete" ? "completed" : "draft"}">${t(rep.status === "complete" ? "report_complete" : "report_draft")}</span>`;
   // Attachments flagged "Business plan" on the visit are surfaced on the report.
   const bpPhotos = (visit.photos || []).filter(p => Number(p.is_business_plan));
@@ -849,8 +1253,6 @@ function printReportDoc(visit) {
   const logoHtml = S.logo ? `<img src="/uploads/${esc(S.logo)}" style="height:46px">` : `<div style="font-size:32px">🐜</div>`;
   const has = (x) => x !== null && x !== undefined && String(x).trim() !== "";
   const row = (label, val) => has(val) ? `<tr><td class="l">${esc(label)}</td><td>${esc(val).replace(/\n/g, "<br>")}</td></tr>` : "";
-  const sev = rep.severity || "low";
-  const sevColors = { low: "#16a34a", medium: "#d97706", high: "#ef4444", critical: "#b91c1c" };
   const matRows = REPORT_MAT_FIELDS.filter(k => Number(rep[k]) > 0)
     .map(k => `<tr><td class="l">${esc(t(k))}</td><td>${esc(rep[k])}</td></tr>`).join("");
   const chemRows = (visit.chemicals || []).map(cu =>
@@ -867,10 +1269,8 @@ function printReportDoc(visit) {
   const reportRows = [
     row(t("pests_found"), rep.pests_found), row(t("findings"), rep.findings),
     row(t("recommendations"), rep.recommendations),
-    `<tr><td class="l">${esc(t("severity"))}</td><td><span class="sev" style="background:${sevColors[sev]}">${esc(t("sev_" + sev))}</span></td></tr>`,
     row(t("summary"), rep.summary), row(t("spare_parts_changed"), rep.spare_parts_changed),
     row(t("branch_issue"), rep.branch_issue),
-    has(rep.next_visit_due) ? row(t("next_visit_due"), fmtDate(rep.next_visit_due)) : "",
   ].join("");
   const doc = `<!DOCTYPE html><html lang="${LANG}" dir="${dir}"><head><meta charset="utf-8">
     <title>${esc(t("service_report"))} #${String(visit.id).padStart(5, "0")}</title>
@@ -1037,6 +1437,9 @@ async function viewVisit(v, arg) {
         <td>${cu.quantity} ${esc(cu.unit)}</td><td>${esc(cu.area_treated || "—")}</td>
         <td>${canEdit ? `<button class="link-btn danger sm" data-rmuse="${cu.id}">${t("delete")}</button>` : ""}</td></tr>`).join("") || `<tr><td colspan="4" class="empty">${t("none")}</td></tr>`}</tbody></table></div>` : ""}
 
+    ${role() !== "client" ? `<div class="panel" id="dev-coverage"><div class="section-title"><h3>🏷️ ${t("device_coverage")}</h3></div>
+      <div class="muted">${t("loading")}</div></div>` : ""}
+
     <div class="panel"><div class="section-title"><h3>${t("signatures")}</h3></div>
       <div class="grid-2">${sigBlock("customer", visit, id, canEdit)}${sigBlock("technician", visit, id, canEdit)}</div></div>
 
@@ -1113,6 +1516,7 @@ async function viewVisit(v, arg) {
     const r = await API.del("/usage/" + b.dataset.rmuse); if (handledOffline(r, b.closest("tr"))) return; navigate("visit", { id });
   }));
   renderPhotos("visit", id, visit.photos);
+  if (role() !== "client") loadVisitCoverage(id);
   if ($("add-photo")) $("add-photo").addEventListener("click", () => uploadPhotoDialog("visit", id, () => navigate("visit", { id })));
   // report-level attachments (images / PDF / Excel) live under the report panel
   if (rep.id) renderPhotos("report", rep.id, visit.report_photos, "report-files");
@@ -1120,17 +1524,12 @@ async function viewVisit(v, arg) {
 }
 
 function reportForm(rep, visitId, canEdit) {
-  const sev = ["low", "medium", "high", "critical"].map(s => ({ v: s, l: t("sev_" + s) }));
   const dis = canEdit ? "" : "disabled";
   return `<form id="report-form">
     ${field(t("summary"), "summary", { value: rep.summary, textarea: true })}
     ${field(t("pests_found"), "pests_found", { value: rep.pests_found })}
     ${field(t("findings"), "findings", { value: rep.findings, textarea: true })}
     ${field(t("recommendations"), "recommendations", { value: rep.recommendations, textarea: true })}
-    <div class="form-grid">
-      ${field(t("severity"), "severity", { options: sev, value: rep.severity || "low" })}
-      ${field(t("next_visit_due"), "next_visit_due", { type: "date", value: rep.next_visit_due })}
-    </div>
     <div class="section-title" style="margin:18px 0 8px"><h3>🧰 ${t("materials_used")}</h3></div>
     ${field(t("spare_parts_changed"), "spare_parts_changed", { value: rep.spare_parts_changed })}
     <div class="form-grid">
@@ -1165,8 +1564,6 @@ function clientReportView(rep) {
     <div>${t("pests_found")}</div><div>${esc(rep.pests_found || "—")}</div>
     <div>${t("findings")}</div><div>${esc(rep.findings || "—")}</div>
     <div>${t("recommendations")}</div><div>${esc(rep.recommendations || "—")}</div>
-    <div>${t("severity")}</div><div class="sev-${rep.severity}">${t("sev_" + (rep.severity || "low"))}</div>
-    <div>${t("next_visit_due")}</div><div>${fmtDate(rep.next_visit_due)}</div>
     ${rep.spare_parts_changed ? `<div>${t("spare_parts_changed")}</div><div>${esc(rep.spare_parts_changed)}</div>` : ""}
     ${mat}
     ${rep.branch_issue ? `<div>${t("branch_issue")}</div><div>${esc(rep.branch_issue)}</div>` : ""}</div>
@@ -1523,6 +1920,7 @@ async function viewInvoice(v, arg) {
   v.innerHTML = `<div class="breadcrumb" id="bc">← ${t("invoices_title")}</div>
     <div class="page-head"><h2>${esc(inv.number)} — ${esc(localized(inv, "client"))}</h2>
       <div>${statusBadge(inv.status)}
+        ${(inv.doc_type === "invoice" && inv.status !== "cancelled" && (inv.total - (inv.paid || 0)) > 0.009 && (role() === "client" || can("payments.create"))) ? `<button class="btn sm" id="pay-online">💳 ${t("pay_now")}</button>` : ""}
         ${can("invoices.edit") ? `<button class="btn secondary sm" id="edit-inv">✏️ ${t("edit")}</button>` : ""}
         ${(inv.doc_type === "quote" && can("invoices.edit") && inv.status !== "accepted") ? `<button class="btn sm" id="convert-inv">➡ ${t("convert_to_invoice")}</button>` : ""}
         <button class="btn sm" id="print-inv">🖨️ ${t("print_pdf")}</button></div></div>
@@ -1552,6 +1950,7 @@ async function viewInvoice(v, arg) {
       </div>`}</div>`;
   $("bc").addEventListener("click", () => navigate("invoices"));
   $("print-inv").addEventListener("click", () => printInvoice(inv));
+  if ($("pay-online")) $("pay-online").addEventListener("click", () => payInvoice(inv));
   if ($("edit-inv")) $("edit-inv").addEventListener("click", () => invoiceForm(inv));
   if ($("convert-inv")) $("convert-inv").addEventListener("click", async () => {
     try { const ni = await API.post(`/invoices/${inv.id}/convert`); if (handledOffline(ni)) return; toast(t("saved")); invoiceTab = "invoice"; navigate("invoice", { id: ni.id }); }
@@ -1562,6 +1961,25 @@ async function viewInvoice(v, arg) {
     try { const saved = await API.post(`/invoices/${inv.id}/payments`, formData($("pay-form"))); if (handledOffline(saved)) return; toast(t("saved")); navigate("invoice", { id: inv.id }); }
     catch (err) { alert(err.message); }
   });
+}
+
+// Start an online payment for an invoice. Real gateways return a hosted
+// checkout_url we redirect to; the built-in "manual" sandbox provider has no
+// external page, so we confirm in-app and post the callback ourselves.
+async function payInvoice(inv) {
+  try {
+    const r = await API.post(`/invoices/${inv.id}/pay`, {});
+    if (r.provider === "manual") {
+      if (!confirm(t("pay_sandbox_confirm").replace("{amt}", money(r.amount) + " " + (r.currency || "")))) return;
+      await API.post(`/payments/callback/manual`, { token: r.token });
+      toast(t("payment_done"));
+      navigate("invoice", { id: inv.id });
+    } else if (r.checkout_url) {
+      window.location.href = r.checkout_url;   // hosted gateway checkout
+    } else {
+      alert(t("pay_unavailable"));
+    }
+  } catch (e) { alert(e.message); }
 }
 
 // ---- printable / PDF invoice (opens a clean document and triggers print) ----
@@ -1760,8 +2178,6 @@ function printCertificate(visit) {
         ${row(t("pests_found"), rep.pests_found)}
         ${row(t("findings"), rep.findings)}
         ${row(t("recommendations"), rep.recommendations)}
-        <tr><td class="lbl">${esc(t("severity"))}</td><td><span class="sev">${esc(t("sev_" + sev))}</span></td></tr>
-        ${row(t("next_visit_due"), rep.next_visit_due ? fmtDate(rep.next_visit_due) : "")}
         ${row(t("spare_parts_changed"), rep.spare_parts_changed)}
         ${row(t("branch_issue"), rep.branch_issue)}
       </table>
@@ -1849,6 +2265,8 @@ function userForm(u) {
     ${field(t("phone"), "phone", { value: u.phone })}
     ${field(t("specialization"), "specialization", { value: u.specialization })}
     ${field(t("hire_date"), "hire_date", { type: "date", value: u.hire_date })}
+    ${field(t("license_no"), "license_no", { value: u.license_no })}
+    ${field(t("license_expiry"), "license_expiry", { type: "date", value: u.license_expiry })}
     ${field(t("belongs_to"), "client_id", { options: clientOpts, value: u.client_id })}
     </div><div class="form-actions"><button type="button" class="btn secondary" id="uf-x">${t("cancel")}</button>
     <button class="btn" type="submit">${t("save")}</button></div></form>`, (root) => {
@@ -2226,24 +2644,38 @@ async function viewLocations(v) {
     const parts = [thumb, editBtn, delBtn].filter(Boolean);
     return parts.length ? `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">${parts.join("")}</div>` : "—";
   };
+  // Coordinates cell: a maps pin when the site is geocoded (needed for route
+  // optimization), plus an edit button to set / change them.
+  const geoCell = s => {
+    const has = s.lat != null && s.lng != null;
+    const pin = has
+      ? `<a class="link-btn" href="https://www.google.com/maps/search/?api=1&query=${s.lat},${s.lng}" target="_blank" rel="noopener">📍 ${(+s.lat).toFixed(4)}, ${(+s.lng).toFixed(4)}</a>`
+      : `<span class="muted small">${t("no_coords")}</span>`;
+    const edit = canEdit ? `<button class="link-btn sm" data-siteedit="${s.id}">✏️</button>` : "";
+    return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">${pin}${edit}</div>`;
+  };
+  const byId = {};
+  sites.forEach(s => { byId[s.id] = s; });
   const rows = list.map(c => {
     const cs = byClient[c.id] || [];
     if (!cs.length) {
       return `<tr data-client="${c.id}"><td>${clink(c)}</td>
-        <td colspan="4" class="muted">${t("no_locations")}</td><td>—</td></tr>`;
+        <td colspan="5" class="muted">${t("no_locations")}</td><td>—</td></tr>`;
     }
     return cs.map(s => `<tr data-client="${c.id}"><td>${clink(c)}</td>
       <td>${esc(s.name)}</td><td>${esc(s.address || "—")}</td><td>${esc(s.area || "—")}</td>
-      <td>${locCell(s.address)}</td><td>${mapImgCell(s)}</td></tr>`).join("");
+      <td>${geoCell(s)}</td><td>${locCell(s.address)}</td><td>${mapImgCell(s)}</td></tr>`).join("");
   }).join("");
   v.innerHTML = `<div class="page-head"><h2>${t("locations_title")}</h2>
     <span class="muted">${list.length} ${t("nav_clients")} · ${sites.length} ${t("sites_count")}</span></div>
     <div class="panel">
       <input id="loc-q" type="search" placeholder="${t("search")}…" style="margin-bottom:12px;max-width:340px;width:100%">
       <table><thead><tr><th>${t("client")}</th><th>${t("site_name")}</th><th>${t("address_en")}</th>
-        <th>${t("area")}</th><th>${t("location_lbl")}</th><th>${t("site_map")}</th></tr></thead>
-      <tbody id="loc-body">${rows || `<tr><td colspan="6" class="empty">${t("none")}</td></tr>`}</tbody>
+        <th>${t("area")}</th><th>${t("coordinates")}</th><th>${t("location_lbl")}</th><th>${t("site_map")}</th></tr></thead>
+      <tbody id="loc-body">${rows || `<tr><td colspan="7" class="empty">${t("none")}</td></tr>`}</tbody>
       </table></div>`;
+  v.querySelectorAll("[data-siteedit]").forEach(b => b.addEventListener("click", () =>
+    siteForm(byId[b.dataset.siteedit].client_id, byId[b.dataset.siteedit], () => navigate("locations"))));
   v.querySelectorAll("[data-open]").forEach(a => a.addEventListener("click", (e) => {
     e.preventDefault(); navigate("client", { id: a.dataset.open });
   }));
@@ -2297,7 +2729,7 @@ function contractRow(c, ncols) {
   const main = `<tr data-row="${c.id}"><td>${toggle}${esc(localized(c, "client"))}
       ${sites.length ? `<span class="muted small">(${sites.length} ${t("sites_count")})</span>` : ""}</td>
     <td>${esc(localized(c, "service") || "—")}</td>
-    <td>${esc(c.agent_name || "—")}</td><td>${t("freq_" + c.frequency)}</td><td>${fmtDate(c.next_run_date)}</td>
+    <td>${esc(c.agent_name || "—")}</td><td>${t("freq_" + c.frequency)}${c.auto_invoice ? `<br><span class="badge b-active" title="${esc(t("auto_bill_on_hint"))}">💸 ${t("auto_bill")}${c.next_bill_date ? " · " + fmtDate(c.next_bill_date) : ""}</span>` : ""}</td><td>${fmtDate(c.next_run_date)}</td>
     <td>${money(c.price)}</td><td><span class="badge b-${c.status === "active" ? "active" : "inactive"}">${t("ct_" + c.status)}</span></td>
     ${acts ? `<td>${can("contracts.edit") ? `<button class="link-btn sm" data-edit="${c.id}">${t("edit")}</button>` : ""}${(can("contracts.edit") && can("contracts.delete")) ? " · " : ""}${can("contracts.delete") ? `<button class="link-btn danger sm" data-del="${c.id}">${t("delete")}</button>` : ""}</td>` : ""}</tr>`;
   if (!sites.length) return main;
@@ -2315,6 +2747,7 @@ async function viewContracts(v) {
   v.innerHTML = `<div class="page-head"><h2>${t("contracts_title")}</h2>
     <div style="display:flex;gap:8px">
       ${can("contracts.edit") ? `<button class="btn secondary" id="run-ct">⚙ ${t("run_now")}</button>` : ""}
+      ${can("invoices.create") ? `<button class="btn secondary" id="bill-ct">💸 ${t("bill_now")}</button>` : ""}
       ${can("contracts.create") ? `<button class="btn" id="add-ct">+ ${t("new_contract")}</button>` : ""}</div></div>
     <div class="panel"><table><thead><tr><th>${t("client")}</th><th>${t("service")}</th><th>${t("agent")}</th>
       <th>${t("frequency")}</th><th>${t("next_run")}</th><th>${t("price")}</th><th>${t("contract_status")}</th>${(can("contracts.edit") || can("contracts.delete")) ? `<th></th>` : ""}</tr></thead>
@@ -2323,6 +2756,9 @@ async function viewContracts(v) {
   if ($("add-ct")) $("add-ct").addEventListener("click", () => contractForm());
   if ($("run-ct")) $("run-ct").addEventListener("click", async () => {
     const r = await API.post("/contracts/run", {}); toast(`${r.created} ${t("generated")}`); navigate("contracts");
+  });
+  if ($("bill-ct")) $("bill-ct").addEventListener("click", async () => {
+    const r = await API.post("/contracts/bill", {}); toast(`${r.created} ${t("invoices_generated")}`); navigate("contracts");
   });
   v.querySelectorAll("[data-edit]").forEach(b => b.addEventListener("click", () => contractForm(list.find(c => c.id == b.dataset.edit))));
   v.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", async () => {
@@ -2383,6 +2819,11 @@ function contractForm(c) {
     ${field(t("end_date"), "end_date", { type: "date", value: c.end_date })}
     ${isEdit ? field(t("contract_status"), "status", { options: statusOpts, value: c.status }) : ""}
     ${field(t("notes"), "notes", { textarea: true, cls: "full", value: c.notes })}
+    <div class="field full"><label class="muted small" style="display:flex;align-items:center;gap:8px">
+      <input type="checkbox" id="ct-auto" style="width:auto" ${c.auto_invoice ? "checked" : ""}> ${t("auto_bill")}</label>
+      <div class="muted small">${t("auto_bill_hint")}</div></div>
+    ${field(t("bill_every"), "bill_every", { options: [{ v: "", l: t("bill_same_as_service") }].concat(FREQS.map(f => ({ v: f, l: t("freq_" + f) }))), value: c.bill_every || "" })}
+    ${field(t("next_bill_date"), "next_bill_date", { type: "date", value: c.next_bill_date })}
     </div>
     <div class="section-title" style="margin-top:14px"><h3>${t("sites_pricing")}</h3>
       <button type="button" class="btn sm" id="ct-add-site">+ ${t("add_site_row")}</button></div>
@@ -2451,6 +2892,7 @@ function contractForm(c) {
     root.querySelector("#ctf").addEventListener("submit", async (e) => {
       e.preventDefault();
       const d = formData(root);
+      d.auto_invoice = root.querySelector("#ct-auto").checked ? 1 : 0;
       Object.keys(d).forEach(k => { if (d[k] === "") delete d[k]; });
       d.sites = Array.from(tbody.querySelectorAll("tr")).map(tr => ({
         site_id: tr.querySelector(".cs-site").value || null,
@@ -2545,6 +2987,11 @@ async function viewSettings(v) {
         ${field(t("currency_label"), "currency", { value: s.currency })}
         ${field(t("tax_rate"), "tax_rate", { type: "number", value: s.tax_rate })}
         ${field(t("google_maps_api_key"), "google_maps_api_key", { value: s.google_maps_api_key, cls: "full" })}
+        <div class="field full"><label>📍 ${esc(t("company_geo"))} <span class="muted small">(${esc(t("company_geo_hint"))})</span></label>
+          <div style="display:flex;gap:6px">
+            <input type="text" name="company_geo" value="${esc(s.company_geo || "")}" placeholder="lat,lng" style="flex:1" />
+            <button type="button" class="btn secondary sm" id="set-geo">📍 ${esc(t("use_my_location"))}</button>
+          </div></div>
       </div>
       <p class="muted small" style="margin:-4px 0 8px">${t("maps_key_hint")}</p>
       <div class="form-actions"><button class="btn" type="submit">${t("save_settings")}</button></div></form>
@@ -2574,6 +3021,13 @@ async function viewSettings(v) {
       </div><div class="form-actions"><button class="btn" type="submit">${t("save_settings")}</button></div></form></div>`;
   $("set-form").addEventListener("submit", async (e) => {
     e.preventDefault(); SETTINGS = await API.put("/settings", formData($("set-form"))); toast(t("settings_saved"));
+  });
+  if ($("set-geo")) $("set-geo").addEventListener("click", () => {
+    if (!navigator.geolocation) { alert(t("geo_unsupported")); return; }
+    $("set-geo").textContent = "…";
+    navigator.geolocation.getCurrentPosition(
+      (p) => { $("set-form").querySelector("[name=company_geo]").value = p.coords.latitude.toFixed(6) + "," + p.coords.longitude.toFixed(6); $("set-geo").textContent = "📍 " + t("use_my_location"); },
+      () => { alert(t("geo_failed")); $("set-geo").textContent = "📍 " + t("use_my_location"); });
   });
   $("cert-form").addEventListener("submit", async (e) => {
     e.preventDefault(); SETTINGS = await API.put("/settings", formData($("cert-form"))); toast(t("settings_saved"));
@@ -2803,6 +3257,7 @@ async function viewClientAnalytics(v, arg) {
       <div style="display:flex;gap:8px;align-items:center">
         ${sites.length ? `<label class="muted small">📍 ${t("location_lbl")}:</label>
           <select id="loc-filter">${locOpts.join("")}</select>` : ""}
+        ${can("analytics.view") || role() === "client" ? `<button class="btn sm" id="audit-pack">📦 ${t("audit_pack")}</button>` : ""}
         <button class="btn sm" id="export-analytics">🖨️ ${t("export_pdf")}</button></div></div>
     <div id="analytics-body"><div class="empty">${t("loading")}</div></div>`;
   $("bc").addEventListener("click", () => navigate(role() === "client" ? "folder" : "client", { id }));
@@ -2864,6 +3319,7 @@ async function viewClientAnalytics(v, arg) {
     const sub = localized(c, "name") + " — " + locName(currentSite);
     printAnalytics(c, currentParts, sub);
   });
+  if ($("audit-pack")) $("audit-pack").addEventListener("click", () => auditPackDialog(c, currentSite, locName));
   await render("");
 }
 
@@ -2929,6 +3385,168 @@ function printAnalytics(c, parts, subtitle) {
     ${parts.materials ? `<div class="panel"><h3>📦 ${esc(t("materials_consumed"))}</h3>${parts.materials}</div>` : ""}
     ${parts.pestTrends ? `<h2 style="margin:18px 0 6px">🐭 ${esc(t("pest_trends"))}</h2>${parts.pestTrends}` : ""}`;
   analyticsReportDoc(t("analytics_report"), subtitle || localized(c, "name"), body);
+}
+
+// ====================================================================
+// One-click Audit Pack — the binder an auditor asks for, as one branded PDF.
+// (Per-site service history, device trends, chemical usage log + SDS/labels,
+//  technician licences, and corrective actions.)
+// ====================================================================
+function auditPackDialog(c, siteId, locName) {
+  const iso = (d) => d.toISOString().slice(0, 10);
+  const today = new Date();
+  const from = new Date(today); from.setFullYear(from.getFullYear() - 1);
+  openModal(`📦 ${t("audit_pack")}`, `<form id="apf">
+    <p class="muted small" style="margin:0 0 12px">${esc(t("audit_pack_hint"))}</p>
+    <div class="form-grid">
+      ${field(t("from_date"), "from", { type: "date", value: iso(from) })}
+      ${field(t("to_date"), "to", { type: "date", value: iso(today) })}
+    </div>
+    <p class="muted small">📍 ${esc(t("location_lbl"))}: <strong>${esc(locName(siteId))}</strong></p>
+    <div class="form-actions"><button type="button" class="btn secondary" id="apf-x">${t("cancel")}</button>
+    <button class="btn" type="submit">📦 ${t("audit_generate")}</button></div></form>`, (root) => {
+    $("apf-x").addEventListener("click", closeModal);
+    root.querySelector("#apf").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const d = formData(root);
+      closeModal();
+      await generateAuditPack(c, siteId, locName(siteId), d.from, d.to);
+    });
+  });
+}
+
+async function generateAuditPack(c, siteId, siteName, from, to) {
+  let data;
+  try {
+    const q = new URLSearchParams();
+    if (siteId) q.set("site_id", siteId);
+    if (from) q.set("from", from);
+    if (to) q.set("to", to);
+    data = await API.get(`/clients/${c.id}/audit-pack?${q.toString()}`);
+  } catch (err) { alert(err.message); return; }
+  const sub = localized(c, "name") + (siteName ? " — " + siteName : "");
+  analyticsReportDoc(`📦 ${t("audit_pack")}`, sub, renderAuditPack(data));
+}
+
+function renderAuditPack(d) {
+  const sevColors = { low: "#16a34a", medium: "#d97706", high: "#ef4444", critical: "#b91c1c" };
+  const sevBadge = (s) => s ? `<span style="display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:700;color:#fff;background:${sevColors[s] || "#64748b"}">${esc(t("sev_" + s))}</span>` : "—";
+  const S = d.summary;
+  const sc = (val, label, icon, cls) => `<div class="stat-card ${cls}"><div class="sc-ic">${icon}</div><div><div class="v">${val}</div><div class="l">${esc(label)}</div></div></div>`;
+  const rangeTxt = `${fmtDate(d.range.from)} → ${fmtDate(d.range.to)}`;
+
+  // 1. cover / summary
+  const cover = `<div class="panel" style="border-left:4px solid #16a34a">
+      <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px">
+        <div><strong>${esc(localized(d.client, "name"))}</strong>
+          ${d.site ? ` · ${esc(d.site.name)}` : ` · ${esc(t("all_locations"))}`}</div>
+        <div class="muted">${esc(t("audit_period"))}: <strong>${esc(rangeTxt)}</strong></div></div></div>
+    <div class="cards">
+      ${sc(S.visits, t("total_visits"), "🗓️", "c-blue")}
+      ${sc(S.completed, t("visits_completed"), "✅", "c-green")}
+      ${sc(S.signed, t("signed_reports"), "✍️", "c-teal")}
+      ${sc(S.products, t("products_used"), "🧪", "c-purple")}
+      ${sc(S.detections, t("activity_detections"), "🐭", "danger")}
+      ${sc(S.corrective, t("corrective_actions"), "🛠️", "c-amber")}</div>`;
+
+  // 2. device / pest-activity trend
+  let trends = "";
+  if (S.detections || (d.trend.months || []).some(m => m.inspections)) {
+    const labels = d.trend.months.map(m => monthShort(m.m));
+    const curve = curveChart(labels, [
+      { name: t("inspections"), color: "#2563eb", values: d.trend.months.map(m => m.inspections) },
+      { name: t("detections"), color: "#dc2626", values: d.trend.months.map(m => m.detections) }]);
+    const typeItems = d.trend.by_type.map((r, i) => ({
+      label: r.type ? t("type_" + r.type) : t("none"), value: r.detections, color: PALETTE[(i + 1) % PALETTE.length] }));
+    trends = `<h2 style="margin:18px 0 6px">🐭 ${esc(t("pest_trends"))}</h2>
+      <div class="panel"><h3>📈 ${esc(t("pest_trends"))}</h3>${curve}</div>
+      ${typeItems.length ? `<div class="panel"><h3>🐛 ${esc(t("by_device_type"))}</h3>${cols3d(typeItems)}</div>` : ""}`;
+  }
+
+  // 3. service history
+  const histRows = d.history.map(h => `<tr>
+      <td>${fmtDate(h.scheduled_start)}</td>
+      <td>${esc(h.site_name || "—")}</td>
+      <td>${esc(localized({ name_en: h.svc_en, name_ar: h.svc_ar }, "name") || "—")}</td>
+      <td>${esc(h.agent || "—")}</td>
+      <td>${sevBadge(h.severity)}</td>
+      <td>${esc(h.summary || h.findings || "—")}</td>
+      <td style="text-align:center">${h.customer_signature && h.technician_signature ? "✅" : "—"}</td>
+    </tr>`).join("") || `<tr><td colspan="7" class="empty">${t("none")}</td></tr>`;
+  const history = `<h2 style="margin:18px 0 6px">📋 ${esc(t("service_history"))}</h2>
+    <div class="panel"><table><thead><tr>
+      <th>${t("date")}</th><th>${t("location_lbl")}</th><th>${t("service")}</th><th>${t("agent")}</th>
+      <th>${t("severity")}</th><th>${t("summary")}</th><th>${t("customer_sig")}</th></tr></thead>
+      <tbody>${histRows}</tbody></table></div>`;
+
+  // 4. chemical usage log + product / SDS list
+  const rate = (r) => {
+    const a = parseFloat(r.area_treated);
+    return (!isNaN(a) && a > 0) ? `${Math.round((r.quantity / a) * 1000) / 1000} ${esc(r.unit || "")}/${esc(t("unit_area"))}` : "—";
+  };
+  const chemRows = d.chem_log.map(r => `<tr>
+      <td>${fmtDate(r.scheduled_start)}</td>
+      <td>${esc(localized(r, "name"))}</td>
+      <td>${esc(r.active_ingredient || "—")}</td>
+      <td>${esc(r.reg_no || "—")}</td>
+      <td class="num">${r.quantity} ${esc(r.unit || "")}</td>
+      <td>${esc(r.area_treated || "—")}</td>
+      <td>${rate(r)}</td>
+      <td>${esc(r.agent || "—")}</td></tr>`).join("") || `<tr><td colspan="8" class="empty">${t("none")}</td></tr>`;
+  const prodRows = d.products.map(p => {
+    const docs = (p.attachments || []).length
+      ? p.attachments.map(a => `<a href="/uploads/${esc(a.filename)}" target="_blank">${esc(a.original_name || t("sds_label"))}</a>`).join(", ")
+      : `<span class="muted">${t("no_sds")}</span>`;
+    return `<tr><td>${esc(localized(p, "name"))}</td><td>${esc(p.active_ingredient || "—")}</td>
+      <td>${esc(p.reg_no || "—")}</td><td>${esc(p.hazard_class || "—")}</td><td>${docs}</td></tr>`;
+  }).join("") || `<tr><td colspan="5" class="empty">${t("none")}</td></tr>`;
+  const chemicals = `<h2 style="margin:18px 0 6px">🧪 ${esc(t("chemical_usage_log"))}</h2>
+    <div class="panel"><table><thead><tr>
+      <th>${t("date")}</th><th>${t("product")}</th><th>${t("active_ingredient")}</th><th>${t("reg_no")}</th>
+      <th class="num">${t("quantity")}</th><th>${t("area_treated")}</th><th>${t("application_rate")}</th><th>${t("agent")}</th>
+      </tr></thead><tbody>${chemRows}</tbody></table></div>
+    <div class="panel"><h3>📄 ${esc(t("products_sds"))}</h3><table><thead><tr>
+      <th>${t("product")}</th><th>${t("active_ingredient")}</th><th>${t("reg_no")}</th>
+      <th>${t("hazard_class")}</th><th>${t("sds_label")}</th></tr></thead>
+      <tbody>${prodRows}</tbody></table></div>`;
+
+  // 5. technician credentials
+  const techRows = d.technicians.map(u => `<tr>
+      <td>${esc(u.full_name)}</td>
+      <td>${esc(u.specialization || "—")}</td>
+      <td>${esc(u.license_no || "—")}</td>
+      <td>${u.license_expiry ? fmtDate(u.license_expiry) : "—"}</td>
+      <td class="num">${u.visits}</td>
+      <td>${fmtDate(u.last_visit)}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">${t("none")}</td></tr>`;
+  const techs = `<h2 style="margin:18px 0 6px">👷 ${esc(t("technician_credentials"))}</h2>
+    <div class="panel"><table><thead><tr>
+      <th>${t("technician")}</th><th>${t("specialization")}</th><th>${t("license_no")}</th>
+      <th>${t("license_expiry")}</th><th class="num">${t("nav_visits")}</th><th>${t("last_visit")}</th>
+      </tr></thead><tbody>${techRows}</tbody></table></div>`;
+
+  // 6. corrective actions (+ open device alerts)
+  const corrRows = d.corrective.map(r => `<tr>
+      <td>${fmtDate(r.scheduled_start)}</td><td>${esc(r.site_name || "—")}</td>
+      <td>${sevBadge(r.severity)}</td>
+      <td>${esc(r.findings || r.pests_found || r.branch_issue || "—")}</td>
+      <td>${esc(r.recommendations || "—")}</td>
+      <td>${esc(r.agent || "—")}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">${t("no_corrective")}</td></tr>`;
+  const alertRows = (d.device_alerts || []).map(a => `<tr>
+      <td>${esc(a.label || "—")}</td><td>${esc(a.type ? t("type_" + a.type) : "—")}</td>
+      <td>${esc(a.map_name || "—")}</td>
+      <td><span style="display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:700;color:#fff;background:${a.status === "activity" ? "#dc2626" : "#d97706"}">${esc(t("mst_" + a.status))}</span></td>
+      <td>${a.last_seen ? fmtDate(a.last_seen) : "—"}</td></tr>`).join("");
+  const corrective = `<h2 style="margin:18px 0 6px">🛠️ ${esc(t("corrective_actions"))}</h2>
+    <div class="panel"><table><thead><tr>
+      <th>${t("date")}</th><th>${t("location_lbl")}</th><th>${t("severity")}</th>
+      <th>${t("finding")}</th><th>${t("action_taken")}</th><th>${t("agent")}</th>
+      </tr></thead><tbody>${corrRows}</tbody></table></div>
+    ${alertRows ? `<div class="panel"><h3>⚠️ ${esc(t("open_device_alerts"))}</h3><table><thead><tr>
+      <th>${t("marker_label")}</th><th>${t("marker_type")}</th><th>${t("map_name")}</th>
+      <th>${t("marker_status")}</th><th>${t("last_seen")}</th></tr></thead>
+      <tbody>${alertRows}</tbody></table></div>` : ""}`;
+
+  return cover + trends + history + chemicals + techs + corrective;
 }
 
 // ====================================================================
@@ -3010,7 +3628,8 @@ async function viewMap(v, arg) {
       <span class="muted small">(${map.markers.length} ${t("total_devices")})</span></h2>
       ${canEdit ? `<div style="display:flex;gap:8px;align-items:center">
         <select id="mk-type" class="toolbar-select">${typeOpts}</select>
-        <button class="btn sm" id="place-btn">➕ ${t("add_device")}</button></div>` : ""}</div>
+        <button class="btn sm" id="place-btn">➕ ${t("add_device")}</button>
+        ${map.markers.length ? `<button class="btn sm secondary" id="qr-sheet">🏷️ ${t("print_qr_labels")}</button>` : ""}</div>` : ""}</div>
     <div class="map-legend-bar">${mapLegend()}</div>
     <div class="map-stage" id="stage">
       <img id="map-img" src="/uploads/${esc(map.filename)}">
@@ -3025,22 +3644,24 @@ async function viewMap(v, arg) {
     if (p) toast(t("click_to_place"));
   };
   if ($("place-btn")) $("place-btn").addEventListener("click", () => setPlacing(!placing));
+  if ($("qr-sheet")) $("qr-sheet").addEventListener("click", () => printQrSheet(map));
   stage.addEventListener("click", (e) => {
     if (!placing) return;
     const img = $("map-img"), r = img.getBoundingClientRect();
     const x = Math.min(100, Math.max(0, ((e.clientX - r.left) / r.width) * 100));
     const y = Math.min(100, Math.max(0, ((e.clientY - r.top) / r.height) * 100));
     setPlacing(false);
-    markerForm(map.id, { x: +x.toFixed(2), y: +y.toFixed(2), type: $("mk-type").value, status: "ok" }, false);
+    markerForm(map, { x: +x.toFixed(2), y: +y.toFixed(2), type: $("mk-type").value, status: "ok" }, false);
   });
   v.querySelectorAll(".map-pin").forEach(p => p.addEventListener("click", (e) => {
     e.stopPropagation();
     const mk = map.markers.find(x => x.id == p.dataset.marker);
-    if (canEdit) markerForm(map.id, mk, true); else showMarkerInfo(mk);
+    if (canEdit) markerForm(map, mk, true); else showMarkerInfo(mk);
   }));
 }
 
-function markerForm(mapId, mk, isEdit) {
+function markerForm(map, mk, isEdit) {
+  const mapId = map.id;
   const typeOpts = MARKER_TYPES.map(x => ({ v: x.k, l: x.icon + " " + t("type_" + x.k) }));
   const statusOpts = ["ok", "needs_service", "activity", "missing"].map(s => ({ v: s, l: t("mst_" + s) }));
   openModal(isEdit ? t("edit") : t("add_device"), `<form id="mkf">
@@ -3048,10 +3669,13 @@ function markerForm(mapId, mk, isEdit) {
     ${field(t("marker_label"), "label", { value: mk.label })}
     ${field(t("marker_status"), "status", { options: statusOpts, value: mk.status })}
     ${field(t("marker_notes"), "notes", { textarea: true, value: mk.notes })}
+    ${isEdit && mk.qr_token ? `<div class="qr-mini"><div class="qr-mini-img">${qrSvg(deviceScanUrl(mk), 3)}</div>
+      <button type="button" class="btn sm secondary" id="mk-qr">🏷️ ${t("print_qr")}</button></div>` : ""}
     <div class="form-actions">${isEdit ? `<button type="button" class="btn danger" id="mk-del" style="margin-inline-end:auto">${t("delete")}</button>` : ""}
       <button type="button" class="btn secondary" id="mk-x">${t("cancel")}</button>
       <button class="btn" type="submit">${t("save_device")}</button></div></form>`, (root) => {
     $("mk-x").addEventListener("click", closeModal);
+    if ($("mk-qr")) $("mk-qr").addEventListener("click", () => printQrSheet(map, mk));
     if ($("mk-del")) $("mk-del").addEventListener("click", async () => {
       const r = await API.del("/markers/" + mk.id); if (handledOffline(r)) return; closeModal(); navigate("map", { id: mapId });
     });
@@ -3075,6 +3699,571 @@ function showMarkerInfo(mk) {
     <div class="form-actions"><button class="btn" id="mi-x">${t("close")}</button></div>`, () => {
     $("mi-x").addEventListener("click", closeModal);
   });
+}
+
+// ====================================================================
+// QR-CODED DEVICES — printable labels + scan-to-inspect (the audit moat)
+// ====================================================================
+// QR-coded devices: code generation, scan-to-report, printable labels.
+// The four field-device types and their printed code prefixes.
+const DEVICE_TYPES = [
+  { k: "light_trap",   icon: "💡", pre: "LIT" },
+  { k: "glue_station", icon: "🟨", pre: "GLU" },
+  { k: "bait_station", icon: "📦", pre: "BAI" },
+  { k: "fly_trap",     icon: "🪰", pre: "FLY" },
+];
+function devIcon(type) { const m = DEVICE_TYPES.find(x => x.k === type); return m ? m.icon : "🏷️"; }
+
+// Per-type follow-up fields captured on a scan (the simplified key fields from
+// the printed follow-up form). Drives both the scan form and the printout.
+// kind: "select" (opts = option keys, labelled via t("df_opt_"+key)),
+//       "num" (min/max range), "bool" (yes/no). Labels via t("df_"+key).
+const DEVICE_FIELDS = {
+  bait_station: [
+    { key: "station_condition", kind: "select", opts: ["good", "replaced"] },
+    { key: "cleaned", kind: "bool" },
+    { key: "bait_status", kind: "select", opts: ["intact", "changed", "damaged", "missing"] },
+    { key: "consumption_pct", kind: "num", min: 0, max: 100 },
+  ],
+  fly_trap: [
+    { key: "trap_condition", kind: "select", opts: ["good", "replaced"] },
+    { key: "washed", kind: "bool" },
+    { key: "water_refilled", kind: "bool" },
+    { key: "fly_density", kind: "num", min: 0, max: 1000 },
+  ],
+  glue_station: [
+    { key: "station_condition", kind: "select", opts: ["good", "replaced"] },
+    { key: "cleaned", kind: "bool" },
+    { key: "glue_status", kind: "select", opts: ["intact", "changed", "damaged", "missing"] },
+    { key: "caught", kind: "bool" },
+  ],
+  light_trap: [
+    { key: "trap_condition", kind: "select", opts: ["good", "replaced"] },
+    { key: "electricity", kind: "select", opts: ["connected", "reconnected", "disconnected"] },
+    { key: "lamp_status", kind: "select", opts: ["good", "replaced", "missing"] },
+    { key: "sheet_status", kind: "select", opts: ["good", "replaced", "missing"] },
+    { key: "fly_count", kind: "num", min: 0, max: 1000 },
+  ],
+};
+// Build the follow-up field inputs for a device type. `pf` is an optional
+// prefill object (the details from this visit's last inspection of the device).
+function scanFieldsHtml(type, pf) {
+  pf = pf || {};
+  const inp = (f) => {
+    const cur = pf[f.key];
+    if (f.kind === "num")
+      return `<input type="number" name="${f.key}" inputmode="numeric"${f.min != null ? ` min="${f.min}"` : ""}${f.max != null ? ` max="${f.max}"` : ""} value="${cur != null ? esc(String(cur)) : ""}">`;
+    const opts = f.kind === "bool" ? ["yes", "no"] : f.opts;
+    const optHtml = opts.map(o => `<option value="${o}"${String(cur) === o ? " selected" : ""}>${f.kind === "bool" ? t(o) : t("df_opt_" + o)}</option>`).join("");
+    return `<select name="${f.key}"><option value="">—</option>${optHtml}</select>`;
+  };
+  return `<div class="scan-fields">${(DEVICE_FIELDS[type] || []).map(f =>
+    `<label class="scan-f"><span>${t("df_" + f.key)}</span>${inp(f)}</label>`).join("")}</div>`;
+}
+
+// Human-readable one-line summary of a stored details object, for history rows
+// and the coverage table. `det` is the parsed object; `type` its device type.
+function deviceDetailsSummary(type, det) {
+  if (!det || typeof det !== "object") return "";
+  return (DEVICE_FIELDS[type] || []).filter(f => det[f.key] !== undefined && det[f.key] !== "")
+    .map(f => {
+      const v = det[f.key];
+      const shown = f.kind === "num" ? v
+        : f.kind === "bool" ? t(String(v) === "yes" || v === true ? "yes" : "no")
+        : t("df_opt_" + v);
+      return `${t("df_" + f.key)}: ${shown}`;
+    }).join(" · ");
+}
+// Absolute URL a printed device code resolves to (the SPA scan view).
+function codeScanUrl(code) { return location.origin + "/scan/" + code; }
+// (kept for the legacy floor-plan map markers)
+function deviceScanUrl(mk) { return location.origin + "/scan/" + mk.qr_token; }
+
+// Render `text` as an inline QR SVG string (crisp at any print size). Returns
+// "" if the QR library failed to load (degrade, never throw).
+function qrSvg(text, cell) {
+  try {
+    if (typeof qrcode !== "function") return "";
+    const qr = qrcode(0, "M");           // 0 = auto version, M = ~15% recovery
+    qr.addData(text); qr.make();
+    return qr.createSvgTag({ cellSize: cell || 4, margin: 2 });
+  } catch (e) { return ""; }
+}
+
+// Scan landing: fetch by token/code, then render the device or (legacy) marker UI.
+async function viewScan(v, arg) {
+  const token = arg.token;
+  let d;
+  try { d = await API.get("/scan/" + token); }
+  catch (e) {
+    v.innerHTML = `<div class="scan-wrap"><div class="scan-card">
+      <div class="empty">⚠️ ${esc(e.message || t("device_unknown"))}</div>
+      <div class="form-actions"><button class="btn" id="sc-home">${t("nav_dashboard")}</button></div>
+    </div></div>`;
+    if ($("sc-home")) $("sc-home").addEventListener("click", () => navigate("dashboard"));
+    return;
+  }
+  if (d.code) return renderDeviceScan(v, token, d);
+  return renderMarkerScan(v, token, d);
+}
+
+// Device scan: the agent's two-second report for one trap during a visit.
+function renderDeviceScan(v, code, d) {
+  const unassigned = !d.client_id;
+  const canInspect = can("maps.edit") && !unassigned;
+  const stBtns = ["ok", "activity", "needs_service", "missing"].map(s =>
+    `<button class="scan-st" data-st="${s}" style="--c:${MARKER_STATUS[s]}">${t("mst_" + s)}</button>`).join("");
+  const visitLine = d.active_visit_id
+    ? `<div class="scan-now ok-line">✓ ${t("filing_on_visit")} #${d.active_visit_id}</div>`
+    : `<div class="scan-now warn-line">⚠ ${t("no_active_visit")}</div>`;
+  v.innerHTML = `<div class="scan-wrap"><div class="scan-card">
+    <div class="scan-head">
+      <div class="scan-ic" style="background:${MARKER_STATUS[d.status] || "#64748b"}">${devIcon(d.type)}</div>
+      <div><div class="scan-title">${esc(d.code)}</div>
+        <div class="muted small">${devIcon(d.type)} ${esc(t("dt_" + d.type))}${d.label ? " · " + esc(d.label) : ""}</div>
+        <div class="muted small">${unassigned ? `<span class="warn-line">${t("unassigned")}</span>`
+          : esc(localized(d, "client")) + (d.site_name ? " · " + esc(d.site_name) : "")}</div></div>
+    </div>
+    ${unassigned ? `<div class="scan-now warn-line">${t("device_unassigned_hint")}</div>` : (canInspect ? visitLine : "")}
+    ${canInspect ? `
+      <div class="scan-q">${t("scan_prompt")}</div>
+      <div class="scan-sts">${stBtns}</div>
+      <div class="scan-q">${t("followup_details")}</div>
+      ${scanFieldsHtml(d.type, scanPrefill(d))}
+      <textarea id="sc-find" class="scan-note" rows="2" placeholder="${t("findings")}"></textarea>
+      <label class="scan-geo"><input type="checkbox" id="sc-geo" checked> ${t("scan_geostamp")}</label>
+      <div class="form-actions" style="margin-top:12px"><button class="btn" id="sc-save">✔ ${t("save_inspection")}</button></div>`
+      : (unassigned ? "" : `<div class="muted" style="margin:12px 0">${t("scan_readonly")}</div>`)}
+    <div class="scan-hist"><h3>${t("scan_history")}</h3>
+      ${(d.history || []).length ? d.history.map(h => {
+        let det = {}; try { det = h.details ? JSON.parse(h.details) : {}; } catch (e) { det = {}; }
+        const ds = deviceDetailsSummary(d.type, det);
+        return `
+        <div class="scan-ev"><span class="dot" style="background:${MARKER_STATUS[h.status] || "#64748b"}"></span>
+          <div class="se-main"><strong>${t("mst_" + h.status)}</strong>${h.findings ? " — " + esc(h.findings) : (h.note ? " — " + esc(h.note) : "")}
+            ${ds ? `<div class="muted small">${esc(ds)}</div>` : ""}
+            <div class="muted small">${fmtDateTime(h.recorded_at)}${h.recorded_by_name ? " · " + esc(h.recorded_by_name) : ""}${h.visit_id ? " · " + t("visit") + " #" + h.visit_id : ""}${(h.lat != null && h.lng != null) ? ` · <a href="https://www.google.com/maps/search/?api=1&query=${h.lat},${h.lng}" target="_blank" rel="noopener">📍</a>` : ""}</div>
+          </div></div>`; }).join("") : `<div class="empty">${t("none")}</div>`}
+    </div>
+    <div class="form-actions"><button class="btn secondary" id="sc-home">← ${t("nav_dashboard")}</button></div>
+  </div></div>`;
+  if ($("sc-home")) $("sc-home").addEventListener("click", () => navigate("dashboard"));
+  // Status buttons toggle a single selection (default: last-known device status).
+  let selSt = d.status && _DEV_STATUSES.includes(d.status) ? d.status : "ok";
+  const paint = () => v.querySelectorAll(".scan-st").forEach(b =>
+    b.classList.toggle("sel", b.dataset.st === selSt));
+  if (canInspect) {
+    paint();
+    v.querySelectorAll(".scan-st").forEach(b =>
+      b.addEventListener("click", () => { selSt = b.dataset.st; paint(); }));
+    if ($("sc-save")) $("sc-save").addEventListener("click", () =>
+      submitDeviceScan(code, selSt, d.active_visit_id, d.type, v));
+  }
+}
+const _DEV_STATUSES = ["ok", "activity", "needs_service", "missing"];
+
+// Latest inspection this device got on the current active visit — used to
+// prefill the fields so re-scanning a device shows what was already entered.
+function scanPrefill(d) {
+  const h = (d.history || []).find(x => x.visit_id && x.visit_id === d.active_visit_id);
+  if (!h || !h.details) return {};
+  try { return JSON.parse(h.details); } catch (e) { return {}; }
+}
+
+// File one device's inspection. Geo-stamp is best-effort, never blocks the log.
+async function submitDeviceScan(code, status, visitId, type, root) {
+  const findings = $("sc-find") ? $("sc-find").value.trim() : "";
+  const wantGeo = $("sc-geo") && $("sc-geo").checked;
+  const details = {};
+  (root || document).querySelectorAll(".scan-fields [name]").forEach(el => {
+    if (el.value !== "") details[el.name] = el.value;
+  });
+  const send = async (lat, lng) => {
+    try {
+      const r = await API.post("/scan/" + code, { status, findings, details, visit_id: visitId || null, lat, lng });
+      if (r && r.__queued) { toast(t("saved_offline")); return; }
+      toast(t("scan_logged"));
+      navigate("scan", { token: code });
+    } catch (e) { alert(e.message); }
+  };
+  if (wantGeo && navigator.geolocation) {
+    toast(t("scan_locating"));
+    navigator.geolocation.getCurrentPosition(
+      p => send(p.coords.latitude, p.coords.longitude),
+      () => send(null, null),
+      { enableHighAccuracy: true, timeout: 6000, maximumAge: 30000 });
+  } else { send(null, null); }
+}
+
+// One follow-up field's value as a printable cell.
+function fmtDetailCell(f, val) {
+  if (val === undefined || val === "" || val === null) return "—";
+  if (f.kind === "num") return esc(String(val));
+  if (f.kind === "bool") return t(String(val) === "yes" || val === true ? "yes" : "no");
+  return t("df_opt_" + val);
+}
+
+// Printable per-visit follow-up report, laid out like Follow up.pdf: company
+// header + one section per device type scanned on the visit, each a table whose
+// columns are that type's follow-up fields.
+async function printFollowupReport(visitId) {
+  let data;
+  try { data = await API.get(`/visits/${visitId}/followup`); }
+  catch (e) { alert(e.message); return; }
+  const groups = data.groups || {};
+  if (!Object.keys(groups).length) { toast(t("followup_nothing")); return; }
+  const ar = LANG === "ar", dir = ar ? "rtl" : "ltr";
+  const S = SETTINGS || {};
+  const v = data.visit || {};
+  const compName = (ar ? S.company_name_ar : S.company_name_en) || S.company_name_en || "Company";
+  const compAddr = (ar ? S.address_ar : S.address_en) || S.address_en || "";
+  const logoHtml = S.logo ? `<img src="/uploads/${esc(S.logo)}" style="height:46px">` : `<div style="font-size:32px">🐜</div>`;
+  const clientName = ar ? (v.client_ar || v.client_en) : (v.client_en || v.client_ar);
+  // Sections in the same order as the printed form.
+  const order = ["bait_station", "fly_trap", "glue_station", "light_trap"];
+  const sections = order.filter(ty => (groups[ty] || []).length).map(ty => {
+    const fields = DEVICE_FIELDS[ty] || [];
+    const head = `<th>${t("code")}</th><th>${t("label")}</th><th>${t("status")}</th>`
+      + fields.map(f => `<th>${esc(t("df_" + f.key))}</th>`).join("");
+    const rows = groups[ty].map(r => `<tr>
+      <td class="c">${esc(r.code)}</td><td>${esc(r.label || "—")}</td>
+      <td>${t("mst_" + r.status)}</td>
+      ${fields.map(f => `<td class="c">${fmtDetailCell(f, (r.details || {})[f.key])}</td>`).join("")}
+    </tr>`).join("");
+    return `<div class="sec"><h3>${devIcon(ty)} ${esc(t("sec_" + ty))}</h3>
+      <table><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div>`;
+  }).join("");
+  const meta = [
+    [t("client"), clientName],
+    [t("site_name"), v.site_name],
+    [t("agent"), v.agent_name],
+    [t("visit"), "#" + String(v.id).padStart(5, "0")],
+    [t("date"), fmtDate(v.scheduled_start)],
+    [t("visit_number"), v.visit_number],
+  ].filter(([, val]) => val != null && String(val).trim() !== "")
+    .map(([l, val]) => `<span><b>${esc(l)}:</b> ${esc(String(val))}</span>`).join("");
+  const doc = `<!DOCTYPE html><html lang="${LANG}" dir="${dir}"><head><meta charset="utf-8">
+    <title>${esc(t("followup_report"))} #${String(v.id).padStart(5, "0")}</title>
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <style>
+      *{box-sizing:border-box}
+      body{font-family:${ar ? "'Cairo'" : "'Inter'"},system-ui,sans-serif;color:#1c2733;margin:0;padding:36px;font-size:12px}
+      .sheet{max-width:900px;margin:auto}
+      .top{display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid #0f172a;padding-bottom:12px;margin-bottom:8px}
+      .co h1{margin:0;font-size:16px}.co .m{color:#64748b;font-size:10px;line-height:1.6}
+      .rt{text-align:${ar ? "left" : "right"}}.rt h2{margin:0;font-size:18px}
+      .meta{display:flex;flex-wrap:wrap;gap:6px 18px;margin:10px 0 6px;color:#334155}
+      .sec{margin-top:16px;break-inside:avoid}.sec h3{margin:0 0 6px;font-size:14px;color:#0f766e}
+      table{width:100%;border-collapse:collapse;font-size:11px}
+      th,td{border:1px solid #cbd5e1;padding:5px 7px;text-align:${ar ? "right" : "left"};vertical-align:top}
+      th{background:#f1f5f9;font-weight:700}.c{text-align:center}
+      .noprint{margin-bottom:12px}.pbtn{background:#0f766e;color:#fff;border:none;padding:9px 20px;border-radius:8px;font-size:14px;cursor:pointer}
+      @media print{.noprint{display:none}body{padding:0}}
+    </style></head><body>
+    <div class="sheet">
+      <div class="noprint"><button class="pbtn" onclick="window.print()">🖨️ ${esc(t("print"))}</button></div>
+      <div class="top">
+        <div class="co">${logoHtml}<h1>${esc(compName)}</h1>${compAddr ? `<div class="m">${esc(compAddr)}</div>` : ""}</div>
+        <div class="rt"><h2>${esc(t("followup_report"))}</h2></div>
+      </div>
+      <div class="meta">${meta}</div>
+      ${sections}
+    </div>
+    <script>window.onload=function(){setTimeout(function(){window.print()},400)}<\/script>
+    </body></html>`;
+  const w = window.open("", "_blank");
+  if (!w) { alert(t("popup_blocked")); return; }
+  w.document.open(); w.document.write(doc); w.document.close();
+}
+
+// Printable label sheet for a set of device codes (big code text + scannable QR).
+function printDeviceCodes(devices) {
+  const list = (devices || []).filter(d => d.code);
+  if (!list.length) { toast(t("no_devices")); return; }
+  const S = SETTINGS || {};
+  const comp = (LANG === "ar" ? S.company_name_ar : S.company_name_en) || S.company_name_en || "PestCare";
+  const cells = list.map(d => `
+    <div class="label"><div class="qr">${qrSvg(codeScanUrl(d.code), 4)}</div>
+      <div class="meta">
+        <div class="code">${esc(d.code)}</div>
+        <div class="dt">${devIcon(d.type)} ${esc(t("dt_" + d.type))}</div>
+        <div class="dc">${d.client_id ? esc(localized(d, "client")) : ""}${d.label ? " · " + esc(d.label) : ""}</div>
+        <div class="cmp">${esc(comp)}</div></div></div>`).join("");
+  const doc = `<!DOCTYPE html><html lang="${LANG}" dir="${LANG === "ar" ? "rtl" : "ltr"}"><head><meta charset="utf-8">
+    <title>${esc(t("device_codes"))}</title><style>
+      *{box-sizing:border-box}body{font-family:system-ui,sans-serif;margin:0;padding:12px}
+      .sheet{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+      .label{border:1px dashed #94a3b8;border-radius:8px;padding:10px;display:flex;gap:10px;align-items:center;break-inside:avoid}
+      .qr{width:104px;height:104px;flex:none}.qr svg{width:100%;height:100%}
+      .meta{font-size:12px;line-height:1.35;overflow:hidden}
+      .code{font-weight:800;font-size:17px;letter-spacing:.04em}
+      .dt{color:#475569;font-size:12px}.dc{color:#64748b;font-size:11px}
+      .cmp{color:#0f766e;font-weight:600;margin-top:2px;font-size:11px}
+      .noprint{margin-bottom:10px}.pbtn{background:#0f766e;color:#fff;border:none;padding:9px 20px;border-radius:8px;font-size:14px;cursor:pointer}
+      @media print{.noprint{display:none}body{padding:0}}
+    </style></head><body>
+    <div class="noprint"><button class="pbtn" onclick="window.print()">🖨️ ${esc(t("print"))}</button></div>
+    <div class="sheet">${cells}</div>
+    <script>window.onload=function(){setTimeout(function(){window.print()},500)}<\/script>
+    </body></html>`;
+  const w = window.open("", "_blank");
+  if (!w) { alert(t("popup_blocked")); return; }
+  w.document.open(); w.document.write(doc); w.document.close();
+}
+
+// ---- Sidebar: Device QR Codes registry (generate / assign / print / scan) ----
+let _devCurrent = [];
+let _devFilter = { client_id: "", type: "", unassigned: "" };
+
+async function viewDevices(v) {
+  const canManage = can("maps.create");
+  const clientOpts = [{ v: "", l: t("all_clients") }].concat(cache.clients.map(c => ({ v: c.id, l: localized(c, "name") })));
+  const typeOpts = [{ v: "", l: t("all") }].concat(DEVICE_TYPES.map(x => ({ v: x.k, l: x.icon + " " + t("dt_" + x.k) })));
+  const sel = (id, opts) => `<select id="${id}" class="toolbar-select">${opts.map(o =>
+    `<option value="${esc(o.v)}">${esc(o.l)}</option>`).join("")}</select>`;
+  v.innerHTML = `
+    <div class="page-head"><h2>🏷️ ${t("nav_devices")}</h2>
+      ${canManage ? `<button class="btn" id="gen-codes">＋ ${t("generate_codes")}</button>` : ""}</div>
+    <div class="muted small" style="margin-bottom:10px">${t("devices_hint")}</div>
+    <div class="dev-toolbar">
+      ${sel("df-client", clientOpts)} ${sel("df-type", typeOpts)}
+      <label class="scan-geo"><input type="checkbox" id="df-unassigned"> ${t("unassigned_only")}</label>
+      <span class="spacer"></span>
+      ${canManage ? `<button class="btn sm secondary" id="dev-assign" disabled>${t("assign_to_client")}</button>` : ""}
+      <button class="btn sm" id="dev-print" disabled>🏷️ ${t("print_selected")}</button>
+    </div>
+    <div class="panel" id="dev-list">${t("loading")}</div>`;
+  $("df-client").value = _devFilter.client_id; $("df-type").value = _devFilter.type;
+  $("df-unassigned").checked = !!_devFilter.unassigned;
+  const selectedIds = () => Array.from(document.querySelectorAll(".dev-cb:checked")).map(cb => +cb.dataset.id);
+  const updateBulk = () => {
+    const n = selectedIds().length;
+    if ($("dev-print")) $("dev-print").disabled = !n;
+    if ($("dev-assign")) $("dev-assign").disabled = !n;
+  };
+  const render = (devs) => {
+    _devCurrent = devs;
+    const box = $("dev-list");
+    if (!devs.length) { box.innerHTML = `<div class="empty">${t("devices_none")}</div>`; updateBulk(); return; }
+    box.innerHTML = `<table><thead><tr>
+      <th style="width:26px"><input type="checkbox" id="dev-all"></th>
+      <th>${t("code")}</th><th>${t("marker_type")}</th><th>${t("client")}</th>
+      <th>${t("location_lbl")}</th><th>${t("label")}</th><th>${t("status")}</th><th>${t("last_seen")}</th><th></th>
+    </tr></thead><tbody>
+      ${devs.map(d => `<tr>
+        <td><input type="checkbox" class="dev-cb" data-id="${d.id}"></td>
+        <td><strong>${esc(d.code)}</strong></td>
+        <td>${devIcon(d.type)} ${esc(t("dt_" + d.type))}</td>
+        <td>${d.client_id ? esc(localized(d, "client")) : `<span class="muted">${t("unassigned")}</span>`}</td>
+        <td>${esc(d.site_name || "—")}</td><td>${esc(d.label || "—")}</td>
+        <td><span style="color:${MARKER_STATUS[d.status] || "#64748b"}">${t("mst_" + d.status)}</span></td>
+        <td class="muted small">${d.last_seen ? fmtDateTime(d.last_seen) : "—"}</td>
+        <td><div style="display:flex;gap:6px;justify-content:flex-end">
+          <button class="btn sm secondary" data-open="${esc(d.code)}">${t("open")}</button>
+          ${canManage ? `<button class="btn sm secondary" data-edit="${d.id}">✏️</button>` : ""}
+        </div></td></tr>`).join("")}
+    </tbody></table>`;
+    box.querySelectorAll(".dev-cb").forEach(cb => cb.addEventListener("change", updateBulk));
+    if ($("dev-all")) $("dev-all").addEventListener("change", e => {
+      box.querySelectorAll(".dev-cb").forEach(cb => cb.checked = e.target.checked); updateBulk();
+    });
+    box.querySelectorAll("[data-open]").forEach(b => b.addEventListener("click",
+      () => navigate("scan", { token: b.dataset.open })));
+    box.querySelectorAll("[data-edit]").forEach(b => b.addEventListener("click",
+      () => deviceEditDialog(_devCurrent.find(x => x.id == b.dataset.edit), load)));
+    updateBulk();
+  };
+  const load = async () => {
+    const qp = [];
+    if ($("df-client").value) qp.push("client_id=" + $("df-client").value);
+    if ($("df-type").value) qp.push("type=" + $("df-type").value);
+    if ($("df-unassigned").checked) qp.push("unassigned=1");
+    _devFilter = { client_id: $("df-client").value, type: $("df-type").value, unassigned: $("df-unassigned").checked ? "1" : "" };
+    render(await API.get("/devices" + (qp.length ? "?" + qp.join("&") : "")));
+  };
+  ["df-client", "df-type", "df-unassigned"].forEach(id => $(id).addEventListener("change", load));
+  if ($("gen-codes")) $("gen-codes").addEventListener("click", () => generateCodesDialog(load));
+  if ($("dev-print")) $("dev-print").addEventListener("click", () =>
+    printDeviceCodes(_devCurrent.filter(d => selectedIds().includes(d.id))));
+  if ($("dev-assign")) $("dev-assign").addEventListener("click", () => assignDevicesDialog(selectedIds(), load));
+  await load();
+}
+
+function generateCodesDialog(onDone) {
+  const typeOpts = DEVICE_TYPES.map(x => ({ v: x.k, l: x.icon + " " + t("dt_" + x.k) }));
+  const clientOpts = [{ v: "", l: t("assign_later") }].concat(cache.clients.map(c => ({ v: c.id, l: localized(c, "name") })));
+  openModal(t("generate_codes"), `<form id="genf">
+    ${field(t("marker_type"), "type", { options: typeOpts })}
+    ${field(t("quantity"), "count", { type: "number", value: "50" })}
+    ${field(t("assign_to_client"), "client_id", { options: clientOpts })}
+    <div class="field"><label>${t("for_site_optional")}</label><select name="site_id"><option value="">${t("none")}</option></select></div>
+    <div class="muted small">${t("generate_hint")}</div>
+    <div class="form-actions"><button type="button" class="btn secondary" id="gen-x">${t("cancel")}</button>
+      <button class="btn" type="submit">${t("generate")}</button></div></form>`, (root) => {
+    $("gen-x").addEventListener("click", closeModal);
+    const cs = root.querySelector("[name=client_id]"), ss = root.querySelector("[name=site_id]");
+    cs.addEventListener("change", () => loadSiteOptions(cs.value, ss, "", t("none")));
+    root.querySelector("#genf").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const f = formData(root);
+      const cnt = parseInt(f.count, 10);
+      if (!(cnt >= 1 && cnt <= 500)) { alert(t("count_range")); return; }
+      try {
+        const r = await API.post("/devices/generate",
+          { type: f.type, count: cnt, client_id: f.client_id || null, site_id: f.site_id || null });
+        closeModal(); toast(t("codes_generated").replace("{n}", r.codes.length));
+        if (onDone) await onDone();
+        // Build printable label objects from the returned codes (+ client name).
+        const cl = f.client_id ? cache.clients.find(c => String(c.id) === String(f.client_id)) : null;
+        const objs = r.codes.map(code => ({ code, type: r.type, client_id: f.client_id || null,
+          client_en: cl && cl.name_en, client_ar: cl && cl.name_ar }));
+        if (confirm(t("print_now_q"))) printDeviceCodes(objs);
+      } catch (err) { alert(err.message); }
+    });
+  });
+}
+
+function assignDevicesDialog(ids, onDone) {
+  if (!ids.length) return;
+  const clientOpts = [{ v: "", l: t("select") }].concat(cache.clients.map(c => ({ v: c.id, l: localized(c, "name") })));
+  openModal(t("assign_to_client"), `<form id="asf">
+    <div class="muted small" style="margin-bottom:8px">${t("assign_count").replace("{n}", ids.length)}</div>
+    ${field(t("client"), "client_id", { options: clientOpts })}
+    <div class="field"><label>${t("for_site_optional")}</label><select name="site_id"><option value="">${t("none")}</option></select></div>
+    <div class="form-actions"><button type="button" class="btn secondary" id="as-x">${t("cancel")}</button>
+      <button class="btn" type="submit">${t("assign")}</button></div></form>`, (root) => {
+    $("as-x").addEventListener("click", closeModal);
+    const cs = root.querySelector("[name=client_id]"), ss = root.querySelector("[name=site_id]");
+    cs.addEventListener("change", () => loadSiteOptions(cs.value, ss, "", t("none")));
+    root.querySelector("#asf").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const f = formData(root);
+      if (!f.client_id) { alert(t("select_client")); return; }
+      try {
+        await API.post("/devices/assign", { ids, client_id: +f.client_id, site_id: f.site_id || null });
+        closeModal(); toast(t("saved")); if (onDone) await onDone();
+      } catch (err) { alert(err.message); }
+    });
+  });
+}
+
+function deviceEditDialog(d, onDone) {
+  if (!d) return;
+  const statusOpts = ["ok", "activity", "needs_service", "missing"].map(s => ({ v: s, l: t("mst_" + s) }));
+  const clientOpts = [{ v: "", l: t("unassigned") }].concat(cache.clients.map(c => ({ v: c.id, l: localized(c, "name") })));
+  openModal(d.code, `<form id="edf">
+    ${field(t("label"), "label", { value: d.label })}
+    ${field(t("client"), "client_id", { options: clientOpts, value: d.client_id || "" })}
+    <div class="field"><label>${t("location_lbl")}</label><select name="site_id"><option value="">${t("none")}</option></select></div>
+    ${field(t("status"), "status", { options: statusOpts, value: d.status })}
+    <div class="form-actions"><button type="button" class="btn danger" id="ed-del" style="margin-inline-end:auto">${t("delete")}</button>
+      <button type="button" class="btn secondary" id="ed-x">${t("cancel")}</button>
+      <button class="btn" type="submit">${t("save")}</button></div></form>`, (root) => {
+    $("ed-x").addEventListener("click", closeModal);
+    const cs = root.querySelector("[name=client_id]"), ss = root.querySelector("[name=site_id]");
+    loadSiteOptions(d.client_id, ss, d.site_id, t("none"));
+    cs.addEventListener("change", () => loadSiteOptions(cs.value, ss, "", t("none")));
+    $("ed-del").addEventListener("click", async () => {
+      if (!confirm(t("confirm_delete"))) return;
+      await API.del("/devices/" + d.id); closeModal(); toast(t("saved")); if (onDone) await onDone();
+    });
+    root.querySelector("#edf").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const f = formData(root);
+      try {
+        await API.put("/devices/" + d.id,
+          { label: f.label, client_id: f.client_id || null, site_id: f.site_id || null, status: f.status });
+        closeModal(); toast(t("saved")); if (onDone) await onDone();
+      } catch (err) { alert(err.message); }
+    });
+  });
+}
+
+// Legacy floor-plan marker scan (kept for users still placing pins on map images).
+function renderMarkerScan(v, token, d) {
+  const canInspect = can("maps.edit");
+  const stBtns = ["ok", "activity", "needs_service", "missing"].map(s =>
+    `<button class="scan-st" data-st="${s}" style="--c:${MARKER_STATUS[s]}">${t("mst_" + s)}</button>`).join("");
+  v.innerHTML = `<div class="scan-wrap"><div class="scan-card">
+    <div class="scan-head">
+      <div class="scan-ic" style="background:${MARKER_STATUS[d.status] || "#64748b"}">${markerIcon(d.type)}</div>
+      <div><div class="scan-title">${esc(d.label || t("type_" + d.type))}</div>
+        <div class="muted small">${esc(t("type_" + d.type))} · ${esc(localized(d, "client"))}${d.site_name ? " · " + esc(d.site_name) : ""}</div></div>
+    </div>
+    ${canInspect ? `<div class="scan-q">${t("scan_prompt")}</div>
+      <div class="scan-sts">${stBtns}</div>
+      <textarea id="sc-note" class="scan-note" rows="2" placeholder="${t("marker_notes")}"></textarea>
+      <label class="scan-geo"><input type="checkbox" id="sc-geo" checked> ${t("scan_geostamp")}</label>`
+      : `<div class="muted" style="margin:12px 0">${t("scan_readonly")}</div>`}
+    <div class="scan-hist"><h3>${t("scan_history")}</h3>
+      ${(d.history || []).length ? d.history.map(h => `
+        <div class="scan-ev"><span class="dot" style="background:${MARKER_STATUS[h.status] || "#64748b"}"></span>
+          <div class="se-main"><strong>${t("mst_" + h.status)}</strong>${h.note ? " — " + esc(h.note) : ""}
+            <div class="muted small">${fmtDateTime(h.recorded_at)}${h.recorded_by_name ? " · " + esc(h.recorded_by_name) : ""}</div>
+          </div></div>`).join("") : `<div class="empty">${t("none")}</div>`}
+    </div>
+    <div class="form-actions"><button class="btn secondary" id="sc-home">← ${t("nav_dashboard")}</button></div>
+  </div></div>`;
+  if ($("sc-home")) $("sc-home").addEventListener("click", () => navigate("dashboard"));
+  if (canInspect) v.querySelectorAll(".scan-st").forEach(b =>
+    b.addEventListener("click", () => submitScan(token, b.dataset.st)));
+}
+async function submitScan(token, status) {
+  const note = $("sc-note") ? $("sc-note").value.trim() : "";
+  const wantGeo = $("sc-geo") && $("sc-geo").checked;
+  const send = async (lat, lng) => {
+    try {
+      const r = await API.post("/scan/" + token, { status, note, lat, lng });
+      if (r && r.__queued) { toast(t("saved_offline")); return; }
+      toast(t("scan_logged")); navigate("scan", { token });
+    } catch (e) { alert(e.message); }
+  };
+  if (wantGeo && navigator.geolocation) {
+    toast(t("scan_locating"));
+    navigator.geolocation.getCurrentPosition(
+      p => send(p.coords.latitude, p.coords.longitude),
+      () => send(null, null), { enableHighAccuracy: true, timeout: 6000, maximumAge: 30000 });
+  } else { send(null, null); }
+}
+// Printable QR sheet for a floor-plan map's markers (legacy).
+function printQrSheet(map, only) {
+  const markers = (only ? [only] : map.markers).filter(m => m.qr_token);
+  if (!markers.length) { toast(t("no_devices")); return; }
+  printDeviceCodes(markers.map(m => ({ code: m.qr_token, type: m.type, label: m.label,
+    client_id: map.client_id, client_en: map.client_en, client_ar: map.client_ar })));
+}
+
+// Per-visit device coverage panel: how many traps the agent scanned this visit.
+async function loadVisitCoverage(visitId) {
+  const box = $("dev-coverage");
+  if (!box) return;
+  let cov;
+  try { cov = await API.get(`/visits/${visitId}/devices`); }
+  catch (e) { box.remove(); return; }
+  if (!cov.total) {
+    box.innerHTML = `<div class="section-title"><h3>🏷️ ${t("device_coverage")}</h3></div>
+      <div class="empty">${t("no_devices_for_client")}</div>`;
+    return;
+  }
+  const pct = Math.round((cov.scanned / cov.total) * 100);
+  const done = cov.scanned === cov.total;
+  box.innerHTML = `<div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+      <h3>🏷️ ${t("device_coverage")} <span class="badge b-${done ? "completed" : "draft"}">${cov.scanned}/${cov.total} ${t("scanned")}</span></h3>
+      ${cov.scanned ? `<button class="btn sm secondary" id="cov-followup">🖨️ ${t("followup_report")}</button>` : ""}</div>
+    <div class="cov-bar"><span style="width:${pct}%"></span></div>
+    <table style="margin-top:10px"><thead><tr><th>${t("code")}</th><th>${t("marker_type")}</th>
+      <th>${t("label")}</th><th>${t("status")}</th><th>${t("scanned")}</th></tr></thead>
+      <tbody>${cov.devices.map(d => `<tr class="${d.scanned_at ? "" : "cov-pending"}">
+        <td><a href="#" data-open="${esc(d.code)}"><strong>${esc(d.code)}</strong></a></td>
+        <td>${devIcon(d.type)} ${esc(t("dt_" + d.type))}</td>
+        <td>${esc(d.label || "—")}</td>
+        <td><span style="color:${MARKER_STATUS[d.status] || "#64748b"}">${t("mst_" + d.status)}</span></td>
+        <td>${d.scanned_at ? "✓ " + fmtDateTime(d.scanned_at) : `<span class="muted">${t("pending")}</span>`}</td>
+      </tr>`).join("")}</tbody></table>`;
+  box.querySelectorAll("[data-open]").forEach(a => a.addEventListener("click", (e) => {
+    e.preventDefault(); navigate("scan", { token: a.dataset.open });
+  }));
+  if ($("cov-followup")) $("cov-followup").addEventListener("click", () => printFollowupReport(visitId));
 }
 
 // ====================================================================

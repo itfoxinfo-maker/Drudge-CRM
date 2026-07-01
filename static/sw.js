@@ -5,7 +5,7 @@
  *  - same-origin GET (app shell + assets): stale-while-revalidate.
  *  - navigations: fall back to the cached shell when offline.
  */
-const VERSION = "pestcare-v12";
+const VERSION = "pestcare-v23";
 const SHELL = [
   "/",
   "/index.html",
@@ -13,6 +13,7 @@ const SHELL = [
   "/js/i18n.js",
   "/js/offline.js",
   "/js/api.js",
+  "/js/qrcode.js",
   "/js/app.js",
   "/foxsyslogo.png",
   "/manifest.webmanifest",

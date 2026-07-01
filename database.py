@@ -27,6 +27,9 @@ CREATE TABLE IF NOT EXISTS users (
     -- Agent profile extras (NULL for non-agents).
     specialization TEXT,
     hire_date     TEXT,
+    -- Technician licensing/certification (shown on audit packs).
+    license_no    TEXT,
+    license_expiry TEXT,
     lang          TEXT NOT NULL DEFAULT 'en',
     active        INTEGER NOT NULL DEFAULT 1,
     -- bumped to invalidate a user's outstanding session tokens (see auth.py)
@@ -58,6 +61,8 @@ CREATE TABLE IF NOT EXISTS sites (
     address    TEXT,
     area       TEXT,
     map_image  TEXT,   -- uploaded floor-plan / map-design picture for this site
+    lat        REAL,   -- geographic coordinates (for dispatch / route optimization)
+    lng        REAL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -234,6 +239,11 @@ CREATE TABLE IF NOT EXISTS contracts (
     status          TEXT NOT NULL DEFAULT 'active'
                     CHECK (status IN ('active','paused','ended')),
     notes           TEXT,
+    -- Recurring billing: when auto_invoice=1 an invoice is generated every
+    -- bill_every cadence (NULL falls back to `frequency`) on next_bill_date.
+    bill_every      TEXT,
+    next_bill_date  TEXT,
+    auto_invoice    INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -248,6 +258,46 @@ CREATE TABLE IF NOT EXISTS contract_sites (
     price        REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_contract_sites_contract ON contract_sites(contract_id);
+
+-- Self-service visit requests submitted by clients from their portal. Staff
+-- approve a request (which creates a real visit) or decline it.
+CREATE TABLE IF NOT EXISTS visit_requests (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id      INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    site_id        INTEGER REFERENCES sites(id) ON DELETE SET NULL,
+    preferred_date TEXT,
+    note           TEXT,
+    status         TEXT NOT NULL DEFAULT 'pending'
+                   CHECK (status IN ('pending','approved','declined')),
+    visit_id       INTEGER REFERENCES visits(id) ON DELETE SET NULL,
+    created_by     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    handled_by     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    handled_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_visit_requests_client ON visit_requests(client_id);
+
+-- Online-payment attempts. One row per "pay this invoice" click. Gateway-
+-- agnostic: `provider` selects the adapter, `provider_ref` holds the gateway's
+-- order/transaction id (equals `token` for the built-in manual provider), and
+-- `token` is our opaque id used in checkout/return URLs. Marked 'paid' by the
+-- provider's callback, which also writes the matching payments row.
+CREATE TABLE IF NOT EXISTS payment_intents (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    invoice_id   INTEGER NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+    client_id    INTEGER REFERENCES clients(id) ON DELETE SET NULL,
+    provider     TEXT NOT NULL,
+    provider_ref TEXT,
+    token        TEXT NOT NULL UNIQUE,
+    amount       REAL NOT NULL,
+    currency     TEXT NOT NULL DEFAULT 'EGP',
+    status       TEXT NOT NULL DEFAULT 'pending'
+                 CHECK (status IN ('pending','paid','failed','cancelled')),
+    payment_id   INTEGER REFERENCES payments(id) ON DELETE SET NULL,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_payment_intents_invoice ON payment_intents(invoice_id);
 
 -- Key/value settings (company profile, tax rate, SMTP, etc.).
 CREATE TABLE IF NOT EXISTS settings (
@@ -310,6 +360,7 @@ CREATE TABLE IF NOT EXISTS map_markers (
     y          REAL NOT NULL,
     status     TEXT NOT NULL DEFAULT 'ok',
     notes      TEXT,
+    qr_token   TEXT,                       -- unguessable id printed as a QR label
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -323,12 +374,18 @@ CREATE TABLE IF NOT EXISTS marker_events (
     type        TEXT,                       -- device type at time of record
     status      TEXT NOT NULL,              -- ok / needs_service / activity / missing
     note        TEXT,
+    source      TEXT NOT NULL DEFAULT 'manual', -- 'scan' = recorded via QR tap-to-inspect
+    lat         REAL,                       -- geo-stamp captured at scan time
+    lng         REAL,
     recorded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
     recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_maps_client ON maps(client_id);
 CREATE INDEX IF NOT EXISTS idx_markers_map ON map_markers(map_id);
+-- NOTE: the UNIQUE index on map_markers(qr_token) is created in _migrate(), not
+-- here, so it isn't attempted against a pre-existing table before the column is
+-- added by the migration.
 CREATE INDEX IF NOT EXISTS idx_marker_events_client ON marker_events(client_id, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_marker_events_marker ON marker_events(marker_id);
 CREATE INDEX IF NOT EXISTS idx_visits_agent ON visits(agent_id);
@@ -371,9 +428,63 @@ CREATE TABLE IF NOT EXISTS audit_log (
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
+
+-- QR-coded field devices (light traps, glue/bait stations, fly traps). Admin
+-- generates a batch of sequential codes (LIT0001…), assigns them to a client,
+-- and prints them. Agents scan the printed code on a visit to file its report.
+CREATE TABLE IF NOT EXISTS devices (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    code       TEXT NOT NULL UNIQUE,           -- e.g. LIT0001 (printed as the QR)
+    type       TEXT NOT NULL,                  -- light_trap|glue_station|bait_station|fly_trap
+    client_id  INTEGER REFERENCES clients(id) ON DELETE SET NULL,
+    site_id    INTEGER REFERENCES sites(id) ON DELETE SET NULL,
+    label      TEXT,                           -- optional friendly location ("Kitchen")
+    status     TEXT NOT NULL DEFAULT 'ok',     -- last-known: ok|activity|needs_service|missing
+    active     INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_devices_client ON devices(client_id);
+CREATE INDEX IF NOT EXISTS idx_devices_type ON devices(type);
+
+-- One row per scan: a device's inspection during a visit (proof-of-presence +
+-- the per-device part of the visit report). Time- and geo-stamped.
+CREATE TABLE IF NOT EXISTS device_inspections (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id   INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    visit_id    INTEGER REFERENCES visits(id) ON DELETE SET NULL,
+    client_id   INTEGER REFERENCES clients(id) ON DELETE CASCADE,
+    status      TEXT NOT NULL,                 -- ok|activity|needs_service|missing
+    findings    TEXT,                          -- what the agent recorded for this device
+    note        TEXT,
+    source      TEXT NOT NULL DEFAULT 'scan',
+    lat         REAL,
+    lng         REAL,
+    recorded_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_dinsp_device ON device_inspections(device_id);
+CREATE INDEX IF NOT EXISTS idx_dinsp_visit ON device_inspections(visit_id);
 """
 
 # Additive migrations for databases created by an earlier version.
+def _parse_latlng(text):
+    """Best-effort extract (lat, lng) from a free-text location: a bare
+    "lat,lng" pair or a Google Maps URL with an @lat,lng / q=lat,lng segment.
+    Returns None when nothing plausible is found."""
+    import re
+    if not text:
+        return None
+    for pat in (r"@(-?\d{1,3}\.\d+),(-?\d{1,3}\.\d+)",
+                r"[?&]q=(-?\d{1,3}\.\d+),(-?\d{1,3}\.\d+)",
+                r"^\s*(-?\d{1,3}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)\s*$"):
+        m = re.search(pat, text)
+        if m:
+            lat, lng = float(m.group(1)), float(m.group(2))
+            if -90 <= lat <= 90 and -180 <= lng <= 180:
+                return (lat, lng)
+    return None
+
+
 def _migrate(conn):
     def cols(table):
         return {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -484,6 +595,63 @@ def _migrate(conn):
         conn.execute("ALTER TABLE chemicals ADD COLUMN material_key TEXT")
     if conn.execute("SELECT COUNT(*) FROM chemicals").fetchone()[0] > 0:
         ensure_material_items(conn)
+    # QR-coded devices: every marker gets an unguessable token printed as a QR
+    # label. Scanning it deep-links to /scan/<token> for 2-second tap-to-inspect.
+    if "qr_token" not in cols("map_markers"):
+        conn.execute("ALTER TABLE map_markers ADD COLUMN qr_token TEXT")
+        # Backfill a random token for existing devices (randomblob = 32 hex chars).
+        conn.execute("UPDATE map_markers SET qr_token=lower(hex(randomblob(16))) "
+                     "WHERE qr_token IS NULL")
+    # Created here (not in SCHEMA) so it runs only after the column is guaranteed
+    # to exist — on both fresh and migrated databases.
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_markers_qr ON map_markers(qr_token)")
+    # Per-type follow-up fields captured when a device is scanned (JSON blob:
+    # e.g. bait_status/consumption_pct for bait stations, fly_count for light
+    # traps …). Nullable — legacy status-only inspections leave it NULL.
+    if "details" not in cols("device_inspections"):
+        conn.execute("ALTER TABLE device_inspections ADD COLUMN details TEXT")
+    # Recurring billing columns on contracts. Default OFF for existing contracts
+    # (auto_invoice=0, next_bill_date NULL) so the migration never retro-bills
+    # history — billing is opt-in per contract via the contract form.
+    ccols = cols("contracts")
+    if "bill_every" not in ccols:
+        conn.execute("ALTER TABLE contracts ADD COLUMN bill_every TEXT")
+    if "next_bill_date" not in ccols:
+        conn.execute("ALTER TABLE contracts ADD COLUMN next_bill_date TEXT")
+    if "auto_invoice" not in ccols:
+        conn.execute("ALTER TABLE contracts ADD COLUMN auto_invoice INTEGER NOT NULL DEFAULT 0")
+    # Tamper-evident scan trail: where (geo) and how (scan vs manual) each
+    # inspection was recorded.
+    me_cols = cols("marker_events")
+    if "source" not in me_cols:
+        conn.execute("ALTER TABLE marker_events ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'")
+    if "lat" not in me_cols:
+        conn.execute("ALTER TABLE marker_events ADD COLUMN lat REAL")
+    if "lng" not in me_cols:
+        conn.execute("ALTER TABLE marker_events ADD COLUMN lng REAL")
+    # Technician licensing/certification (surfaced on auditor Audit Packs).
+    u_cols = cols("users")
+    if "license_no" not in u_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN license_no TEXT")
+    if "license_expiry" not in u_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN license_expiry TEXT")
+    # Fast per-file upload authorization: /uploads/<file> looks the file up by
+    # name to decide who may read it, so index the column.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_photos_filename ON photos(filename)")
+    # Site geo-coordinates for smart dispatch + route optimization. Backfill from
+    # any contract_sites.map_location already stored as a "lat,lng" string.
+    s_cols = cols("sites")
+    if "lat" not in s_cols:
+        conn.execute("ALTER TABLE sites ADD COLUMN lat REAL")
+    if "lng" not in s_cols:
+        conn.execute("ALTER TABLE sites ADD COLUMN lng REAL")
+        for cs in conn.execute(
+                "SELECT site_id, map_location FROM contract_sites "
+                "WHERE site_id IS NOT NULL AND map_location IS NOT NULL").fetchall():
+            ll = _parse_latlng(cs[1])
+            if ll:
+                conn.execute("UPDATE sites SET lat=?, lng=? WHERE id=? AND lat IS NULL",
+                             (ll[0], ll[1], cs[0]))
 
 
 # Consumable inventory items, keyed to their report counter column.

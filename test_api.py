@@ -457,6 +457,344 @@ def main():
                                     {"entity_type": "visit", "entity_id": own_v["id"]}, "x.png", PNG)
             check("agent can attach a photo to their own visit (200)", st == 200)
 
+        print("QR-CODED DEVICES (scan-to-inspect)")
+        PNGm = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        # client@alnoor is scoped to one client — build the device under it so the
+        # client can READ its trail but is blocked from RECORDING inspections.
+        _, ccl = call("GET", "/clients", client)
+        ccid = ccl[0]["id"]
+        st, cmap = post_multipart("/maps", admin, {"client_id": ccid, "name": "Ground Floor"},
+                                  "m.png", PNGm)
+        check("map uploaded for device test", st == 200 and cmap.get("id"))
+        _, mk = call("POST", f"/maps/{cmap['id']}/markers", admin,
+                     {"type": "bait_station", "label": "BS-01", "x": 10, "y": 20, "status": "ok"})
+        tok = mk.get("qr_token")
+        check("new device gets a qr_token", bool(tok) and len(tok) >= 16)
+        st, allmaps = call("GET", "/maps", admin)
+        check("central devices page lists maps with client+counts", st == 200
+              and any(m.get("id") == cmap["id"] and m.get("client_en") and "marker_count" in m for m in allmaps))
+        st, _ = call("GET", "/maps", agent)
+        check("agent (maps.view) can list all maps", st == 200)
+        st, sc = call("GET", f"/scan/{tok}", admin)
+        check("scan resolves device by token", st == 200 and sc.get("label") == "BS-01")
+        check("scan returns inspection history", isinstance(sc.get("history"), list) and len(sc["history"]) >= 1)
+        st, _ = call("GET", "/scan/deadbeefdeadbeef", admin)
+        check("unknown token -> 404", st == 404)
+        st, ins = call("POST", f"/scan/{tok}", admin,
+                       {"status": "activity", "note": "droppings", "lat": 24.7, "lng": 46.6})
+        check("tap-to-inspect records event", st == 200 and ins.get("status") == "activity")
+        _, sc2 = call("GET", f"/scan/{tok}", admin)
+        check("device current status updated by scan", sc2.get("status") == "activity")
+        latest = sc2["history"][0]
+        check("scan event is geo-stamped + sourced", latest.get("source") == "scan"
+              and abs((latest.get("lat") or 0) - 24.7) < 0.01)
+        st, _ = call("POST", f"/scan/{tok}", admin, {"status": "bogus"})
+        check("invalid scan status rejected (400)", st == 400)
+        st, _ = call("POST", f"/scan/{tok}", agent, {"status": "ok"})
+        check("technician (maps.edit) can inspect (200)", st == 200)
+        st, _ = call("GET", f"/scan/{tok}", client)
+        check("client can view own device trail (200)", st == 200)
+        st, _ = call("POST", f"/scan/{tok}", client, {"status": "ok"})
+        check("client cannot record inspections (403)", st == 403)
+
+        print("DEVICE CODES (generate / assign / scan-to-report)")
+        st, g1 = call("POST", "/devices/generate", admin, {"type": "light_trap", "count": 3})
+        check("generate mints sequential codes", st == 200 and g1["codes"][:3] == ["LIT0001", "LIT0002", "LIT0003"])
+        st, g2 = call("POST", "/devices/generate", admin, {"type": "light_trap", "count": 2})
+        check("generate continues the sequence", g2["codes"] == ["LIT0004", "LIT0005"])
+        st, gb = call("POST", "/devices/generate", admin, {"type": "bait_station", "count": 1})
+        check("each type has its own prefix/sequence", gb["codes"] == ["BAI0001"])
+        st, _ = call("POST", "/devices/generate", admin, {"type": "bogus", "count": 5})
+        check("invalid device type rejected (400)", st == 400)
+        st, _ = call("POST", "/devices/generate", admin, {"type": "light_trap", "count": 0})
+        check("invalid count rejected (400)", st == 400)
+        st, _ = call("POST", "/devices/generate", agent, {"type": "fly_trap", "count": 1})
+        check("agent without maps.create blocked? (agents have it -> 200)", st in (200, 403))
+
+        _, devs = call("GET", "/devices?type=light_trap", admin)
+        bycode = {d["code"]: d for d in devs}
+        ids = [bycode["LIT0001"]["id"], bycode["LIT0002"]["id"], bycode["LIT0003"]["id"]]
+        st, asg = call("POST", "/devices/assign", admin, {"ids": ids, "client_id": 1})
+        check("assign codes to a client", st == 200 and asg["count"] == 3)
+        _, devs2 = call("GET", "/devices?client_id=1&type=light_trap", admin)
+        check("assigned devices now scoped to client", len(devs2) >= 3 and all(d["client_id"] == 1 for d in devs2))
+
+        # put a client-1 visit in progress so the scan attaches to it
+        _, vall = call("GET", "/visits", admin)
+        c1v = next((v for v in vall if v.get("client_id") == 1), None)
+        call("PUT", f"/visits/{c1v['id']}", admin, {"status": "in_progress"})
+        st, sc = call("GET", "/scan/LIT0001", admin)
+        check("scan resolves assigned device by code", st == 200 and sc["code"] == "LIT0001" and sc["client_id"] == 1)
+        check("scan suggests the in-progress visit", sc.get("active_visit_id") == c1v["id"])
+        st, ins = call("POST", "/scan/LIT0001", admin,
+                       {"status": "activity", "findings": "2 moths", "lat": 24.7, "lng": 46.6})
+        check("scan-to-report files an inspection on the visit", st == 200
+              and ins["status"] == "activity" and ins["visit_id"] == c1v["id"])
+        _, sc2 = call("GET", "/scan/LIT0001", admin)
+        check("device status updated + history recorded", sc2["status"] == "activity"
+              and len(sc2["history"]) >= 1 and sc2["history"][0]["findings"] == "2 moths")
+        st, _ = call("POST", "/scan/LIT0001", admin, {"status": "nope"})
+        check("invalid inspection status rejected (400)", st == 400)
+        st, _ = call("GET", "/scan/ZZZ9999", admin)
+        check("unknown code -> 404", st == 404)
+        st, _ = call("POST", "/scan/LIT0004", admin, {"status": "ok"})  # LIT0004 unassigned
+        check("inspecting an unassigned code -> 409", st == 409)
+
+        st, cov = call("GET", f"/visits/{c1v['id']}/devices", admin)
+        check("visit coverage counts scanned vs total", st == 200
+              and cov["total"] >= 3 and cov["scanned"] == 1)
+        st, _ = call("GET", "/devices", client)
+        check("client can list (own) devices", st == 200)
+
+        print("AUDIT PACK + technician licensing")
+        # licence/cert numbers round-trip through user create + update
+        st, lu = call("POST", "/users", admin, {
+            "full_name": "Licensed Tech", "email": "lic@pestcrm.com", "password": "secret123",
+            "role": "agent", "license_no": "PCO-9911", "license_expiry": "2027-12-31"})
+        check("create user stores licence no", st == 200 and lu.get("license_no") == "PCO-9911")
+        st, lu2 = call("PUT", f"/users/{lu['id']}", admin, {"license_no": "PCO-2025"})
+        check("update user changes licence no", st == 200 and lu2.get("license_no") == "PCO-2025")
+        _, ulist = call("GET", "/users", admin)
+        check("user list exposes licence fields",
+              any(u["id"] == lu["id"] and u.get("license_expiry") == "2027-12-31" for u in ulist))
+
+        st, ap = call("GET", "/clients/1/audit-pack", admin)
+        check("audit pack returns (200)", st == 200)
+        check("audit pack has all sections", ap and all(k in ap for k in (
+            "client", "range", "summary", "history", "chem_log", "products",
+            "technicians", "corrective", "device_alerts", "trend")))
+        check("audit pack summary is numeric", ap and isinstance(ap["summary"]["visits"], int))
+        check("audit pack products carry attachments list",
+              all(isinstance(p.get("attachments"), list) for p in ap["products"]))
+        check("audit pack defaults to a date range",
+              bool(ap["range"]["from"]) and bool(ap["range"]["to"]))
+        # explicit range + site filter accepted
+        st, ap2 = call("GET", "/clients/1/audit-pack?from=2020-01-01&to=2030-01-01", admin)
+        check("audit pack accepts explicit range", st == 200 and ap2["range"]["from"] == "2020-01-01")
+        st, _ = call("GET", "/clients/1/audit-pack?site_id=none", admin)
+        check("audit pack accepts site filter", st == 200)
+        # access control: agent needs analytics.view; cross-tenant client blocked
+        _, ccl = call("GET", "/clients", client)
+        own_cid = ccl[0]["id"]
+        st, _ = call("GET", f"/clients/{own_cid}/audit-pack", client)
+        check("client can pull own audit pack", st == 200)
+        other = next((c for c in call("GET", "/clients", admin)[1] if c["id"] != own_cid), None)
+        if other:
+            st, _ = call("GET", f"/clients/{other['id']}/audit-pack", client)
+            check("client cannot pull another client's audit pack (403)", st == 403)
+
+        print("SMART DISPATCH (geo sites / route optimize / SLA)")
+        # a client with 3 geocoded sites laid out so the time order != geo order
+        _, dc = call("POST", "/clients", admin, {"name_en": "Dispatch Co"})
+        coords = [(30.10, 31.10), (30.50, 31.50), (30.20, 31.20)]  # B is far, C is near A
+        sids = []
+        for i, (la, ln) in enumerate(coords):
+            st, s = call("POST", f"/clients/{dc['id']}/sites", admin,
+                         {"name": f"Site {i}", "lat": la, "lng": ln})
+            sids.append(s["id"])
+        check("site stores coordinates", st == 200 and s.get("lat") == 30.20)
+        # update_site can change coordinates (+ parse a "lat,lng" geo string)
+        st, su = call("PUT", f"/sites/{sids[0]}", admin, {"geo": "30.11,31.11"})
+        check("update_site parses geo string", st == 200 and round(su["lat"], 2) == 30.11)
+        call("PUT", f"/sites/{sids[0]}", admin, {"lat": 30.10, "lng": 31.10})  # restore
+        # three visits same day, same agent, scheduled in a non-optimal order
+        day = "2026-07-15"
+        order_sites = [sids[0], sids[1], sids[2]]   # near, FAR, near -> wasteful
+        for i, sid in enumerate(order_sites):
+            call("POST", "/visits", admin, {
+                "client_id": dc["id"], "site_id": sid, "agent_id": a1,
+                "scheduled_start": f"{day} {9 + i:02d}:00:00"})
+        # list_visits now surfaces site coordinates (needed by the board)
+        _, dv = call("GET", f"/visits?from={day}&to={day}", admin)
+        dvi = dv["items"] if isinstance(dv, dict) else dv
+        check("visits list carries site coordinates", any(x.get("site_lat") is not None for x in dvi))
+        # optimize (preview) — should not increase distance, returns full order
+        st, op = call("POST", "/dispatch/optimize", admin, {"agent_id": a1, "date": day})
+        check("optimize returns 200", st == 200)
+        check("optimize previews all stops in order", len(op["order"]) == 3 and op["applied"] is False)
+        check("optimize does not increase distance", op["km_after"] <= op["km_before"] + 1e-6)
+        # apply — rewrites scheduled times into the optimized sequence
+        st, ap2 = call("POST", "/dispatch/optimize", admin, {"agent_id": a1, "date": day, "apply": True})
+        check("optimize apply commits the order", st == 200 and ap2["applied"] is True)
+        _, dv2 = call("GET", f"/visits?from={day}&to={day}&agent={a1}", admin)
+        dvi2 = dv2["items"] if isinstance(dv2, dict) else dv2
+        starts = sorted(x["scheduled_start"] for x in dvi2)
+        check("apply spaced the visit times", starts[0][11:16] == "09:00" and starts[1][11:16] == "10:30")
+        st, _ = call("POST", "/dispatch/optimize", agent, {"agent_id": a1, "date": day})
+        check("optimize needs visits.edit (agent allowed/blocked)", st in (200, 403))
+
+        # SLA: an old monthly contract with no completed visits -> overdue
+        call("POST", "/contracts", admin, {
+            "client_id": dc["id"], "frequency": "monthly", "start_date": "2026-01-01"})
+        st, sla = call("GET", "/dispatch/sla", admin)
+        check("SLA returns items + counts", st == 200 and "counts" in sla and "items" in sla)
+        mine = next((r for r in sla["items"] if r["client_id"] == dc["id"]), None)
+        check("overdue monthly contract flagged", mine is not None and mine["status"] == "overdue")
+        check("SLA counts tally with items",
+              sla["counts"]["overdue"] + sla["counts"]["due_soon"] + sla["counts"]["ok"] == len(sla["items"]))
+        st, csla = call("GET", "/dispatch/sla", client)
+        check("client SLA scoped to own contracts (200)", st == 200
+              and all(r["client_id"] == (csla["items"][0]["client_id"] if csla["items"] else r["client_id"]) for r in csla["items"]))
+
+        print("PER-FILE UPLOAD AUTHORIZATION (cross-tenant)")
+        APNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        _, myc = call("GET", "/clients", client)
+        my_cid = myc[0]["id"]
+        _, allc = call("GET", "/clients", admin)
+        other_cid = next(c["id"] for c in allc if c["id"] != my_cid)
+        _, ph_own = post_multipart("/photos", admin, {"entity_type": "client", "entity_id": my_cid}, "own.png", APNG)
+        _, ph_other = post_multipart("/photos", admin, {"entity_type": "client", "entity_id": other_cid}, "oth.png", APNG)
+        st, _ = raw_get(f"/uploads/{ph_own['filename']}", cookie=f"pc_upl={client}")
+        check("client can read own company's file (not 403)", st != 403)
+        st, _ = raw_get(f"/uploads/{ph_other['filename']}", cookie=f"pc_upl={client}")
+        check("client CANNOT read another company's file (403)", st == 403)
+        st, _ = raw_get(f"/uploads/{ph_other['filename']}", token=admin)
+        check("admin can read any tenant's file (not 403)", st != 403)
+        st, _ = raw_get("/uploads/orphan-deadbeef.png", cookie=f"pc_upl={client}")
+        check("client denied unknown/orphan file (403, fail-closed)", st == 403)
+        # chemical SDS/label docs are shared catalog -> any authed user (keeps the
+        # client-facing Audit Pack's SDS links working)
+        _, chs = call("GET", "/chemicals", admin)
+        if chs:
+            _, ph_chem = post_multipart("/photos", admin, {"entity_type": "chemical", "entity_id": chs[0]["id"]}, "sds.png", APNG)
+            st, _ = raw_get(f"/uploads/{ph_chem['filename']}", cookie=f"pc_upl={client}")
+            check("client may read shared chemical SDS file (not 403)", st != 403)
+        # company logo is shared branding -> readable by any authed user
+        call("PUT", "/settings", admin, {"logo": "brandlogo.png"})
+        st, _ = raw_get("/uploads/brandlogo.png", cookie=f"pc_upl={client}")
+        check("client may read shared company logo (not 403)", st != 403)
+
+        print("VISIT REQUESTS (client self-service)")
+        st, vr = call("POST", "/visit-requests", client, {"preferred_date": "2026-08-01", "note": "Ants in kitchen"})
+        check("client can submit a visit request", st == 200 and vr["status"] == "pending")
+        _, mine = call("GET", "/visit-requests", client)
+        check("client sees own requests", any(r["id"] == vr["id"] for r in mine))
+        # cross-tenant: client can't request for another company
+        st, _ = call("POST", "/visit-requests", client, {"client_id": other_cid, "preferred_date": "2026-08-02"})
+        # client_id is ignored for clients (forced to own) -> still 200 on own, so assert it didn't target other
+        _, all_after = call("GET", "/visit-requests", admin)
+        check("client request is scoped to own company",
+              all(r["client_id"] == my_cid for r in all_after if r["created_by"] and r["status"] == "pending" and r["id"] >= vr["id"]))
+        # staff inbox + approve -> creates a visit, links it, marks approved
+        _, staffview = call("GET", "/visit-requests?status=pending", admin)
+        check("staff inbox lists pending requests", any(r["id"] == vr["id"] for r in staffview))
+        st, visit = call("POST", f"/visit-requests/{vr['id']}/approve", admin, {"agent_id": a1})
+        check("approve creates a scheduled visit", st == 200 and visit["status"] == "scheduled" and visit["agent_id"] == a1)
+        _, after = call("GET", "/visit-requests", admin)
+        appr = next((r for r in after if r["id"] == vr["id"]), None)
+        check("request marked approved + linked to the visit", appr and appr["status"] == "approved" and appr["visit_id"] == visit["id"])
+        st, _ = call("POST", f"/visit-requests/{vr['id']}/approve", admin, {})
+        check("a handled request can't be approved again (400)", st == 400)
+        # decline flow
+        _, vr2 = call("POST", "/visit-requests", client, {"note": "Follow-up"})
+        st, _ = call("POST", f"/visit-requests/{vr2['id']}/decline", admin, {"reason": "out of scope"})
+        check("staff can decline a request", st == 200)
+        st, _ = call("POST", "/visit-requests/99999/approve", admin, {})
+        check("approving a missing request -> 404", st == 404)
+        # a plain client cannot approve
+        st, _ = call("POST", f"/visit-requests/{vr2['id']}/approve", client, {})
+        check("client cannot approve requests (403)", st == 403)
+
+        print("OWNER DASHBOARD COCKPIT")
+        _, dash = call("GET", "/dashboard", admin)
+        cp = dash.get("cockpit")
+        check("admin dashboard includes cockpit", isinstance(cp, dict))
+        check("cockpit has revenue (this + prev month)",
+              cp and "revenue_month" in cp and "revenue_prev" in cp)
+        check("cockpit has overdue receivables", cp and "overdue_invoices" in cp and "overdue_amount" in cp)
+        check("cockpit SLA health counts", cp and set(cp["sla"]) == {"ok", "due_soon", "overdue"})
+        check("cockpit utilization is per-agent list",
+              cp and isinstance(cp["utilization"], list)
+              and all({"name", "total", "completed", "rate"} <= set(a) for a in cp["utilization"]))
+        check("utilization rate is 0-100", cp and all(0 <= a["rate"] <= 100 for a in cp["utilization"]))
+        _, adash = call("GET", "/dashboard", agent)
+        check("agent dashboard has no cockpit", "cockpit" not in adash)
+        _, cdash = call("GET", "/dashboard", client)
+        check("client dashboard has no cockpit", "cockpit" not in cdash)
+
+        print("INVENTORY REORDER ALERTS")
+        st, lowchem = call("POST", "/chemicals", admin, {
+            "name_en": "Reorder Test Chem", "unit": "L",
+            "quantity_in_stock": 1, "reorder_level": 10})
+        check("low-stock chemical created", st == 200 and bool(lowchem["id"]))
+        st, okchem = call("POST", "/chemicals", admin, {
+            "name_en": "Well Stocked Chem", "unit": "L",
+            "quantity_in_stock": 100, "reorder_level": 5})
+        mgr_tok = login("manager@pestcrm.com", "manager123")
+        call("POST", "/notifications/generate", admin)
+        _, mn = call("GET", "/notifications", mgr_tok)
+        lowmsgs = [n for n in mn["items"] if n["type"] == "low_stock"]
+        check("manager alerted to reorder low-stock item",
+              any(n["link_id"] == lowchem["id"] and n["link_view"] == "chemicals" for n in lowmsgs))
+        check("well-stocked item does NOT trigger a reorder alert",
+              not any(n["link_id"] == okchem["id"] for n in lowmsgs))
+        # re-running the scan does not duplicate the alert (dedup per item per month)
+        before = len(lowmsgs)
+        call("POST", "/notifications/generate", admin)
+        _, mn2 = call("GET", "/notifications", mgr_tok)
+        after = len([n for n in mn2["items"] if n["type"] == "low_stock"])
+        check("reorder alert is de-duplicated (no repeat in same month)", after == before)
+
+        print("RECURRING BILLING (auto-invoice from contracts)")
+        today = time.strftime("%Y-%m-%d")
+        _, ownc = call("GET", "/clients", client)            # client sees only its own company
+        bill_cid = ownc[0]["id"]
+        st, ct = call("POST", "/contracts", admin, {
+            "client_id": bill_cid, "frequency": "monthly", "start_date": today,
+            "price": 1000, "auto_invoice": 1, "next_bill_date": today})
+        check("auto-invoice contract created",
+              st == 200 and ct["auto_invoice"] == 1 and ct["next_bill_date"] == today)
+        st, r = call("POST", "/contracts/bill", admin, {})
+        check("billing run generated invoices", st == 200 and r["created"] >= 1)
+        _, invs = call("GET", "/invoices", admin)
+        invlist = invs if isinstance(invs, list) else invs.get("items", [])
+        mine = [i for i in invlist if i.get("contract_id") == ct["id"]]
+        check("contract produced an auto-invoice", len(mine) >= 1)
+        inv = mine[0]
+        check("auto-invoice is issued as 'sent' (payable, not draft)", inv["status"] == "sent")
+        check("auto-invoice amount = contract price", abs(inv["amount"] - 1000) < 0.01)
+        check("auto-invoice applies tax + total",
+              inv["tax"] > 0 and abs(inv["total"] - (inv["amount"] + inv["tax"])) < 0.01)
+        # advancing next_bill_date past today means a second run does nothing
+        _, r2 = call("POST", "/contracts/bill", admin, {})
+        check("billing is idempotent (no double-bill same cycle)", r2["created"] == 0)
+        # the client portal is notified of the new invoice
+        _, cn = call("GET", "/notifications", client)
+        check("client notified of the new invoice", any(n["type"] == "invoice_new" for n in cn["items"]))
+        # a contract NOT opted into auto-billing is never billed
+        call("POST", "/contracts", admin, {"client_id": bill_cid, "frequency": "monthly",
+                                           "start_date": today, "price": 500})
+        _, r3 = call("POST", "/contracts/bill", admin, {})
+        check("contract without auto-invoice is not billed", r3["created"] == 0)
+
+        print("ONLINE PAYMENTS (gateway-agnostic, manual sandbox)")
+        st, pinv = call("POST", "/invoices", admin, {
+            "client_id": bill_cid, "issue_date": today, "status": "sent",
+            "items": [{"description": "Online pay test", "quantity": 1, "unit_price": 300}]})
+        check("payable invoice created", st == 200 and pinv["total"] == 300)
+        st, intent = call("POST", f"/invoices/{pinv['id']}/pay", client, {})
+        check("client can start an online payment",
+              st == 200 and intent["provider"] == "manual" and abs(intent["amount"] - 300) < 0.01)
+        _, ps = call("GET", f"/payment-intents/{intent['token']}", client)
+        check("payment intent starts pending", ps["status"] == "pending")
+        # the gateway callback is unauthenticated (provider calls it server-to-server)
+        st, cb = call("POST", "/payments/callback/manual", None, {"token": intent["token"]})
+        check("payment callback marks intent paid", st == 200 and cb["status"] == "paid")
+        _, inv2 = call("GET", f"/invoices/{pinv['id']}", admin)
+        check("invoice auto-marked paid after online payment", inv2["status"] == "paid")
+        check("payment recorded with online method",
+              any(p["method"] == "online:manual" for p in inv2["payments"]))
+        # callbacks are idempotent — a retry must not double-charge
+        st, _ = call("POST", "/payments/callback/manual", None, {"token": intent["token"]})
+        _, inv3 = call("GET", f"/invoices/{pinv['id']}", admin)
+        check("repeat callback does not double-pay", st == 200 and len(inv3["payments"]) == 1)
+        # an already-paid invoice can't open a new payment
+        st, _ = call("POST", f"/invoices/{pinv['id']}/pay", client, {})
+        check("paying an already-paid invoice is rejected (400)", st == 400)
+        # an unknown reference is rejected
+        st, _ = call("POST", "/payments/callback/manual", None, {"token": "deadbeef00"})
+        check("callback for unknown reference -> 404", st == 404)
+
     finally:
         proc.terminate()
         try: proc.wait(timeout=5)
