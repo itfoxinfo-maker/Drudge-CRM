@@ -432,21 +432,22 @@ _STALE_PRED = ("d.active=1 AND d.client_id IS NOT NULL AND COALESCE("
                " < datetime('now','-%d days')" % STALE_SCAN_DAYS)
 
 
-def _stale_count():
-    return db.query("SELECT COUNT(*) c FROM devices d WHERE " + _STALE_PRED, one=True)["c"]
+def _stale_count(scope="", params=()):
+    return db.query("SELECT COUNT(*) c FROM devices d WHERE " + _STALE_PRED + scope,
+                    tuple(params), one=True)["c"]
 
 
-def _stale_devices(limit=None):
+def _stale_devices(limit=None, scope="", params=()):
     """Assigned devices overdue for a scan, oldest (incl. never-scanned) first."""
     sql = ("SELECT d.id, d.code, d.type, d.label loc, c.name_en client_en, "
            "c.name_ar client_ar, s.name site_name, "
            "(SELECT MAX(recorded_at) FROM device_inspections di WHERE di.device_id=d.id) last_seen "
            "FROM devices d LEFT JOIN clients c ON c.id=d.client_id "
-           "LEFT JOIN sites s ON s.id=d.site_id WHERE " + _STALE_PRED +
+           "LEFT JOIN sites s ON s.id=d.site_id WHERE " + _STALE_PRED + scope +
            " ORDER BY last_seen IS NOT NULL, last_seen ASC")
     if limit:
         sql += " LIMIT %d" % int(limit)
-    return db.query(sql)
+    return db.query(sql, tuple(params))
 
 
 def _device_overview():
@@ -2713,65 +2714,98 @@ def _generate_reminders():
 # --------------------------------------------------------------------------
 @route("GET", r"/api/analytics")
 def analytics(ctx):
-    """Company-wide analytics, scoped to an optional [from,to] date range
-    (defaults to the last 12 months). Finance + operations + collection KPIs +
-    a fleet/pest rollup built from the QR device scans."""
+    """Company-wide analytics, optionally scoped to one client and/or one of its
+    sites, over a [from,to] date range (default: last 12 months). Finance +
+    operations + collection KPIs + a fleet/pest rollup from the QR device scans."""
     require_perm(ctx.user, "analytics.view")
     import datetime
     q = ctx.query
     d_to = q.get("to") or datetime.date.today().isoformat()
     d_from = q.get("from") or (datetime.date.today() - datetime.timedelta(days=365)).isoformat()
     dr = (d_from, d_to)
+    cid = int(q["client_id"]) if (q.get("client_id") or "").isdigit() else None
+    if cid:
+        _assert_client_access(ctx.user, cid)
+    site_id = q.get("site_id") or None      # numeric id | "none" | None(all)
     labels = _months_between(d_from, d_to)
     r1 = lambda x: round(x, 1) if x is not None else None
 
+    def scope(client_col, site_col):
+        """AND-clause + params scoping to the selected client and/or site."""
+        cl, pr = "", []
+        if cid:
+            cl += " AND %s=?" % client_col
+            pr.append(cid)
+        sf, sp = _site_filter(site_id, site_col)
+        return cl + sf, pr + list(sp)
+
+    DI_SITE = "(SELECT site_id FROM devices WHERE id=device_inspections.device_id)"
+
     # --- revenue trend: invoiced vs collected, per month over the range ---
+    sc, sp = scope("client_id", "site_id")
     inv_by = {r["m"]: r["v"] for r in db.query(
         "SELECT strftime('%Y-%m',issue_date) m, SUM(total) v FROM invoices "
-        "WHERE doc_type='invoice' AND date(issue_date) BETWEEN ? AND ? GROUP BY m", dr)}
+        "WHERE doc_type='invoice' AND date(issue_date) BETWEEN ? AND ?" + sc + " GROUP BY m", (*dr, *sp))}
+    sc, sp = scope("i.client_id", "i.site_id")
     paid_by = {r["m"]: r["v"] for r in db.query(
-        "SELECT strftime('%Y-%m',paid_at) m, SUM(amount) v FROM payments "
-        "WHERE date(paid_at) BETWEEN ? AND ? GROUP BY m", dr)}
+        "SELECT strftime('%Y-%m',p.paid_at) m, SUM(p.amount) v FROM payments p "
+        "JOIN invoices i ON i.id=p.invoice_id WHERE date(p.paid_at) BETWEEN ? AND ?" + sc + " GROUP BY m", (*dr, *sp))}
     months = [{"m": k, "total": round(inv_by.get(k, 0) or 0, 2),
                "paid": round(paid_by.get(k, 0) or 0, 2)} for k in labels]
 
-    # AR aging is a point-in-time snapshot (all open invoices), not range-scoped.
+    # AR aging: point-in-time snapshot of open invoices (client/site scoped).
+    sc, sp = scope("i.client_id", "i.site_id")
     ar_aging = db.query(
         "SELECT CASE WHEN due_date IS NULL OR date(due_date)>=date('now') THEN 'current' "
         "WHEN date(due_date)>=date('now','-30 days') THEN '1-30' "
         "WHEN date(due_date)>=date('now','-60 days') THEN '31-60' ELSE '60+' END bucket, "
         "SUM(total - COALESCE((SELECT SUM(amount) FROM payments p WHERE p.invoice_id=i.id),0)) due "
-        "FROM invoices i WHERE doc_type='invoice' AND status NOT IN('paid','cancelled') GROUP BY bucket")
+        "FROM invoices i WHERE doc_type='invoice' AND status NOT IN('paid','cancelled')" + sc + " GROUP BY bucket", sp)
+    sc, sp = scope("v.client_id", "v.site_id")
     agents = db.query(
         "SELECT u.full_name, COUNT(v.id) total, "
         "SUM(CASE WHEN v.status='completed' THEN 1 ELSE 0 END) completed "
         "FROM users u LEFT JOIN visits v ON v.agent_id=u.id "
-        "AND date(v.scheduled_start) BETWEEN ? AND ? "
-        "WHERE u.role='agent' GROUP BY u.id ORDER BY completed DESC", dr)
+        "AND date(v.scheduled_start) BETWEEN ? AND ?" + sc +
+        " WHERE u.role='agent' GROUP BY u.id ORDER BY completed DESC", (*dr, *sp))
+    # chemicals: scope via the usage's visit when a client/site is selected.
+    sc, sp = scope("v.client_id", "v.site_id")
+    cu_extra = (" AND cu.visit_id IN (SELECT v.id FROM visits v WHERE 1=1" + sc + ")") if sc else ""
     chemicals = db.query(
         "SELECT ch.name_en, ch.name_ar, ch.unit, COALESCE(SUM(cu.quantity),0) used "
         "FROM chemicals ch LEFT JOIN chemical_usage cu ON cu.chemical_id=ch.id "
-        "AND date(cu.created_at) BETWEEN ? AND ? "
-        "GROUP BY ch.id HAVING used > 0 ORDER BY used DESC LIMIT 10", dr)
+        "AND date(cu.created_at) BETWEEN ? AND ?" + cu_extra +
+        " GROUP BY ch.id HAVING used > 0 ORDER BY used DESC LIMIT 10", (*dr, *sp))
+    sc, sp = scope("v.client_id", "v.site_id")
     services = db.query(
         "SELECT s.name_en, s.name_ar, COUNT(v.id) cnt FROM service_types s "
         "LEFT JOIN visits v ON v.service_type_id=s.id "
-        "AND date(v.scheduled_start) BETWEEN ? AND ? "
-        "GROUP BY s.id HAVING cnt>0 ORDER BY cnt DESC", dr)
+        "AND date(v.scheduled_start) BETWEEN ? AND ?" + sc +
+        " GROUP BY s.id HAVING cnt>0 ORDER BY cnt DESC", (*dr, *sp))
 
-    # --- totals + operational / collection KPIs (range-scoped) ---
+    # --- totals + operational / collection KPIs (range + client/site scoped) ---
+    sc, sp = scope("v.client_id", "v.site_id")
     vis = db.query(
         "SELECT COUNT(*) total, SUM(status='completed') completed, "
         "SUM(status='cancelled') cancelled FROM visits v "
-        "WHERE date(v.scheduled_start) BETWEEN ? AND ?", dr, one=True)
+        "WHERE date(v.scheduled_start) BETWEEN ? AND ?" + sc, (*dr, *sp), one=True)
+    sc, sp = scope("client_id", "site_id")
     invoiced = db.query("SELECT COALESCE(SUM(total),0) v FROM invoices "
-                        "WHERE doc_type='invoice' AND date(issue_date) BETWEEN ? AND ?", dr, one=True)["v"]
-    revenue = db.query("SELECT COALESCE(SUM(amount),0) v FROM payments "
-                       "WHERE date(paid_at) BETWEEN ? AND ?", dr, one=True)["v"]
+                        "WHERE doc_type='invoice' AND date(issue_date) BETWEEN ? AND ?" + sc, (*dr, *sp), one=True)["v"]
+    sc, sp = scope("i.client_id", "i.site_id")
+    revenue = db.query("SELECT COALESCE(SUM(p.amount),0) v FROM payments p "
+                       "JOIN invoices i ON i.id=p.invoice_id WHERE date(p.paid_at) BETWEEN ? AND ?" + sc, (*dr, *sp), one=True)["v"]
     sla = {"ok": 0, "due_soon": 0, "overdue": 0}
+    site_num = int(site_id) if (site_id or "").isdigit() else None
     for r in _sla_rows():
+        if cid and r["client_id"] != cid:
+            continue
+        if site_num is not None and r["site_id"] != site_num:
+            continue
         sla[r["status"]] = sla.get(r["status"], 0) + 1
     vtotal, vcomp = vis["total"] or 0, vis["completed"] or 0
+    nc_extra, nc_p = (" AND id=?", [cid]) if cid else ("", [])
+    ac_extra, ac_p = (" AND client_id=?", [cid]) if cid else ("", [])
     totals = {
         "revenue": revenue, "invoiced": invoiced,
         "visits_total": vtotal, "visits_completed": vcomp,
@@ -2779,21 +2813,22 @@ def analytics(ctx):
         "completion_rate": round(vcomp * 100.0 / vtotal) if vtotal else 0,
         "collection_rate": round(revenue * 100.0 / invoiced) if invoiced else 0,
         "revenue_per_visit": round(revenue / vcomp, 2) if vcomp else 0,
-        "new_clients": db.query("SELECT COUNT(*) c FROM clients WHERE date(created_at) BETWEEN ? AND ?", dr, one=True)["c"],
-        "active_contracts": db.query("SELECT COUNT(*) c FROM contracts WHERE status='active'", one=True)["c"],
+        "new_clients": db.query("SELECT COUNT(*) c FROM clients WHERE date(created_at) BETWEEN ? AND ?" + nc_extra, (*dr, *nc_p), one=True)["c"],
+        "active_contracts": db.query("SELECT COUNT(*) c FROM contracts WHERE status='active'" + ac_extra, ac_p, one=True)["c"],
         "sla_overdue": sla["overdue"], "sla_due_soon": sla["due_soon"],
     }
 
-    # --- fleet & pest rollup from the QR device scans (range-scoped) ---
-    total_dev = db.query("SELECT COUNT(*) c FROM devices WHERE active=1 AND client_id IS NOT NULL", one=True)["c"]
+    # --- fleet & pest rollup from the QR device scans (client/site scoped) ---
+    dsc, dsp = scope("client_id", "site_id")                 # devices d (bare cols)
+    total_dev = db.query("SELECT COUNT(*) c FROM devices WHERE active=1 AND client_id IS NOT NULL" + dsc, dsp, one=True)["c"]
+    isc, isp = scope("client_id", DI_SITE)                   # device_inspections (bare)
     di_by = {r["m"]: r for r in db.query(
         "SELECT strftime('%Y-%m',recorded_at) m, COUNT(*) inspections, "
-        "COUNT(DISTINCT device_id) scanned, "
-        "SUM(status='activity') detections, "
+        "COUNT(DISTINCT device_id) scanned, SUM(status='activity') detections, "
         "AVG(CAST(COALESCE(json_extract(details,'$.fly_count'),"
         "json_extract(details,'$.fly_density')) AS REAL)) fly, "
         "AVG(CAST(json_extract(details,'$.consumption_pct') AS REAL)) bait_pct "
-        "FROM device_inspections WHERE date(recorded_at) BETWEEN ? AND ? GROUP BY m", dr)}
+        "FROM device_inspections WHERE date(recorded_at) BETWEEN ? AND ?" + isc + " GROUP BY m", (*dr, *isp))}
     fleet_months = [{"m": k,
                      "inspections": (di_by[k]["inspections"] if k in di_by else 0),
                      "detections": (di_by[k]["detections"] if k in di_by else 0),
@@ -2801,32 +2836,35 @@ def analytics(ctx):
                      "fly": r1(di_by[k]["fly"]) if k in di_by else None,
                      "bait_pct": r1(di_by[k]["bait_pct"]) if k in di_by else None} for k in labels]
     scanned_month = db.query("SELECT COUNT(DISTINCT device_id) c FROM device_inspections "
-                             "WHERE strftime('%Y-%m',recorded_at)=strftime('%Y-%m','now')", one=True)["c"]
+                             "WHERE strftime('%Y-%m',recorded_at)=strftime('%Y-%m','now')" + isc, isp, one=True)["c"]
+    tsc, tsp = scope("di.client_id", "(SELECT site_id FROM devices WHERE id=di.device_id)")
     top_clients = db.query(
         "SELECT c.name_en, c.name_ar, COUNT(*) detections FROM device_inspections di "
         "JOIN clients c ON c.id=di.client_id WHERE di.status='activity' "
-        "AND date(di.recorded_at) BETWEEN ? AND ? GROUP BY di.client_id "
-        "ORDER BY detections DESC LIMIT 8", dr)
+        "AND date(di.recorded_at) BETWEEN ? AND ?" + tsc + " GROUP BY di.client_id "
+        "ORDER BY detections DESC LIMIT 8", (*dr, *tsp))
     rep = db.query(
         "SELECT SUM(json_extract(details,'$.lamp_status')='replaced') lamps, "
         "SUM(json_extract(details,'$.sheet_status')='replaced') sheets, "
         "SUM(json_extract(details,'$.glue_status')='changed') glue_boards, "
         "SUM(json_extract(details,'$.bait_status')='changed') baits "
-        "FROM device_inspections WHERE date(recorded_at) BETWEEN ? AND ?", dr, one=True)
+        "FROM device_inspections WHERE date(recorded_at) BETWEEN ? AND ?" + isc, (*dr, *isp), one=True)
+    st_sc, st_sp = scope("d.client_id", "d.site_id")
     fleet = {
         "kpi": {
             "devices": total_dev,
-            "needs_service": db.query("SELECT COUNT(*) c FROM devices WHERE active=1 AND status='needs_service'", one=True)["c"],
-            "activity": db.query("SELECT COUNT(*) c FROM device_inspections WHERE status='activity' AND date(recorded_at) BETWEEN ? AND ?", dr, one=True)["c"],
+            "needs_service": db.query("SELECT COUNT(*) c FROM devices WHERE active=1 AND status='needs_service'" + dsc, dsp, one=True)["c"],
+            "activity": db.query("SELECT COUNT(*) c FROM device_inspections WHERE status='activity' AND date(recorded_at) BETWEEN ? AND ?" + isc, (*dr, *isp), one=True)["c"],
             "coverage": round(100.0 * scanned_month / total_dev) if total_dev else None,
         },
         "months": fleet_months, "top_clients": top_clients,
         "replaced": {"lamps": rep["lamps"] or 0, "sheets": rep["sheets"] or 0,
                      "glue_boards": rep["glue_boards"] or 0, "baits": rep["baits"] or 0},
-        "stale": _stale_devices(20), "stale_count": _stale_count(),
+        "stale": _stale_devices(20, st_sc, st_sp), "stale_count": _stale_count(st_sc, st_sp),
         "stale_days": STALE_SCAN_DAYS,
     }
-    return {"range": {"from": d_from, "to": d_to}, "months": months,
+    return {"range": {"from": d_from, "to": d_to},
+            "client_id": cid, "site_id": site_id, "months": months,
             "ar_aging": ar_aging, "agents": agents, "chemicals": chemicals,
             "services": services, "totals": totals, "fleet": fleet}
 

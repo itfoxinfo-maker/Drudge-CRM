@@ -3009,29 +3009,48 @@ function anRange(preset) {
   return { from: back(d => d.setFullYear(d.getFullYear() - 1)), to };   // "year" (default)
 }
 let _anPreset = "year";
+let _anClient = "";
+let _anSite = "";
 
 async function viewAnalytics(v) {
   const presets = [["month", t("range_month")], ["quarter", t("range_quarter")],
     ["year", t("range_year")], ["all", t("range_all")]];
+  const clientOpts = [{ v: "", l: t("all_clients") }].concat(
+    (cache.clients || []).map(c => ({ v: c.id, l: localized(c, "name") })));
   v.innerHTML = `<div class="page-head"><h2>${t("analytics_title")}</h2>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <select id="an-client" class="toolbar-select">${clientOpts.map(o =>
+          `<option value="${esc(o.v)}"${String(o.v) === String(_anClient) ? " selected" : ""}>${esc(o.l)}</option>`).join("")}</select>
+        <select id="an-site" class="toolbar-select"><option value="">${t("all_locations")}</option></select>
         <select id="an-range" class="toolbar-select">${presets.map(([k, l]) =>
           `<option value="${k}"${k === _anPreset ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
         <button class="btn sm secondary" id="an-csv">⬇️ ${t("export_csv")}</button>
         <button class="btn sm" id="an-pdf">🖨️ ${t("export_pdf")}</button></div></div>
     <div id="an-body">${t("loading")}</div>`;
+  const syncSite = () => { $("an-site").disabled = !_anClient; };
   const render = async () => {
     const { from, to } = anRange(_anPreset);
-    const a = await API.get(`/analytics?from=${from}&to=${to}`);
+    let url = `/analytics?from=${from}&to=${to}`;
+    if (_anClient) url += `&client_id=${_anClient}`;
+    if (_anSite) url += `&site_id=${encodeURIComponent(_anSite)}`;
+    const a = await API.get(url);
     const parts = analyticsParts(a);
     $("an-body").innerHTML = parts.html;
-    // drill-downs
     $("an-body").querySelectorAll("[data-nav]").forEach(el =>
       el.addEventListener("click", () => navigate(el.dataset.nav)));
     $("an-pdf").onclick = () => analyticsReportDoc(t("analytics_title"),
       `${fmtDate(a.range.from)} → ${fmtDate(a.range.to)}`, parts.html);
     $("an-csv").onclick = () => exportAnalyticsCsv(a);
   };
+  // preload sites for a remembered client selection
+  if (_anClient) await loadSiteOptions(_anClient, $("an-site"), _anSite, t("all_locations"));
+  syncSite();
+  $("an-client").addEventListener("change", async (e) => {
+    _anClient = e.target.value; _anSite = "";
+    await loadSiteOptions(_anClient, $("an-site"), "", t("all_locations"));
+    syncSite(); render();
+  });
+  $("an-site").addEventListener("change", (e) => { _anSite = e.target.value; render(); });
   $("an-range").addEventListener("change", (e) => { _anPreset = e.target.value; render(); });
   await render();
 }
