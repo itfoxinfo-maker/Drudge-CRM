@@ -2676,11 +2676,29 @@ def _generate_reminders():
 # --------------------------------------------------------------------------
 @route("GET", r"/api/analytics")
 def analytics(ctx):
+    """Company-wide analytics, scoped to an optional [from,to] date range
+    (defaults to the last 12 months). Finance + operations + collection KPIs +
+    a fleet/pest rollup built from the QR device scans."""
     require_perm(ctx.user, "analytics.view")
-    months = db.query(
-        "SELECT strftime('%Y-%m', issue_date) m, SUM(total) total, "
-        "SUM((SELECT COALESCE(SUM(amount),0) FROM payments p WHERE p.invoice_id=i.id)) paid "
-        "FROM invoices i WHERE doc_type='invoice' GROUP BY m ORDER BY m DESC LIMIT 12")
+    import datetime
+    q = ctx.query
+    d_to = q.get("to") or datetime.date.today().isoformat()
+    d_from = q.get("from") or (datetime.date.today() - datetime.timedelta(days=365)).isoformat()
+    dr = (d_from, d_to)
+    labels = _months_between(d_from, d_to)
+    r1 = lambda x: round(x, 1) if x is not None else None
+
+    # --- revenue trend: invoiced vs collected, per month over the range ---
+    inv_by = {r["m"]: r["v"] for r in db.query(
+        "SELECT strftime('%Y-%m',issue_date) m, SUM(total) v FROM invoices "
+        "WHERE doc_type='invoice' AND date(issue_date) BETWEEN ? AND ? GROUP BY m", dr)}
+    paid_by = {r["m"]: r["v"] for r in db.query(
+        "SELECT strftime('%Y-%m',paid_at) m, SUM(amount) v FROM payments "
+        "WHERE date(paid_at) BETWEEN ? AND ? GROUP BY m", dr)}
+    months = [{"m": k, "total": round(inv_by.get(k, 0) or 0, 2),
+               "paid": round(paid_by.get(k, 0) or 0, 2)} for k in labels]
+
+    # AR aging is a point-in-time snapshot (all open invoices), not range-scoped.
     ar_aging = db.query(
         "SELECT CASE WHEN due_date IS NULL OR date(due_date)>=date('now') THEN 'current' "
         "WHEN date(due_date)>=date('now','-30 days') THEN '1-30' "
@@ -2690,22 +2708,86 @@ def analytics(ctx):
     agents = db.query(
         "SELECT u.full_name, COUNT(v.id) total, "
         "SUM(CASE WHEN v.status='completed' THEN 1 ELSE 0 END) completed "
-        "FROM users u LEFT JOIN visits v ON v.agent_id=u.id WHERE u.role='agent' GROUP BY u.id ORDER BY completed DESC")
+        "FROM users u LEFT JOIN visits v ON v.agent_id=u.id "
+        "AND date(v.scheduled_start) BETWEEN ? AND ? "
+        "WHERE u.role='agent' GROUP BY u.id ORDER BY completed DESC", dr)
     chemicals = db.query(
         "SELECT ch.name_en, ch.name_ar, ch.unit, COALESCE(SUM(cu.quantity),0) used "
         "FROM chemicals ch LEFT JOIN chemical_usage cu ON cu.chemical_id=ch.id "
-        "GROUP BY ch.id HAVING used > 0 ORDER BY used DESC LIMIT 10")
+        "AND date(cu.created_at) BETWEEN ? AND ? "
+        "GROUP BY ch.id HAVING used > 0 ORDER BY used DESC LIMIT 10", dr)
     services = db.query(
         "SELECT s.name_en, s.name_ar, COUNT(v.id) cnt FROM service_types s "
-        "LEFT JOIN visits v ON v.service_type_id=s.id GROUP BY s.id HAVING cnt>0 ORDER BY cnt DESC")
+        "LEFT JOIN visits v ON v.service_type_id=s.id "
+        "AND date(v.scheduled_start) BETWEEN ? AND ? "
+        "GROUP BY s.id HAVING cnt>0 ORDER BY cnt DESC", dr)
+
+    # --- totals + operational / collection KPIs (range-scoped) ---
+    vis = db.query(
+        "SELECT COUNT(*) total, SUM(status='completed') completed, "
+        "SUM(status='cancelled') cancelled FROM visits v "
+        "WHERE date(v.scheduled_start) BETWEEN ? AND ?", dr, one=True)
+    invoiced = db.query("SELECT COALESCE(SUM(total),0) v FROM invoices "
+                        "WHERE doc_type='invoice' AND date(issue_date) BETWEEN ? AND ?", dr, one=True)["v"]
+    revenue = db.query("SELECT COALESCE(SUM(amount),0) v FROM payments "
+                       "WHERE date(paid_at) BETWEEN ? AND ?", dr, one=True)["v"]
+    sla = {"ok": 0, "due_soon": 0, "overdue": 0}
+    for r in _sla_rows():
+        sla[r["status"]] = sla.get(r["status"], 0) + 1
+    vtotal, vcomp = vis["total"] or 0, vis["completed"] or 0
     totals = {
-        "revenue": db.query("SELECT COALESCE(SUM(amount),0) v FROM payments", one=True)["v"],
-        "invoiced": db.query("SELECT COALESCE(SUM(total),0) v FROM invoices WHERE doc_type='invoice'", one=True)["v"],
-        "visits_completed": db.query("SELECT COUNT(*) c FROM visits WHERE status='completed'", one=True)["c"],
+        "revenue": revenue, "invoiced": invoiced,
+        "visits_total": vtotal, "visits_completed": vcomp,
+        "visits_cancelled": vis["cancelled"] or 0,
+        "completion_rate": round(vcomp * 100.0 / vtotal) if vtotal else 0,
+        "collection_rate": round(revenue * 100.0 / invoiced) if invoiced else 0,
+        "revenue_per_visit": round(revenue / vcomp, 2) if vcomp else 0,
+        "new_clients": db.query("SELECT COUNT(*) c FROM clients WHERE date(created_at) BETWEEN ? AND ?", dr, one=True)["c"],
         "active_contracts": db.query("SELECT COUNT(*) c FROM contracts WHERE status='active'", one=True)["c"],
+        "sla_overdue": sla["overdue"], "sla_due_soon": sla["due_soon"],
     }
-    return {"months": months, "ar_aging": ar_aging, "agents": agents,
-            "chemicals": chemicals, "services": services, "totals": totals}
+
+    # --- fleet & pest rollup from the QR device scans (range-scoped) ---
+    di_by = {r["m"]: r for r in db.query(
+        "SELECT strftime('%Y-%m',recorded_at) m, COUNT(*) inspections, "
+        "SUM(status='activity') detections, "
+        "AVG(CAST(COALESCE(json_extract(details,'$.fly_count'),"
+        "json_extract(details,'$.fly_density')) AS REAL)) fly, "
+        "AVG(CAST(json_extract(details,'$.consumption_pct') AS REAL)) bait_pct "
+        "FROM device_inspections WHERE date(recorded_at) BETWEEN ? AND ? GROUP BY m", dr)}
+    fleet_months = [{"m": k,
+                     "inspections": (di_by[k]["inspections"] if k in di_by else 0),
+                     "detections": (di_by[k]["detections"] if k in di_by else 0),
+                     "fly": r1(di_by[k]["fly"]) if k in di_by else None,
+                     "bait_pct": r1(di_by[k]["bait_pct"]) if k in di_by else None} for k in labels]
+    total_dev = db.query("SELECT COUNT(*) c FROM devices WHERE active=1 AND client_id IS NOT NULL", one=True)["c"]
+    scanned_month = db.query("SELECT COUNT(DISTINCT device_id) c FROM device_inspections "
+                             "WHERE strftime('%Y-%m',recorded_at)=strftime('%Y-%m','now')", one=True)["c"]
+    top_clients = db.query(
+        "SELECT c.name_en, c.name_ar, COUNT(*) detections FROM device_inspections di "
+        "JOIN clients c ON c.id=di.client_id WHERE di.status='activity' "
+        "AND date(di.recorded_at) BETWEEN ? AND ? GROUP BY di.client_id "
+        "ORDER BY detections DESC LIMIT 8", dr)
+    rep = db.query(
+        "SELECT SUM(json_extract(details,'$.lamp_status')='replaced') lamps, "
+        "SUM(json_extract(details,'$.sheet_status')='replaced') sheets, "
+        "SUM(json_extract(details,'$.glue_status')='changed') glue_boards, "
+        "SUM(json_extract(details,'$.bait_status')='changed') baits "
+        "FROM device_inspections WHERE date(recorded_at) BETWEEN ? AND ?", dr, one=True)
+    fleet = {
+        "kpi": {
+            "devices": total_dev,
+            "needs_service": db.query("SELECT COUNT(*) c FROM devices WHERE active=1 AND status='needs_service'", one=True)["c"],
+            "activity": db.query("SELECT COUNT(*) c FROM device_inspections WHERE status='activity' AND date(recorded_at) BETWEEN ? AND ?", dr, one=True)["c"],
+            "coverage": round(100.0 * scanned_month / total_dev) if total_dev else None,
+        },
+        "months": fleet_months, "top_clients": top_clients,
+        "replaced": {"lamps": rep["lamps"] or 0, "sheets": rep["sheets"] or 0,
+                     "glue_boards": rep["glue_boards"] or 0, "baits": rep["baits"] or 0},
+    }
+    return {"range": {"from": d_from, "to": d_to}, "months": months,
+            "ar_aging": ar_aging, "agents": agents, "chemicals": chemicals,
+            "services": services, "totals": totals, "fleet": fleet}
 
 
 def _month_labels(n=12):

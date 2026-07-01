@@ -2996,58 +2996,146 @@ function bar(label, value, max, color) {
     <div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${color || "var(--green)"}"></div></div>
     <div class="bar-val">${typeof value === "number" && value % 1 ? money(value) : value}</div></div>`;
 }
+// Date-range presets for the company analytics page. Returns {from,to} ISO.
+function anRange(preset) {
+  const today = new Date();
+  const iso = (d) => d.toISOString().slice(0, 10);
+  const to = iso(today);
+  const back = (fn) => { const d = new Date(today); fn(d); return iso(d); };
+  if (preset === "month") return { from: iso(new Date(today.getFullYear(), today.getMonth(), 1)), to };
+  if (preset === "quarter") return { from: back(d => d.setMonth(d.getMonth() - 3)), to };
+  if (preset === "all") return { from: "2000-01-01", to };
+  return { from: back(d => d.setFullYear(d.getFullYear() - 1)), to };   // "year" (default)
+}
+let _anPreset = "year";
+
 async function viewAnalytics(v) {
-  const a = await API.get("/analytics");
-  const T = a.totals;
-  const maxMonth = Math.max(1, ...a.months.map(m => m.total || 0));
-  const maxAgent = Math.max(1, ...a.agents.map(x => x.total || 0));
-  const maxChem = Math.max(1, ...a.chemicals.map(x => x.used || 0));
-  const maxSvc = Math.max(1, ...a.services.map(x => x.cnt || 0));
-  const agingLabels = { current: t("bucket_current"), "1-30": t("bucket_1_30"), "31-60": t("bucket_31_60"), "60+": t("bucket_60") };
-  const maxAge = Math.max(1, ...a.ar_aging.map(x => x.due || 0));
-  const empty = `<div class="empty">${t("none")}</div>`;
-  // build panel markup once → shared by screen + PDF export
-  const parts = {
-    cards: `<div class="cards">
-      <div class="stat-card c-green"><div class="sc-ic">💰</div><div><div class="v">${money(T.revenue)}</div><div class="l">${t("total_revenue")}</div></div></div>
-      <div class="stat-card c-blue"><div class="sc-ic">🧾</div><div><div class="v">${money(T.invoiced)}</div><div class="l">${t("total_invoiced")}</div></div></div>
-      <div class="stat-card c-teal"><div class="sc-ic">✅</div><div><div class="v">${T.visits_completed}</div><div class="l">${t("visits_completed")}</div></div></div>
-      <div class="stat-card c-purple"><div class="sc-ic">🔁</div><div><div class="v">${T.active_contracts}</div><div class="l">${t("active_contracts")}</div></div></div>
-    </div>`,
-    revenue: a.months.length ? a.months.slice().reverse().map(m =>
-      bar(m.m, m.total || 0, maxMonth) + `<div style="margin-top:-6px">${bar("→ " + t("paid"), m.paid || 0, maxMonth, "var(--blue)")}</div>`).join("") : empty,
-    aging: a.ar_aging.length ? a.ar_aging.map(x =>
-      bar(agingLabels[x.bucket] || x.bucket, x.due || 0, maxAge, x.bucket === "60+" ? "var(--red)" : "var(--amber)")).join("") : empty,
-    agents: a.agents.length ? a.agents.map(x =>
-      bar(x.full_name + ` (${x.completed}/${x.total})`, x.total || 0, maxAgent)).join("") : empty,
-    chemicals: a.chemicals.length ? a.chemicals.map(x =>
-      bar(localized(x, "name") + ` (${x.unit})`, x.used || 0, maxChem, "#7b61ff")).join("") : empty,
-    services: a.services.length ? a.services.map(x =>
-      bar(localized(x, "name"), x.cnt || 0, maxSvc, "var(--green-d)")).join("") : empty,
-  };
+  const presets = [["month", t("range_month")], ["quarter", t("range_quarter")],
+    ["year", t("range_year")], ["all", t("range_all")]];
   v.innerHTML = `<div class="page-head"><h2>${t("analytics_title")}</h2>
-      <button class="btn sm" id="export-main-analytics">🖨️ ${t("export_pdf")}</button></div>
-    ${parts.cards}
-    <div class="grid-2">
-      <div class="panel"><h3>${t("monthly_revenue")}</h3>${parts.revenue}</div>
-      <div class="panel"><h3>${t("ar_aging")}</h3>${parts.aging}</div>
-      <div class="panel"><h3>${t("agent_productivity")}</h3>${parts.agents}</div>
-      <div class="panel"><h3>${t("chemical_usage")}</h3>${parts.chemicals}</div>
-      <div class="panel"><h3>${t("service_mix")}</h3>${parts.services}</div>
-    </div>`;
-  $("export-main-analytics").addEventListener("click", () => printMainAnalytics(parts));
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <select id="an-range" class="toolbar-select">${presets.map(([k, l]) =>
+          `<option value="${k}"${k === _anPreset ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
+        <button class="btn sm secondary" id="an-csv">⬇️ ${t("export_csv")}</button>
+        <button class="btn sm" id="an-pdf">🖨️ ${t("export_pdf")}</button></div></div>
+    <div id="an-body">${t("loading")}</div>`;
+  const render = async () => {
+    const { from, to } = anRange(_anPreset);
+    const a = await API.get(`/analytics?from=${from}&to=${to}`);
+    const parts = analyticsParts(a);
+    $("an-body").innerHTML = parts.html;
+    // drill-downs
+    $("an-body").querySelectorAll("[data-nav]").forEach(el =>
+      el.addEventListener("click", () => navigate(el.dataset.nav)));
+    $("an-pdf").onclick = () => analyticsReportDoc(t("analytics_title"),
+      `${fmtDate(a.range.from)} → ${fmtDate(a.range.to)}`, parts.html);
+    $("an-csv").onclick = () => exportAnalyticsCsv(a);
+  };
+  $("an-range").addEventListener("change", (e) => { _anPreset = e.target.value; render(); });
+  await render();
 }
 
-function printMainAnalytics(parts) {
-  const body = `${parts.cards}
+// Build all analytics panels from the payload. Returns { html }.
+function analyticsParts(a) {
+  const T = a.totals, F = a.fleet || { kpi: {}, months: [], top_clients: [], replaced: {} };
+  const empty = `<div class="empty">${t("none")}</div>`;
+  const card = (val, label, icon, cls, nav) =>
+    `<div class="stat-card ${cls}"${nav ? ` data-nav="${nav}" style="cursor:pointer"` : ""}><div class="sc-ic">${icon}</div><div><div class="v">${val}</div><div class="l">${esc(label)}</div></div></div>`;
+  const barList = (rows, fn, nav) => rows.length
+    ? `<div${nav ? ` data-nav="${nav}" style="cursor:pointer"` : ""}>${rows.map(fn).join("")}</div>` : empty;
+  const maxAge = Math.max(1, ...a.ar_aging.map(x => x.due || 0));
+  const maxAgent = Math.max(1, ...a.agents.map(x => x.total || 0));
+  const agingLabels = { current: t("bucket_current"), "1-30": t("bucket_1_30"), "31-60": t("bucket_31_60"), "60+": t("bucket_60") };
+  const labels = a.months.map(m => monthShort(m.m));
+  // finance + operations cards
+  const cards = `<div class="cards">
+      ${card(money(T.revenue), t("total_revenue"), "💰", "c-green")}
+      ${card(money(T.invoiced), t("total_invoiced"), "🧾", "c-blue")}
+      ${card(T.collection_rate + "%", t("collection_rate"), "📥", T.collection_rate < 70 ? "warn" : "c-teal")}
+      ${card(money(T.revenue_per_visit), t("revenue_per_visit"), "🧮", "c-purple")}
+      ${card(`${T.visits_completed}/${T.visits_total}`, t("visits_completed"), "✅", "c-teal")}
+      ${card(T.completion_rate + "%", t("completion_rate"), "🎯", T.completion_rate < 70 ? "warn" : "c-green")}
+      ${card(T.sla_overdue, t("dash_sla_overdue"), "⏰", T.sla_overdue > 0 ? "danger" : "c-green", "schedule")}
+      ${card(T.active_contracts, t("active_contracts"), "🔁", "c-blue")}</div>`;
+  const revenue = a.months.some(m => m.total || m.paid)
+    ? curveChart(labels, [
+        { name: t("total_invoiced"), color: "#2563eb", values: a.months.map(m => m.total || 0) },
+        { name: t("paid"), color: "#16a34a", values: a.months.map(m => m.paid || 0) }]) : empty;
+  const aging = barList(a.ar_aging, x =>
+    bar(agingLabels[x.bucket] || x.bucket, x.due || 0, maxAge, x.bucket === "60+" ? "var(--red)" : "var(--amber)"), "invoices");
+  const agents = barList(a.agents, x =>
+    bar(x.full_name + ` (${x.completed}/${x.total})`, x.total || 0, maxAgent), "agents");
+  const chemItems = a.chemicals.map((x, i) => ({ label: localized(x, "name") + ` (${x.unit})`, value: Math.round((x.used || 0) * 10) / 10, color: PALETTE[i % PALETTE.length] }));
+  const svcItems = a.services.map((x, i) => ({ label: localized(x, "name"), value: x.cnt, color: PALETTE[(i + 2) % PALETTE.length] }));
+  // fleet & pest
+  const K = F.kpi;
+  const fleetCards = `<div class="cards">
+      ${card(K.devices || 0, t("total_devices"), "📍", "c-blue")}
+      ${card(K.coverage != null ? K.coverage + "%" : "—", t("coverage_month"), "✅", (K.coverage != null && K.coverage < 60) ? "warn" : "c-green", "devices")}
+      ${card(K.needs_service || 0, t("mst_needs_service"), "🛠️", K.needs_service > 0 ? "warn" : "c-green", "devices")}
+      ${card(K.activity || 0, t("activity_detections"), "🐭", K.activity > 0 ? "danger" : "c-green")}</div>`;
+  const hasFly = F.months.some(m => m.fly != null), hasBait = F.months.some(m => m.bait_pct != null);
+  const activityCurve = F.months.some(m => m.inspections || m.detections)
+    ? curveChart(labels, [
+        { name: t("inspections"), color: "#2563eb", values: F.months.map(m => m.inspections) },
+        { name: t("detections"), color: "#dc2626", values: F.months.map(m => m.detections) }]) : empty;
+  const pressure = (hasFly || hasBait) ? curveChart(labels, [
+      ...(hasFly ? [{ name: t("avg_fly"), color: "#7c3aed", values: F.months.map(m => m.fly || 0) }] : []),
+      ...(hasBait ? [{ name: t("bait_consumption"), color: "#d97706", values: F.months.map(m => m.bait_pct || 0) }] : [])]) : "";
+  const maxTop = Math.max(1, ...F.top_clients.map(x => x.detections || 0));
+  const topClients = barList(F.top_clients, x => bar(localized(x, "name"), x.detections || 0, maxTop, "var(--red)"));
+  const rep = F.replaced || {};
+  const repItems = [["baits", "baits_count"], ["lamps", "lamps_used"], ["sheets", "light_sheets_used"], ["glue_boards", "glo_pieces"]]
+    .filter(([k]) => (rep[k] || 0) > 0).map(([k, tk], i) => ({ label: t(tk), value: rep[k], color: PALETTE[i % PALETTE.length] }));
+  const showFleet = (K.devices || 0) > 0;
+  const html = `${cards}
     <div class="grid-2">
-      <div class="panel"><h3>${esc(t("monthly_revenue"))}</h3>${parts.revenue}</div>
-      <div class="panel"><h3>${esc(t("ar_aging"))}</h3>${parts.aging}</div>
-      <div class="panel"><h3>${esc(t("agent_productivity"))}</h3>${parts.agents}</div>
-      <div class="panel"><h3>${esc(t("chemical_usage"))}</h3>${parts.chemicals}</div>
-      <div class="panel"><h3>${esc(t("service_mix"))}</h3>${parts.services}</div>
-    </div>`;
-  analyticsReportDoc(t("analytics_title"), "", body);
+      <div class="panel"><h3>📈 ${t("monthly_revenue")}</h3>${revenue}</div>
+      <div class="panel"><h3>${t("ar_aging")}</h3>${aging}</div>
+      <div class="panel"><h3>${t("agent_productivity")}</h3>${agents}</div>
+      <div class="panel"><h3>${t("service_mix")}</h3>${svcItems.length ? cols3d(svcItems) : empty}</div>
+      <div class="panel"><h3>${t("chemical_usage")}</h3>${chemItems.length ? cols3d(chemItems) : empty}</div>
+    </div>
+    ${showFleet ? `<div class="section-title" style="margin-top:8px"><h2>🏷️ ${t("nav_devices")} — ${t("pest_trends")}</h2></div>
+      ${fleetCards}
+      <div class="panel"><h3>📈 ${t("pest_trends")}</h3>${activityCurve}</div>
+      ${pressure ? `<div class="panel"><h3>🪰 ${t("pest_pressure")}</h3>${pressure}</div>` : ""}
+      <div class="grid-2">
+        <div class="panel"><h3>🔥 ${t("top_clients_activity")}</h3>${topClients}</div>
+        ${repItems.length ? `<div class="panel"><h3>🔧 ${t("consumables_replaced")}</h3>${cols3d(repItems)}</div>` : ""}
+      </div>` : ""}`;
+  return { html };
+}
+
+// Multi-section CSV of the analytics payload → downloaded file.
+function exportAnalyticsCsv(a) {
+  const T = a.totals, F = a.fleet || {};
+  const esc = (s) => `"${String(s == null ? "" : s).replace(/"/g, '""')}"`;
+  const lines = [];
+  const sec = (title, header, rows) => {
+    lines.push(esc(title));
+    if (header) lines.push(header.map(esc).join(","));
+    rows.forEach(r => lines.push(r.map(esc).join(",")));
+    lines.push("");
+  };
+  sec(t("analytics_title"), ["from", "to"], [[a.range.from, a.range.to]]);
+  sec(t("summary"), ["metric", "value"], [
+    [t("total_revenue"), T.revenue], [t("total_invoiced"), T.invoiced],
+    [t("collection_rate"), T.collection_rate + "%"], [t("revenue_per_visit"), T.revenue_per_visit],
+    [t("visits_completed"), `${T.visits_completed}/${T.visits_total}`],
+    [t("completion_rate"), T.completion_rate + "%"], [t("dash_sla_overdue"), T.sla_overdue],
+    [t("active_contracts"), T.active_contracts]]);
+  sec(t("monthly_revenue"), ["month", "invoiced", "paid"], a.months.map(m => [m.m, m.total, m.paid]));
+  sec(t("agent_productivity"), ["agent", "completed", "total"], a.agents.map(x => [x.full_name, x.completed, x.total]));
+  sec(t("chemical_usage"), ["name", "unit", "used"], a.chemicals.map(x => [localized(x, "name"), x.unit, x.used]));
+  sec(t("service_mix"), ["service", "visits"], a.services.map(x => [localized(x, "name"), x.cnt]));
+  if (F.top_clients) sec(t("top_clients_activity"), ["client", "detections"], F.top_clients.map(x => [localized(x, "name"), x.detections]));
+  const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url; link.download = `analytics_${a.range.from}_${a.range.to}.csv`;
+  document.body.appendChild(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 
 // ====================================================================
