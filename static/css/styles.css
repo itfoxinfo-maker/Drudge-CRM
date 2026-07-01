@@ -463,6 +463,28 @@ tr.bal-empty td { background: var(--red-l); color: var(--red); }
 .qr-mini-img { width: 84px; height: 84px; flex: none; }
 .qr-mini-img svg { width: 100%; height: 100%; }
 
+/* Selected status button on the scan screen. */
+.scan-st.sel { background: var(--c); color: #fff; box-shadow: 0 0 0 3px rgba(15,118,110,.15); }
+
+/* Per-type follow-up fields captured on a scan. */
+.scan-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 4px 0 4px; }
+.scan-f { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+.scan-f select, .scan-f input { padding: 9px 10px; border: 1.5px solid var(--line);
+  border-radius: 10px; font: inherit; color: var(--ink); background: #fff; }
+@media (max-width: 480px) { .scan-fields { grid-template-columns: 1fr; } }
+
+/* QR shown in the scan detail header + printable per-trap label. */
+.scan-qr { display: flex; flex-direction: column; align-items: center; gap: 6px; margin-inline-start: auto; }
+.scan-qr-img { width: 76px; height: 76px; }
+.scan-qr-img svg { width: 100%; height: 100%; }
+
+/* Inline QR thumbnail in the Device QR Codes list (click to print that trap). */
+.qr-td { width: 56px; }
+.qr-cell { width: 48px; height: 48px; padding: 2px; border: 1px solid var(--line);
+  border-radius: 8px; background: #fff; cursor: pointer; line-height: 0; }
+.qr-cell svg { width: 100%; height: 100%; display: block; }
+.qr-cell:hover { border-color: var(--green-d); }
+
 /* Device QR registry toolbar + scan status lines. */
 .dev-toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
 .dev-toolbar .spacer { flex: 1; }

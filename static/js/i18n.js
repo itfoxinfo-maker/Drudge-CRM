@@ -165,7 +165,7 @@ const TRANSLATIONS = {
     scan_prompt: "Record this device's status:", scan_geostamp: "Add my location",
     scan_locating: "Getting location…", scan_logged: "Inspection recorded", scan_history: "Inspection History",
     scan_readonly: "You can view this device's history but not record inspections.",
-    scan_via_qr: "scanned", scan_device: "Scan Device",
+    scan_via_qr: "scanned", scan_device: "Scan Device", qr_code: "QR",
     // device follow-up form (per-type fields captured on scan) + printable report
     followup_details: "Follow-up details", save_inspection: "Save inspection",
     followup_report: "Follow-up Report", followup_nothing: "No devices scanned on this visit yet.",
@@ -435,7 +435,7 @@ const TRANSLATIONS = {
     scan_prompt: "سجّل حالة هذا الجهاز:", scan_geostamp: "إضافة موقعي",
     scan_locating: "جارٍ تحديد الموقع…", scan_logged: "تم تسجيل الفحص", scan_history: "سجل الفحوصات",
     scan_readonly: "يمكنك عرض سجل هذا الجهاز دون تسجيل فحوصات.",
-    scan_via_qr: "مسح ضوئي", scan_device: "مسح الجهاز",
+    scan_via_qr: "مسح ضوئي", scan_device: "مسح الجهاز", qr_code: "رمز",
     // نموذج المتابعة للجهاز (حقول لكل نوع تُسجَّل عند المسح) + تقرير قابل للطباعة
     followup_details: "بيانات المتابعة", save_inspection: "حفظ الفحص",
     followup_report: "تقرير المتابعة", followup_nothing: "لم يتم مسح أي أجهزة في هذه الزيارة بعد.",

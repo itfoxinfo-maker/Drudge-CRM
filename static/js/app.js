@@ -1243,6 +1243,23 @@ async function viewReportDoc(v, arg) {
 
 // Printable PDF of one report — a clean, NEW layout (not the certificate).
 // Renders only the fields that have content.
+// Popup-proof printing: render a full HTML document into a hidden same-page
+// iframe and let its own onload auto-print fire there — instead of window.open,
+// which pop-up blockers and the Android WebView routinely block. Replaces the
+// old `window.open("","_blank") + document.write` dance everywhere.
+function printHtmlDoc(doc) {
+  const prev = document.getElementById("print-frame");
+  if (prev) prev.remove();
+  const ifr = document.createElement("iframe");
+  ifr.id = "print-frame";
+  ifr.setAttribute("aria-hidden", "true");
+  ifr.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0;opacity:0";
+  document.body.appendChild(ifr);
+  const idoc = ifr.contentWindow.document;
+  idoc.open(); idoc.write(doc); idoc.close();   // inline auto-print script runs here
+  // Clean the frame up later so they don't pile up (print dialog is async).
+  setTimeout(() => { const f = document.getElementById("print-frame"); if (f === ifr) ifr.remove(); }, 120000);
+}
 function printReportDoc(visit) {
   const ar = LANG === "ar";
   const dir = ar ? "rtl" : "ltr";
@@ -1332,9 +1349,7 @@ function printReportDoc(visit) {
     </div>
     <script>window.onload=function(){setTimeout(function(){window.print()},400)}<\/script>
     </body></html>`;
-  const w = window.open("", "_blank");
-  if (!w) { alert("Please allow pop-ups to print the report."); return; }
-  w.document.open(); w.document.write(doc); w.document.close();
+  printHtmlDoc(doc);
 }
 
 // Visit duration choices: 15 min up to 90 min in 5-minute steps.
@@ -2081,11 +2096,7 @@ function printInvoice(inv) {
     </div>
     <script>window.onload=function(){setTimeout(function(){window.print()},400)}<\/script>
     </body></html>`;
-  const w = window.open("", "_blank");
-  if (!w) { alert("Please allow pop-ups to print the invoice."); return; }
-  w.document.open();
-  w.document.write(doc);
-  w.document.close();
+  printHtmlDoc(doc);
 }
 
 // ---- printable pest-control service / compliance certificate ----
@@ -2196,11 +2207,7 @@ function printCertificate(visit) {
     </div>
     <script>window.onload=function(){setTimeout(function(){window.print()},400)}<\/script>
     </body></html>`;
-  const w = window.open("", "_blank");
-  if (!w) { alert("Please allow pop-ups to print the certificate."); return; }
-  w.document.open();
-  w.document.write(doc);
-  w.document.close();
+  printHtmlDoc(doc);
 }
 
 // ---- client-facing certificates list (download per completed visit) ----
@@ -3367,9 +3374,7 @@ function analyticsReportDoc(titleText, subtitle, bodyHtml) {
     ${bodyHtml}
     <script>window.onload=function(){setTimeout(function(){window.print()},600)}<\/script>
     </body></html>`;
-  const w = window.open("", "_blank");
-  if (!w) { alert("Please allow pop-ups to export the report."); return; }
-  w.document.open(); w.document.write(doc); w.document.close();
+  printHtmlDoc(doc);
 }
 
 function printAnalytics(c, parts, subtitle) {
@@ -3823,6 +3828,8 @@ function renderDeviceScan(v, code, d) {
         <div class="muted small">${devIcon(d.type)} ${esc(t("dt_" + d.type))}${d.label ? " · " + esc(d.label) : ""}</div>
         <div class="muted small">${unassigned ? `<span class="warn-line">${t("unassigned")}</span>`
           : esc(localized(d, "client")) + (d.site_name ? " · " + esc(d.site_name) : "")}</div></div>
+      <div class="scan-qr"><div class="scan-qr-img">${qrSvg(codeScanUrl(d.code), 3) || "🏷️"}</div>
+        <button type="button" class="btn sm secondary" id="sc-print">🏷️ ${t("print_qr")}</button></div>
     </div>
     ${unassigned ? `<div class="scan-now warn-line">${t("device_unassigned_hint")}</div>` : (canInspect ? visitLine : "")}
     ${canInspect ? `
@@ -3848,6 +3855,7 @@ function renderDeviceScan(v, code, d) {
     <div class="form-actions"><button class="btn secondary" id="sc-home">← ${t("nav_dashboard")}</button></div>
   </div></div>`;
   if ($("sc-home")) $("sc-home").addEventListener("click", () => navigate("dashboard"));
+  if ($("sc-print")) $("sc-print").addEventListener("click", () => printDeviceCodes([d]));
   // Status buttons toggle a single selection (default: last-known device status).
   let selSt = d.status && _DEV_STATUSES.includes(d.status) ? d.status : "ok";
   const paint = () => v.querySelectorAll(".scan-st").forEach(b =>
@@ -3971,9 +3979,7 @@ async function printFollowupReport(visitId) {
     </div>
     <script>window.onload=function(){setTimeout(function(){window.print()},400)}<\/script>
     </body></html>`;
-  const w = window.open("", "_blank");
-  if (!w) { alert(t("popup_blocked")); return; }
-  w.document.open(); w.document.write(doc); w.document.close();
+  printHtmlDoc(doc);
 }
 
 // Printable label sheet for a set of device codes (big code text + scannable QR).
@@ -4006,9 +4012,7 @@ function printDeviceCodes(devices) {
     <div class="sheet">${cells}</div>
     <script>window.onload=function(){setTimeout(function(){window.print()},500)}<\/script>
     </body></html>`;
-  const w = window.open("", "_blank");
-  if (!w) { alert(t("popup_blocked")); return; }
-  w.document.open(); w.document.write(doc); w.document.close();
+  printHtmlDoc(doc);
 }
 
 // ---- Sidebar: Device QR Codes registry (generate / assign / print / scan) ----
@@ -4047,11 +4051,12 @@ async function viewDevices(v) {
     if (!devs.length) { box.innerHTML = `<div class="empty">${t("devices_none")}</div>`; updateBulk(); return; }
     box.innerHTML = `<table><thead><tr>
       <th style="width:26px"><input type="checkbox" id="dev-all"></th>
-      <th>${t("code")}</th><th>${t("marker_type")}</th><th>${t("client")}</th>
+      <th>${t("qr_code")}</th><th>${t("code")}</th><th>${t("marker_type")}</th><th>${t("client")}</th>
       <th>${t("location_lbl")}</th><th>${t("label")}</th><th>${t("status")}</th><th>${t("last_seen")}</th><th></th>
     </tr></thead><tbody>
       ${devs.map(d => `<tr>
         <td><input type="checkbox" class="dev-cb" data-id="${d.id}"></td>
+        <td class="qr-td"><button type="button" class="qr-cell" data-qr="${esc(d.code)}" title="${t("print_qr")}">${qrSvg(codeScanUrl(d.code), 2) || "🏷️"}</button></td>
         <td><strong>${esc(d.code)}</strong></td>
         <td>${devIcon(d.type)} ${esc(t("dt_" + d.type))}</td>
         <td>${d.client_id ? esc(localized(d, "client")) : `<span class="muted">${t("unassigned")}</span>`}</td>
@@ -4069,6 +4074,8 @@ async function viewDevices(v) {
     });
     box.querySelectorAll("[data-open]").forEach(b => b.addEventListener("click",
       () => navigate("scan", { token: b.dataset.open })));
+    box.querySelectorAll("[data-qr]").forEach(b => b.addEventListener("click",
+      () => printDeviceCodes(_devCurrent.filter(x => x.code === b.dataset.qr))));
     box.querySelectorAll("[data-edit]").forEach(b => b.addEventListener("click",
       () => deviceEditDialog(_devCurrent.find(x => x.id == b.dataset.edit), load)));
     updateBulk();
