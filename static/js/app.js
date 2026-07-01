@@ -431,6 +431,7 @@ async function viewDashboard(v) {
     ${isClient ? `<button class="btn" id="dash-req">+ ${t("request_visit")}</button>` : ""}</div>
     <div class="cards">${cards}</div>
     ${d.cockpit ? cockpitSection(d.cockpit) : ""}
+    ${(!isClient && d.devices && d.devices.total) ? deviceDashStrip(d.devices) : ""}
     ${isClient ? `<div id="dash-sla"></div>` : ""}
     <div class="panel"><h3>${t("nav_schedule")}</h3><div id="dash-visits">${t("loading")}</div></div>`;
   if ($("dash-req")) $("dash-req").addEventListener("click", requestForm);
@@ -440,6 +441,19 @@ async function viewDashboard(v) {
   const vlist = Array.isArray(visits) ? visits : (visits.items || []);
   $("dash-visits").innerHTML = visitsTable(vlist.slice(0, 8));
   wireVisitRows($("dash-visits"));
+}
+
+// QR device fleet health strip on the staff dashboard: fleet size, this
+// month's service coverage, devices needing service, activity detections.
+function deviceDashStrip(dv) {
+  const card = (val, label, icon, cls) =>
+    `<div class="stat-card ${cls}"><div class="sc-ic">${icon}</div><div><div class="v">${val}</div><div class="l">${label}</div></div></div>`;
+  return `<div class="section-title" style="margin-top:8px"><h3>🏷️ ${t("nav_devices")}</h3></div>
+    <div class="cards">
+      ${card(dv.total, t("total_devices"), "📍", "c-blue")}
+      ${card(dv.coverage != null ? dv.coverage + "%" : "—", t("coverage_month"), "✅", (dv.coverage != null && dv.coverage < 60) ? "warn" : "c-green")}
+      ${card(dv.needs_service, t("mst_needs_service"), "🛠️", dv.needs_service > 0 ? "warn" : "c-green")}
+      ${card(dv.activity_month, t("activity_detections"), "🐭", dv.activity_month > 0 ? "danger" : "c-green")}</div>`;
 }
 
 // Owner cockpit: revenue / overdue billing / SLA health KPI strip + a
@@ -3260,36 +3274,52 @@ function cols3d(items) {
 function pestTrendsBlock(tr) {
   if (!tr || !tr.totals || !tr.totals.devices) return "";
   const T = tr.totals;
+  const K = tr.kpis || {};
   const labels = tr.months.map(m => monthShort(m.m));
   const statusColors = { ok: "#16a34a", needs_service: "#d97706", activity: "#dc2626", missing: "#64748b" };
   const sc = (val, label, icon, cls) => `<div class="stat-card ${cls}"><div class="sc-ic">${icon}</div><div><div class="v">${val}</div><div class="l">${label}</div></div></div>`;
   const typeItems = tr.by_type.map((r, i) => ({
-    label: r.type ? t("type_" + r.type) : t("none"), value: r.detections,
+    label: r.type ? t("dt_" + r.type) : t("none"), value: r.detections,
     color: PALETTE[(i + 1) % PALETTE.length] }));
   const trend = curveChart(labels, [
     { name: t("inspections"), color: "#2563eb", values: tr.months.map(m => m.inspections) },
     { name: t("detections"), color: "#dc2626", values: tr.months.map(m => m.detections) }]);
+  // Pest-pressure curve (fly counts + bait consumption %) — only when we have data.
+  const hasFly = tr.months.some(m => m.fly != null);
+  const hasBait = tr.months.some(m => m.bait_pct != null);
+  const pressure = (hasFly || hasBait) ? `<div class="panel"><h3>🪰 ${t("pest_pressure")}</h3>${curveChart(labels, [
+    ...(hasFly ? [{ name: t("avg_fly"), color: "#7c3aed", values: tr.months.map(m => m.fly || 0) }] : []),
+    ...(hasBait ? [{ name: t("bait_consumption"), color: "#d97706", values: tr.months.map(m => m.bait_pct || 0) }] : [])])}</div>` : "";
   const hotRows = (tr.hotspots || []).map(h => `<tr>
-      <td>${esc(h.label || "#" + h.id)}</td>
-      <td>${esc(h.type ? t("type_" + h.type) : "—")}</td>
-      <td>${esc(h.map_name || "—")}</td>
+      <td><strong>${esc(h.label || "#" + h.id)}</strong></td>
+      <td>${esc(h.type ? t("dt_" + h.type) : "—")}</td>
+      <td>${esc(h.loc || "—")}</td>
       <td class="num"><strong>${h.detections}</strong></td>
       <td><span style="display:inline-block;padding:2px 10px;border-radius:20px;font-size:11px;font-weight:700;color:#fff;background:${statusColors[h.status] || "#64748b"}">${esc(t("mst_" + h.status))}</span></td>
     </tr>`).join("") || `<tr><td colspan="5" class="empty">${t("no_trend_data")}</td></tr>`;
+  // Consumables replaced (from scan follow-up) — restocking / billing signal.
+  const rep = K.replaced || {};
+  const repItems = [["baits", "baits_count"], ["lamps", "lamps_used"], ["sheets", "light_sheets_used"], ["glue_boards", "glo_pieces"]]
+    .filter(([k]) => (rep[k] || 0) > 0)
+    .map(([k, tk], i) => ({ label: t(tk), value: rep[k], color: PALETTE[i % PALETTE.length] }));
   return `
     <div class="cards">
       ${sc(T.devices, t("total_devices"), "📍", "c-blue")}
       ${sc(T.inspections, t("monitoring_events"), "🔎", "c-teal")}
       ${sc(T.detections, t("activity_detections"), "🐭", "danger")}
-      ${sc(T.active_now, t("mst_activity"), "⚠️", "c-amber")}</div>
+      ${sc(T.needs_service || 0, t("mst_needs_service"), "🛠️", "c-amber")}
+      ${K.fly_avg != null ? sc(K.fly_avg, t("avg_fly"), "🪰", "c-purple") : ""}
+      ${K.catch_rate != null ? sc(K.catch_rate + "%", t("catch_rate"), "🎯", "c-teal") : ""}</div>
     <div class="panel"><h3>📈 ${t("pest_trends")}</h3>${trend}</div>
+    ${pressure}
     <div class="grid-2">
       <div class="panel"><h3>🐛 ${t("by_device_type")}</h3>${cols3d(typeItems)}</div>
       <div class="panel"><h3>🔥 ${t("device_hotspots")}</h3>
-        <table><thead><tr><th>${t("marker_label")}</th><th>${t("marker_type")}</th><th>${t("map_name")}</th>
+        <table><thead><tr><th>${t("code")}</th><th>${t("marker_type")}</th><th>${t("location_lbl")}</th>
         <th class="num">${t("detections")}</th><th>${t("marker_status")}</th></tr></thead>
         <tbody>${hotRows}</tbody></table></div>
-    </div>`;
+    </div>
+    ${repItems.length ? `<div class="panel"><h3>🔧 ${t("consumables_replaced")}</h3>${cols3d(repItems)}</div>` : ""}`;
 }
 
 // Materials-consumed rollup: total parts/chemicals used across all the
@@ -3597,8 +3627,8 @@ function renderAuditPack(d) {
       <td>${esc(r.recommendations || "—")}</td>
       <td>${esc(r.agent || "—")}</td></tr>`).join("") || `<tr><td colspan="6" class="empty">${t("no_corrective")}</td></tr>`;
   const alertRows = (d.device_alerts || []).map(a => `<tr>
-      <td>${esc(a.label || "—")}</td><td>${esc(a.type ? t("type_" + a.type) : "—")}</td>
-      <td>${esc(a.map_name || "—")}</td>
+      <td>${esc(a.label || "—")}</td><td>${esc(a.type ? t("dt_" + a.type) : "—")}</td>
+      <td>${esc(a.loc || "—")}</td>
       <td><span style="display:inline-block;padding:2px 9px;border-radius:20px;font-size:11px;font-weight:700;color:#fff;background:${a.status === "activity" ? "#dc2626" : "#d97706"}">${esc(t("mst_" + a.status))}</span></td>
       <td>${a.last_seen ? fmtDate(a.last_seen) : "—"}</td></tr>`).join("");
   const corrective = `<h2 style="margin:18px 0 6px">🛠️ ${esc(t("corrective_actions"))}</h2>
@@ -3607,7 +3637,7 @@ function renderAuditPack(d) {
       <th>${t("finding")}</th><th>${t("action_taken")}</th><th>${t("agent")}</th>
       </tr></thead><tbody>${corrRows}</tbody></table></div>
     ${alertRows ? `<div class="panel"><h3>⚠️ ${esc(t("open_device_alerts"))}</h3><table><thead><tr>
-      <th>${t("marker_label")}</th><th>${t("marker_type")}</th><th>${t("map_name")}</th>
+      <th>${t("code")}</th><th>${t("marker_type")}</th><th>${t("location_lbl")}</th>
       <th>${t("marker_status")}</th><th>${t("last_seen")}</th></tr></thead>
       <tbody>${alertRows}</tbody></table></div>` : ""}`;
 

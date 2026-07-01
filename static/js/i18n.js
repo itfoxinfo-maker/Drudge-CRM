@@ -237,6 +237,8 @@ const TRANSLATIONS = {
     activity_detections: "Activity Detections", device_hotspots: "Activity Hotspots",
     detections: "Detections", no_trend_data: "No monitoring data yet.",
     by_device_type: "By Device Type", last_inspection: "Last Inspection", inspections: "Inspections",
+    pest_pressure: "Pest Pressure", avg_fly: "Avg Fly Count", bait_consumption: "Bait Consumption %",
+    catch_rate: "Catch Rate", consumables_replaced: "Consumables Replaced", coverage_month: "Coverage (this month)",
     // engineer service log (visit-tracker materials)
     materials_used: "Service & Materials Used", spare_parts_changed: "Spare Parts Changed",
     lamps_used: "Lamps Used", cables_used: "Cables Used", transformers_used: "Transformers Used",
@@ -507,6 +509,8 @@ const TRANSLATIONS = {
     activity_detections: "حالات رصد النشاط", device_hotspots: "بؤر النشاط",
     detections: "حالات الرصد", no_trend_data: "لا توجد بيانات مراقبة بعد.",
     by_device_type: "حسب نوع الجهاز", last_inspection: "آخر فحص", inspections: "عمليات الفحص",
+    pest_pressure: "ضغط الآفات", avg_fly: "متوسط عدد الذباب", bait_consumption: "نسبة استهلاك الطُعم %",
+    catch_rate: "معدل الاصطياد", consumables_replaced: "المستهلكات المستبدلة", coverage_month: "التغطية (هذا الشهر)",
     // engineer service log (visit-tracker materials)
     materials_used: "الخدمة والمواد المستخدمة", spare_parts_changed: "قطع الغيار المستبدلة",
     lamps_used: "اللمبات المستخدمة", cables_used: "الكابلات المستخدمة", transformers_used: "المحولات المستخدمة",

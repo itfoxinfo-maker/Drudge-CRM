@@ -420,7 +420,25 @@ def dashboard(ctx):
     # analytics. Agents/clients never get it.
     if has_perm(u, "analytics.view"):
         stats["cockpit"] = _owner_cockpit()
+    stats["devices"] = _device_overview()
     return stats
+
+
+def _device_overview():
+    """QR device fleet health for the staff dashboard: how many devices exist,
+    how many need service, pest-activity detections this month, and what share
+    of the fleet was actually scanned this month (service coverage)."""
+    one = lambda q: db.query(q, one=True)["c"]
+    total = one("SELECT COUNT(*) c FROM devices WHERE active=1 AND client_id IS NOT NULL")
+    scanned = one("SELECT COUNT(DISTINCT device_id) c FROM device_inspections "
+                  "WHERE strftime('%Y-%m',recorded_at)=strftime('%Y-%m','now')")
+    return {
+        "total": total,
+        "needs_service": one("SELECT COUNT(*) c FROM devices WHERE active=1 AND status='needs_service'"),
+        "activity_month": one("SELECT COUNT(*) c FROM device_inspections "
+                              "WHERE status='activity' AND strftime('%Y-%m',recorded_at)=strftime('%Y-%m','now')"),
+        "coverage": round(100.0 * scanned / total) if total else None,
+    }
 
 
 def _owner_cockpit():
@@ -2761,54 +2779,81 @@ def client_analytics(ctx):
 
 @route("GET", r"/api/clients/(\d+)/pest-trends")
 def client_pest_trends(ctx):
-    """Device-monitoring trends for one client: monthly pest-activity
-    detections, breakdown by device type, and activity hotspots. Used for
-    audit/compliance reporting (e.g. HACCP)."""
+    """Device-monitoring trends for one client, built from the QR device scans
+    (device_inspections + devices). Monthly pest-activity + pest-pressure
+    (fly counts, bait consumption), device-type breakdown, hotspots, and
+    follow-up KPIs (catch rate, consumables replaced). For audit/HACCP."""
     cid = int(ctx.params[0])
     _assert_client_access(ctx.user, cid)
     if ctx.user["role"] != "client":
         require_perm(ctx.user, "analytics.view")
     site_id = ctx.query.get("site_id")
-    # marker_events carry no site_id; scope via their map's location.
-    ef, ep = _site_filter(site_id, "(SELECT site_id FROM maps WHERE id=marker_events.map_id)")
-    eef, eep = _site_filter(site_id, "(SELECT site_id FROM maps WHERE id=e.map_id)")
-    mf, mp_ = _site_filter(site_id, "m.site_id")
+    # Inspections carry no site_id; scope through the device's location.
+    df, dp = _site_filter(site_id, "d.site_id")
+    r1 = lambda x: round(x, 1) if x is not None else None
     labels = _month_labels(12)
-    insp_by = {r["m"]: r["v"] for r in db.query(
-        "SELECT strftime('%Y-%m',recorded_at) m, COUNT(*) v FROM marker_events "
-        "WHERE client_id=?" + ef + " GROUP BY m", (cid, *ep))}
-    act_by = {r["m"]: r["v"] for r in db.query(
-        "SELECT strftime('%Y-%m',recorded_at) m, COUNT(*) v FROM marker_events "
-        "WHERE client_id=? AND status='activity'" + ef + " GROUP BY m", (cid, *ep))}
-    months = [{"m": k, "inspections": insp_by.get(k, 0) or 0,
-               "detections": act_by.get(k, 0) or 0} for k in labels]
+    DI = "device_inspections di JOIN devices d ON d.id=di.device_id"
+
+    mrows = db.query(
+        "SELECT strftime('%Y-%m',di.recorded_at) m, COUNT(*) inspections, "
+        "SUM(CASE WHEN di.status='activity' THEN 1 ELSE 0 END) detections, "
+        "AVG(CAST(COALESCE(json_extract(di.details,'$.fly_count'),"
+        "json_extract(di.details,'$.fly_density')) AS REAL)) fly, "
+        "AVG(CAST(json_extract(di.details,'$.consumption_pct') AS REAL)) bait_pct "
+        "FROM " + DI + " WHERE di.client_id=?" + df + " GROUP BY m", (cid, *dp))
+    by_m = {r["m"]: r for r in mrows}
+    months = [{"m": k,
+               "inspections": (by_m[k]["inspections"] if k in by_m else 0),
+               "detections": (by_m[k]["detections"] if k in by_m else 0),
+               "fly": r1(by_m[k]["fly"]) if k in by_m else None,
+               "bait_pct": r1(by_m[k]["bait_pct"]) if k in by_m else None}
+              for k in labels]
     by_type = db.query(
-        "SELECT type, COUNT(*) detections FROM marker_events "
-        "WHERE client_id=? AND status='activity'" + ef + " GROUP BY type ORDER BY detections DESC", (cid, *ep))
+        "SELECT d.type, COUNT(*) detections FROM " + DI +
+        " WHERE di.client_id=? AND di.status='activity'" + df +
+        " GROUP BY d.type ORDER BY detections DESC", (cid, *dp))
+    # Hotspots keyed by device (code + friendly location) rather than map marker.
     hotspots = db.query(
-        "SELECT k.id, k.label, k.type, k.status, mp.name map_name, "
-        "COUNT(e.id) detections, MAX(e.recorded_at) last_seen "
-        "FROM marker_events e JOIN map_markers k ON k.id=e.marker_id "
-        "JOIN maps mp ON mp.id=e.map_id "
-        "WHERE e.client_id=? AND e.status='activity'" + eef +
-        " GROUP BY e.marker_id ORDER BY detections DESC, last_seen DESC LIMIT 8", (cid, *eep))
-    totals = {
-        "inspections": db.query(
-            "SELECT COUNT(*) c FROM marker_events WHERE client_id=?" + ef, (cid, *ep), one=True)["c"],
-        "detections": db.query(
-            "SELECT COUNT(*) c FROM marker_events WHERE client_id=? AND status='activity'" + ef,
-            (cid, *ep), one=True)["c"],
-        "devices": db.query(
-            "SELECT COUNT(DISTINCT k.id) c FROM map_markers k JOIN maps m ON m.id=k.map_id "
-            "WHERE m.client_id=?" + mf, (cid, *mp_), one=True)["c"],
-        "active_now": db.query(
-            "SELECT COUNT(*) c FROM map_markers k JOIN maps m ON m.id=k.map_id "
-            "WHERE m.client_id=?" + mf + " AND k.status='activity'", (cid, *mp_), one=True)["c"],
+        "SELECT d.id, d.code label, d.label loc, d.type, d.status, "
+        "COUNT(di.id) detections, MAX(di.recorded_at) last_seen "
+        "FROM " + DI + " WHERE di.client_id=? AND di.status='activity'" + df +
+        " GROUP BY di.device_id ORDER BY detections DESC, last_seen DESC LIMIT 8", (cid, *dp))
+
+    # Follow-up KPIs from the scan details JSON (over the scoped inspections).
+    k = db.query(
+        "SELECT AVG(CAST(COALESCE(json_extract(di.details,'$.fly_count'),"
+        "json_extract(di.details,'$.fly_density')) AS REAL)) fly_avg, "
+        "AVG(CAST(json_extract(di.details,'$.consumption_pct') AS REAL)) bait_pct_avg, "
+        "SUM(json_extract(di.details,'$.caught')='yes') caught, "
+        "SUM(json_extract(di.details,'$.caught') IS NOT NULL) glue_checks, "
+        "SUM(json_extract(di.details,'$.lamp_status')='replaced') lamps, "
+        "SUM(json_extract(di.details,'$.sheet_status')='replaced') sheets, "
+        "SUM(json_extract(di.details,'$.glue_status')='changed') glue_boards, "
+        "SUM(json_extract(di.details,'$.bait_status')='changed') baits "
+        "FROM " + DI + " WHERE di.client_id=?" + df, (cid, *dp), one=True)
+    glue_checks = k["glue_checks"] or 0
+    kpis = {
+        "fly_avg": r1(k["fly_avg"]),
+        "bait_pct_avg": r1(k["bait_pct_avg"]),
+        "catch_rate": round(100.0 * (k["caught"] or 0) / glue_checks) if glue_checks else None,
+        "replaced": {"lamps": k["lamps"] or 0, "sheets": k["sheets"] or 0,
+                     "glue_boards": k["glue_boards"] or 0, "baits": k["baits"] or 0},
     }
-    last = db.query(
-        "SELECT MAX(recorded_at) v FROM marker_events WHERE client_id=?" + ef, (cid, *ep), one=True)
+
+    def dev_count(extra=""):
+        return db.query("SELECT COUNT(*) c FROM devices d WHERE d.client_id=? AND d.active=1"
+                        + df + extra, (cid, *dp), one=True)["c"]
+    totals = {
+        "inspections": db.query("SELECT COUNT(*) c FROM " + DI + " WHERE di.client_id=?" + df, (cid, *dp), one=True)["c"],
+        "detections": db.query("SELECT COUNT(*) c FROM " + DI + " WHERE di.client_id=? AND di.status='activity'" + df, (cid, *dp), one=True)["c"],
+        "devices": dev_count(),
+        "active_now": dev_count(" AND d.status='activity'"),
+        "needs_service": dev_count(" AND d.status='needs_service'"),
+        "missing": dev_count(" AND d.status='missing'"),
+    }
+    last = db.query("SELECT MAX(di.recorded_at) v FROM " + DI + " WHERE di.client_id=?" + df, (cid, *dp), one=True)
     return {"months": months, "by_type": by_type, "hotspots": hotspots,
-            "totals": totals, "last_inspection": last["v"] if last else None}
+            "totals": totals, "kpis": kpis, "last_inspection": last["v"] if last else None}
 
 
 def _months_between(d_from, d_to, cap=24):
@@ -2923,32 +2968,32 @@ def client_audit_pack(ctx):
         "      OR r.severity IN ('high','critical')) "
         "ORDER BY v.scheduled_start DESC", (cid, *vp, *drp))
 
-    # devices currently flagged (needs service / live activity) — open actions
-    mf, mpx = _site_filter(site_id, "mp.site_id")
+    # QR devices currently flagged (needs service / live activity) — open actions
+    daf, dap = _site_filter(site_id, "d.site_id")
     device_alerts = db.query(
-        "SELECT k.label, k.type, k.status, mp.name map_name, "
-        "MAX(e.recorded_at) last_seen FROM map_markers k JOIN maps mp ON mp.id=k.map_id "
-        "LEFT JOIN marker_events e ON e.marker_id=k.id "
-        "WHERE mp.client_id=?" + mf + " AND k.status IN ('needs_service','activity') "
-        "GROUP BY k.id ORDER BY k.status DESC", (cid, *mpx))
+        "SELECT d.code label, d.label loc, d.type, d.status, "
+        "(SELECT MAX(recorded_at) FROM device_inspections di WHERE di.device_id=d.id) last_seen "
+        "FROM devices d WHERE d.client_id=? AND d.active=1" + daf +
+        " AND d.status IN ('needs_service','activity') ORDER BY d.status DESC", (cid, *dap))
 
-    # --- pest-activity trend over the range (device monitoring) ---------------
+    # --- pest-activity trend over the range (from QR device scans) ------------
     months = _months_between(d_from, d_to)
-    ef, ep = _site_filter(site_id, "(SELECT site_id FROM maps WHERE id=marker_events.map_id)")
-    md = " AND date(recorded_at) BETWEEN ? AND ?"
+    ef, ep = _site_filter(site_id, "d.site_id")
+    DIA = "device_inspections di JOIN devices d ON d.id=di.device_id"
+    md = " AND date(di.recorded_at) BETWEEN ? AND ?"
     insp_by = {r["m"]: r["v"] for r in db.query(
-        "SELECT strftime('%Y-%m',recorded_at) m, COUNT(*) v FROM marker_events "
-        "WHERE client_id=?" + ef + md + " GROUP BY m", (cid, *ep, d_from, d_to))}
+        "SELECT strftime('%Y-%m',di.recorded_at) m, COUNT(*) v FROM " + DIA +
+        " WHERE di.client_id=?" + ef + md + " GROUP BY m", (cid, *ep, d_from, d_to))}
     act_by = {r["m"]: r["v"] for r in db.query(
-        "SELECT strftime('%Y-%m',recorded_at) m, COUNT(*) v FROM marker_events "
-        "WHERE client_id=? AND status='activity'" + ef + md + " GROUP BY m",
+        "SELECT strftime('%Y-%m',di.recorded_at) m, COUNT(*) v FROM " + DIA +
+        " WHERE di.client_id=? AND di.status='activity'" + ef + md + " GROUP BY m",
         (cid, *ep, d_from, d_to))}
     trend_months = [{"m": k, "inspections": insp_by.get(k, 0) or 0,
                      "detections": act_by.get(k, 0) or 0} for k in months]
     by_type = db.query(
-        "SELECT type, COUNT(*) detections FROM marker_events "
-        "WHERE client_id=? AND status='activity'" + ef + md +
-        " GROUP BY type ORDER BY detections DESC", (cid, *ep, d_from, d_to))
+        "SELECT d.type, COUNT(*) detections FROM " + DIA +
+        " WHERE di.client_id=? AND di.status='activity'" + ef + md +
+        " GROUP BY d.type ORDER BY detections DESC", (cid, *ep, d_from, d_to))
 
     completed = sum(1 for h in history if h["status"] == "completed")
     signed = sum(1 for h in history if h["customer_signature"] and h["technician_signature"])
