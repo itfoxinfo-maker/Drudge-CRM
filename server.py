@@ -424,10 +424,35 @@ def dashboard(ctx):
     return stats
 
 
+# A device is "stale" (overdue for a scan) when it's active + assigned and its
+# last inspection is older than this many days — or it was never scanned.
+STALE_SCAN_DAYS = 30
+_STALE_PRED = ("d.active=1 AND d.client_id IS NOT NULL AND COALESCE("
+               "(SELECT MAX(recorded_at) FROM device_inspections di WHERE di.device_id=d.id),'0')"
+               " < datetime('now','-%d days')" % STALE_SCAN_DAYS)
+
+
+def _stale_count():
+    return db.query("SELECT COUNT(*) c FROM devices d WHERE " + _STALE_PRED, one=True)["c"]
+
+
+def _stale_devices(limit=None):
+    """Assigned devices overdue for a scan, oldest (incl. never-scanned) first."""
+    sql = ("SELECT d.id, d.code, d.type, d.label loc, c.name_en client_en, "
+           "c.name_ar client_ar, s.name site_name, "
+           "(SELECT MAX(recorded_at) FROM device_inspections di WHERE di.device_id=d.id) last_seen "
+           "FROM devices d LEFT JOIN clients c ON c.id=d.client_id "
+           "LEFT JOIN sites s ON s.id=d.site_id WHERE " + _STALE_PRED +
+           " ORDER BY last_seen IS NOT NULL, last_seen ASC")
+    if limit:
+        sql += " LIMIT %d" % int(limit)
+    return db.query(sql)
+
+
 def _device_overview():
     """QR device fleet health for the staff dashboard: how many devices exist,
-    how many need service, pest-activity detections this month, and what share
-    of the fleet was actually scanned this month (service coverage)."""
+    how many need service, pest-activity detections this month, what share of
+    the fleet was scanned this month (coverage), and how many are overdue."""
     one = lambda q: db.query(q, one=True)["c"]
     total = one("SELECT COUNT(*) c FROM devices WHERE active=1 AND client_id IS NOT NULL")
     scanned = one("SELECT COUNT(DISTINCT device_id) c FROM device_inspections "
@@ -438,6 +463,8 @@ def _device_overview():
         "activity_month": one("SELECT COUNT(*) c FROM device_inspections "
                               "WHERE status='activity' AND strftime('%Y-%m',recorded_at)=strftime('%Y-%m','now')"),
         "coverage": round(100.0 * scanned / total) if total else None,
+        "stale": _stale_count(),
+        "stale_days": STALE_SCAN_DAYS,
     }
 
 
@@ -2668,6 +2695,16 @@ def _generate_reminders():
                        f"(reorder at {ch['reorder_level']:g} {ch['unit']})",
                        "chemicals", ch["id"], f"restock:{ch['id']}:{bucket}:{m['id']}"):
                 created += 1
+    # Devices overdue for a scan (not inspected in STALE_SCAN_DAYS, or never)
+    # -> monthly summary alert to managers/admins so routine service gaps get
+    # chased. One notification per month, not per device, to avoid spam.
+    stale_n = _stale_count()
+    if stale_n:
+        for m in managers:
+            if _notify(m["id"], "devices_stale", "Devices overdue for service",
+                       f"{stale_n} device(s) not scanned in {STALE_SCAN_DAYS}+ days",
+                       "devices", None, f"staledev:{bucket}:{m['id']}"):
+                created += 1
     return created
 
 
@@ -2748,8 +2785,10 @@ def analytics(ctx):
     }
 
     # --- fleet & pest rollup from the QR device scans (range-scoped) ---
+    total_dev = db.query("SELECT COUNT(*) c FROM devices WHERE active=1 AND client_id IS NOT NULL", one=True)["c"]
     di_by = {r["m"]: r for r in db.query(
         "SELECT strftime('%Y-%m',recorded_at) m, COUNT(*) inspections, "
+        "COUNT(DISTINCT device_id) scanned, "
         "SUM(status='activity') detections, "
         "AVG(CAST(COALESCE(json_extract(details,'$.fly_count'),"
         "json_extract(details,'$.fly_density')) AS REAL)) fly, "
@@ -2758,9 +2797,9 @@ def analytics(ctx):
     fleet_months = [{"m": k,
                      "inspections": (di_by[k]["inspections"] if k in di_by else 0),
                      "detections": (di_by[k]["detections"] if k in di_by else 0),
+                     "coverage": (round(100.0 * di_by[k]["scanned"] / total_dev) if (k in di_by and total_dev) else 0),
                      "fly": r1(di_by[k]["fly"]) if k in di_by else None,
                      "bait_pct": r1(di_by[k]["bait_pct"]) if k in di_by else None} for k in labels]
-    total_dev = db.query("SELECT COUNT(*) c FROM devices WHERE active=1 AND client_id IS NOT NULL", one=True)["c"]
     scanned_month = db.query("SELECT COUNT(DISTINCT device_id) c FROM device_inspections "
                              "WHERE strftime('%Y-%m',recorded_at)=strftime('%Y-%m','now')", one=True)["c"]
     top_clients = db.query(
@@ -2784,6 +2823,8 @@ def analytics(ctx):
         "months": fleet_months, "top_clients": top_clients,
         "replaced": {"lamps": rep["lamps"] or 0, "sheets": rep["sheets"] or 0,
                      "glue_boards": rep["glue_boards"] or 0, "baits": rep["baits"] or 0},
+        "stale": _stale_devices(20), "stale_count": _stale_count(),
+        "stale_days": STALE_SCAN_DAYS,
     }
     return {"range": {"from": d_from, "to": d_to}, "months": months,
             "ar_aging": ar_aging, "agents": agents, "chemicals": chemicals,

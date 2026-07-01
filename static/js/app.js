@@ -452,6 +452,7 @@ function deviceDashStrip(dv) {
     <div class="cards">
       ${card(dv.total, t("total_devices"), "📍", "c-blue")}
       ${card(dv.coverage != null ? dv.coverage + "%" : "—", t("coverage_month"), "✅", (dv.coverage != null && dv.coverage < 60) ? "warn" : "c-green")}
+      ${card(dv.stale || 0, t("overdue_devices"), "⏰", dv.stale > 0 ? "danger" : "c-green")}
       ${card(dv.needs_service, t("mst_needs_service"), "🛠️", dv.needs_service > 0 ? "warn" : "c-green")}
       ${card(dv.activity_month, t("activity_detections"), "🐭", dv.activity_month > 0 ? "danger" : "c-green")}</div>`;
 }
@@ -3082,6 +3083,16 @@ function analyticsParts(a) {
   const pressure = (hasFly || hasBait) ? curveChart(labels, [
       ...(hasFly ? [{ name: t("avg_fly"), color: "#7c3aed", values: F.months.map(m => m.fly || 0) }] : []),
       ...(hasBait ? [{ name: t("bait_consumption"), color: "#d97706", values: F.months.map(m => m.bait_pct || 0) }] : [])]) : "";
+  // service-coverage-over-time trend (% of fleet scanned each month)
+  const coverageCurve = F.months.some(m => m.coverage) ? curveChart(labels, [
+      { name: t("service_coverage"), color: "#16a34a", values: F.months.map(m => m.coverage || 0) }]) : "";
+  // devices overdue for a scan (never / not in N days)
+  const stale = F.stale || [];
+  const staleTable = stale.length ? `<table><thead><tr><th>${t("code")}</th><th>${t("marker_type")}</th>
+      <th>${t("client")}</th><th>${t("location_lbl")}</th><th>${t("last_scanned")}</th></tr></thead><tbody>${stale.map(x => `<tr>
+      <td><strong>${esc(x.code)}</strong></td><td>${devIcon(x.type)} ${esc(t("dt_" + x.type))}</td>
+      <td>${esc(localized(x, "client") || "—")}</td><td>${esc(x.loc || x.site_name || "—")}</td>
+      <td>${x.last_seen ? fmtDate(x.last_seen) : `<span class="warn-line">${t("never_scanned")}</span>`}</td></tr>`).join("")}</tbody></table>` : "";
   const maxTop = Math.max(1, ...F.top_clients.map(x => x.detections || 0));
   const topClients = barList(F.top_clients, x => bar(localized(x, "name"), x.detections || 0, maxTop, "var(--red)"));
   const rep = F.replaced || {};
@@ -3098,12 +3109,20 @@ function analyticsParts(a) {
     </div>
     ${showFleet ? `<div class="section-title" style="margin-top:8px"><h2>🏷️ ${t("nav_devices")} — ${t("pest_trends")}</h2></div>
       ${fleetCards}
-      <div class="panel"><h3>📈 ${t("pest_trends")}</h3>${activityCurve}</div>
+      <div class="grid-2">
+        <div class="panel"><h3>📈 ${t("pest_trends")}</h3>${activityCurve}</div>
+        <div class="panel"><h3>✅ ${t("service_coverage")}</h3>${coverageCurve || empty}</div>
+      </div>
       ${pressure ? `<div class="panel"><h3>🪰 ${t("pest_pressure")}</h3>${pressure}</div>` : ""}
       <div class="grid-2">
         <div class="panel"><h3>🔥 ${t("top_clients_activity")}</h3>${topClients}</div>
         ${repItems.length ? `<div class="panel"><h3>🔧 ${t("consumables_replaced")}</h3>${cols3d(repItems)}</div>` : ""}
-      </div>` : ""}`;
+      </div>
+      ${F.stale_count ? `<div class="panel" data-nav="devices" style="cursor:pointer">
+        <h3 style="display:flex;justify-content:space-between;align-items:center">
+          <span>⏰ ${t("overdue_devices")}</span><span class="badge b-draft">${F.stale_count}</span></h3>
+        <div class="muted small" style="margin:-4px 0 8px">${t("overdue_devices_hint").replace("{n}", F.stale_days)}</div>
+        ${staleTable}</div>` : ""}` : ""}`;
   return { html };
 }
 
@@ -3130,6 +3149,8 @@ function exportAnalyticsCsv(a) {
   sec(t("chemical_usage"), ["name", "unit", "used"], a.chemicals.map(x => [localized(x, "name"), x.unit, x.used]));
   sec(t("service_mix"), ["service", "visits"], a.services.map(x => [localized(x, "name"), x.cnt]));
   if (F.top_clients) sec(t("top_clients_activity"), ["client", "detections"], F.top_clients.map(x => [localized(x, "name"), x.detections]));
+  if (F.stale) sec(t("overdue_devices"), ["code", "type", "client", "location", "last_scanned"],
+    F.stale.map(x => [x.code, t("dt_" + x.type), localized(x, "client"), x.loc || x.site_name || "", x.last_seen || t("never_scanned")]));
   const blob = new Blob(["﻿" + lines.join("\n")], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
