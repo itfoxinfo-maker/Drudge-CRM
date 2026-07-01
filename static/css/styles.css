@@ -269,6 +269,11 @@ tr.clickable:hover { background: var(--green-l); }
 .rdoc-table { width: 100%; border-collapse: collapse; margin-top: 6px; }
 .rdoc-table th, .rdoc-table td { padding: 8px 10px; border-bottom: 1px solid #eef2f5; text-align: start; }
 .rdoc-table th { background: #f1f5f9; font-size: 11px; text-transform: uppercase; color: #475569; }
+/* Device follow-up (QR scan) + photos sections on the report document. */
+.rdoc-extra { margin-top: 6px; }
+.rdoc-fu { margin: 6px 0 14px; overflow-x: auto; }
+.rdoc-fu h4 { margin: 10px 0 2px; font-size: 13px; color: #0f766e; }
+.rdoc-fu .rdoc-table th, .rdoc-fu .rdoc-table td { white-space: nowrap; }
 .rdoc-sigs { display: flex; gap: 30px; margin-top: 26px; }
 .rdoc-sig { flex: 1; text-align: center; }
 .rdoc-sig img { max-height: 70px; max-width: 220px; }

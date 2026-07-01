@@ -1157,6 +1157,25 @@ const REPORT_MAT_FIELDS = ["lamps_used", "cables_used", "transformers_used", "li
 // Single-report document view, opened ONLY from the Reports sidebar list.
 // Looks like a printable report, is editable, and shows only fields that have
 // content (empty fields are tucked behind a "show all fields" toggle so they can
+// Read-only on-screen tables of the device follow-up data captured by QR scans
+// on this visit, grouped by device type (mirrors the printed follow-up form).
+// Returns "" when nothing was scanned.
+function reportFollowupHtml(groups) {
+  const order = ["bait_station", "fly_trap", "glue_station", "light_trap"];
+  return order.filter(ty => (groups[ty] || []).length).map(ty => {
+    const fields = DEVICE_FIELDS[ty] || [];
+    const head = `<th>${t("code")}</th><th>${t("label")}</th><th>${t("status")}</th>`
+      + fields.map(f => `<th>${esc(t("df_" + f.key))}</th>`).join("");
+    const rows = groups[ty].map(r => `<tr>
+      <td><strong>${esc(r.code)}</strong></td><td>${esc(r.label || "—")}</td>
+      <td>${t("mst_" + r.status)}</td>
+      ${fields.map(f => `<td>${fmtDetailCell(f, (r.details || {})[f.key])}</td>`).join("")}
+    </tr>`).join("");
+    return `<div class="rdoc-fu"><h4>${devIcon(ty)} ${esc(t("sec_" + ty))}</h4>
+      <table class="rdoc-table"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div>`;
+  }).join("");
+}
+
 // still be added). New design — intentionally distinct from the certificate.
 async function viewReportDoc(v, arg) {
   const id = arg && arg.id;
@@ -1165,6 +1184,10 @@ async function viewReportDoc(v, arg) {
   // are never saved back over the agent's original text.
   const visit = await API.get(`/visits/${id}?lang=${LANG}`);
   const rep = visit.report || {};
+  // Device follow-up captured by QR scans on this visit (best-effort).
+  const followup = await API.get(`/visits/${id}/followup`).catch(() => ({ groups: {} }));
+  const fuHtml = reportFollowupHtml(followup.groups || {});
+  const photos = visit.photos || [];
   const has = (val) => val !== null && val !== undefined && String(val).trim() !== "";
   const textRow = (f) => {
     const val = rep[f.n] || "";
@@ -1207,6 +1230,14 @@ async function viewReportDoc(v, arg) {
         ${visit.visit_number ? `<div><span>${t("visit_number")}</span><b>${esc(visit.visit_number)}</b></div>` : ""}
       </div>
       <div class="rdoc-body">${allRows}</div>
+      <div class="rdoc-extra" data-empty="${fuHtml ? "0" : "1"}">
+        <h3 class="rdoc-sec">🏷️ ${t("followup_report")}</h3>
+        ${fuHtml || `<div class="empty">${t("followup_nothing")}</div>`}</div>
+      <div class="rdoc-extra" data-empty="${photos.length ? "0" : "1"}">
+        <h3 class="rdoc-sec" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+          <span>📷 ${t("photos")}</span>
+          ${can("visits.edit") ? `<button type="button" class="btn sm secondary" id="rd-addphoto">📎 ${t("add_attachment")}</button>` : ""}</h3>
+        <div id="report-photos" class="photo-grid"></div></div>
       ${chemRows ? `<h3 class="rdoc-sec">${t("chemicals_applied")}</h3>
         <table class="rdoc-table"><thead><tr><th>${t("name_en")}</th><th>${t("quantity")}</th><th>${t("area_treated")}</th></tr></thead>
         <tbody>${chemRows}</tbody></table>` : ""}
@@ -1218,11 +1249,15 @@ async function viewReportDoc(v, arg) {
     </div>`;
 
   if (bpPhotos.length) renderPhotos("visit", id, bpPhotos, "report-bp-files");
+  renderPhotos("visit", id, photos, "report-photos");
+  if ($("rd-addphoto")) $("rd-addphoto").addEventListener("click",
+    () => uploadPhotoDialog("visit", id, () => navigate("report", { id })));
   $("bc").addEventListener("click", () => navigate("reports"));
-  // hide empty fields by default; the toggle reveals them for adding
+  // Empty fields/sections are hidden by default; the toggle reveals them (e.g.
+  // to fill a blank field, or to see the empty follow-up/photos capture areas).
   const applyShowAll = () => {
     const show = $("rd-showall").checked;
-    $("rdoc").querySelectorAll('.rdoc-row[data-empty="1"]').forEach(el => el.classList.toggle("hidden", !show));
+    $("rdoc").querySelectorAll('[data-empty="1"]').forEach(el => el.classList.toggle("hidden", !show));
   };
   applyShowAll();
   $("rd-showall").addEventListener("change", applyShowAll);
@@ -1230,7 +1265,7 @@ async function viewReportDoc(v, arg) {
   // never the auto-translated text of fields they left alone)
   $("rdoc").querySelectorAll("[data-rep]").forEach(el =>
     el.addEventListener("input", () => { el.dataset.dirty = "1"; }));
-  $("rd-print").addEventListener("click", () => printReportDoc(visit));
+  $("rd-print").addEventListener("click", () => printReportDoc(visit, followup.groups || {}));
   if ($("rd-save")) $("rd-save").addEventListener("click", async () => {
     const d = {};
     $("rdoc").querySelectorAll('[data-rep][data-dirty="1"]').forEach(el => { d[el.dataset.rep] = el.value; });
@@ -1266,11 +1301,23 @@ function printHtmlDoc(doc) {
   // Clean the frame up later so they don't pile up (print dialog is async).
   setTimeout(() => { const f = document.getElementById("print-frame"); if (f === ifr) ifr.remove(); }, 120000);
 }
-function printReportDoc(visit) {
+function printReportDoc(visit, fuGroups) {
   const ar = LANG === "ar";
   const dir = ar ? "rtl" : "ltr";
   const S = SETTINGS || {};
   const rep = visit.report || {};
+  // Device follow-up (QR scans) as print tables, reusing the report styles.
+  const fuOrder = ["bait_station", "fly_trap", "glue_station", "light_trap"];
+  const fuHtml = fuOrder.filter(ty => ((fuGroups || {})[ty] || []).length).map(ty => {
+    const fields = DEVICE_FIELDS[ty] || [];
+    const head = `<th>${esc(t("code"))}</th><th>${esc(t("label"))}</th><th>${esc(t("status"))}</th>`
+      + fields.map(f => `<th>${esc(t("df_" + f.key))}</th>`).join("");
+    const rows = fuGroups[ty].map(r => `<tr><td>${esc(r.code)}</td><td>${esc(r.label || "—")}</td>`
+      + `<td>${esc(t("mst_" + r.status))}</td>`
+      + fields.map(f => `<td>${esc(fmtDetailCell(f, (r.details || {})[f.key]))}</td>`).join("") + `</tr>`).join("");
+    return `<h4 class="fusec">${devIcon(ty)} ${esc(t("sec_" + ty))}</h4>
+      <table class="data"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`;
+  }).join("");
   const compName = (ar ? S.company_name_ar : S.company_name_en) || S.company_name_en || "Company";
   const compAddr = (ar ? S.address_ar : S.address_en) || S.address_en || "";
   const logoHtml = S.logo ? `<img src="/uploads/${esc(S.logo)}" style="height:46px">` : `<div style="font-size:32px">🐜</div>`;
@@ -1289,6 +1336,10 @@ function printReportDoc(visit) {
       ? `<div class="bp-item"><img src="/uploads/${esc(p.filename)}"><div class="bp-cap">${cap}</div></div>`
       : `<div class="bp-item bp-file">📎 ${esc(p.original_name || p.filename)}<div class="bp-cap">${cap}</div></div>`;
   }).join("");
+  // Captured images on the visit (excluding the business-plan ones shown below).
+  const photoHtml = (visit.photos || []).filter(p =>
+    !Number(p.is_business_plan) && /\.(jpe?g|png|gif|webp)$/i.test(p.filename || "")).map(p =>
+    `<div class="bp-item"><img src="/uploads/${esc(p.filename)}"><div class="bp-cap">${esc(p.caption || p.original_name || "")}</div></div>`).join("");
   const reportRows = [
     row(t("pests_found"), rep.pests_found), row(t("findings"), rep.findings),
     row(t("recommendations"), rep.recommendations),
@@ -1310,6 +1361,7 @@ function printReportDoc(visit) {
       .meta{display:grid;grid-template-columns:1fr 1fr;gap:6px 22px;margin:16px 0 6px}
       .meta div{font-size:12px}.meta span{color:#64748b}.meta b{margin-${ar ? "right" : "left"}:6px}
       h3.sec{margin:20px 0 6px;font-size:11px;color:#0f172a;text-transform:uppercase;letter-spacing:.08em;border-bottom:1px solid #e3e8ec;padding-bottom:4px}
+      h4.fusec{margin:12px 0 4px;font-size:12px;color:#0f766e}
       table{width:100%;border-collapse:collapse}
       .kv td{padding:7px 4px;vertical-align:top;line-height:1.6;border-bottom:1px solid #eef2f5}
       .kv td.l{color:#64748b;width:32%;white-space:nowrap}
@@ -1348,6 +1400,8 @@ function printReportDoc(visit) {
       ${chemRows ? `<h3 class="sec">${esc(t("chemicals_applied"))}</h3>
         <table class="data"><thead><tr><th>${esc(t("name_en"))}</th><th>${esc(t("quantity"))}</th><th>${esc(t("area_treated"))}</th></tr></thead>
         <tbody>${chemRows}</tbody></table>` : ""}
+      ${fuHtml ? `<h3 class="sec">🏷️ ${esc(t("followup_report"))}</h3>${fuHtml}` : ""}
+      ${photoHtml ? `<h3 class="sec">📷 ${esc(t("photos"))}</h3><div class="bp-grid">${photoHtml}</div>` : ""}
       ${(rep.customer_signature || rep.technician_signature) ? `<div class="sigs">
         ${sig(rep.customer_signature, rep.customer_name || t("customer_signature"))}
         ${sig(rep.technician_signature, visit.agent_name || t("technician_signature"))}</div>` : ""}
