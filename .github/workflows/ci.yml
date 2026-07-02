@@ -1,0 +1,32 @@
+name: CI
+
+# Server + frontend checks on every push / PR to main. The app is standard
+# library only, so there is nothing to install — just run the tests and the
+# static frontend/i18n/route guard.
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - 'android/**'
+      - 'marketing-site/**'
+      - '**/*.md'
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Frontend / i18n / route guard
+        run: python3 check_frontend.py
+
+      - name: End-to-end API tests
+        run: python3 test_api.py

@@ -337,6 +337,31 @@ def _login_register_ok(key):
         _login_attempts.pop(key, None)
 
 
+# Generic fixed-window, per-key rate limiter (in-memory, best-effort). Blunts
+# abuse of unauthenticated endpoints such as the payment webhook. Login has its
+# own lockout logic above; authenticated endpoints (e.g. /api/scan/*) are gated
+# by session + permission and are intentionally NOT throttled here, so shared
+# office/NAT IPs don't lock out legitimate field agents.
+_rate_lock = threading.Lock()
+_rate_hits = {}          # key -> [count, window_start]
+
+
+def rate_limit(key, max_hits, window=60):
+    """Return True if `key` is still within its budget for the window, else
+    False (caller should reject with 429). Evicts stale keys to bound memory."""
+    now = time.time()
+    with _rate_lock:
+        if len(_rate_hits) > 4096:
+            for k in [k for k, v in _rate_hits.items() if now - v[1] > window]:
+                _rate_hits.pop(k, None)
+        rec = _rate_hits.get(key)
+        if not rec or now - rec[1] > window:
+            rec = [0, now]
+        rec[0] += 1
+        _rate_hits[key] = rec
+        return rec[0] <= max_hits
+
+
 @route("POST", r"/api/auth/login", auth_required=False)
 def login(ctx):
     email = (ctx.body.get("email") or "").strip().lower()
@@ -1861,6 +1886,9 @@ def payment_callback(ctx):
     """Gateway callback / webhook (unauthenticated — the provider calls it). The
     adapter validates the payload; on success we record the payment, mark the
     invoice paid when fully covered, and flag the intent. Idempotent."""
+    # Unauthenticated (the provider calls it) -> cap per-IP to blunt abuse.
+    if not rate_limit(f"paycb:{ctx.ip}", 60, 60):
+        raise ApiError(429, "Too many requests")
     provider = PAYMENT_PROVIDERS.get(ctx.params[0])
     if not provider:
         raise ApiError(404, "Unknown payment provider")
@@ -3475,7 +3503,7 @@ def _marker_by_token(token):
         "WHERE k.qr_token=?", (token,), one=True)
 
 
-@route("GET", r"/api/scan/([0-9a-fA-F]+)")
+@route("GET", r"/api/scan/([0-9a-fA-F]{32})")
 def scan_device(ctx):
     """Landing data for a scanned device: identity + recent inspection trail."""
     mk = _marker_by_token(ctx.params[0])
@@ -3491,7 +3519,7 @@ def scan_device(ctx):
     return mk
 
 
-@route("POST", r"/api/scan/([0-9a-fA-F]+)")
+@route("POST", r"/api/scan/([0-9a-fA-F]{32})")
 def scan_inspect(ctx):
     """Tap-to-inspect: record one auto time- & geo-stamped inspection event and
     set the device's current status. The fast path a technician uses on site."""

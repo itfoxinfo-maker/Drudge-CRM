@@ -33,5 +33,23 @@ journalctl -u pestcrm.service -f         # live logs
 
 ## Backups
 
-The CRM database is SQLite at `data/crm.db`. Snapshot it with `backup.py`
-(see the main README) and schedule it from cron.
+The CRM database is SQLite at `data/crm.db`; uploaded files (photos,
+signatures, site maps, logo) live in `uploads/`. `backup.py` snapshots both:
+a consistent online DB copy plus a compressed `uploads-*.tar.gz`, keeping the
+most recent 14 of each in `data/backups`.
+
+Schedule it nightly with the bundled systemd timer (runs at 02:30, and catches
+up on next boot if the machine was off):
+
+```bash
+sudo cp deploy/pestcrm-backup.service deploy/pestcrm-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now pestcrm-backup.timer
+
+systemctl list-timers pestcrm-backup.timer   # confirm next run
+systemctl start pestcrm-backup.service        # run one now / verify
+journalctl -u pestcrm-backup.service          # backup output
+```
+
+Store copies off-box too (e.g. `--dest /mnt/backup` or an `rsync` of
+`data/backups` to another host) so a disk failure can't take the backups with it.
