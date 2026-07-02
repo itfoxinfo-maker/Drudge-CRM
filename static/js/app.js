@@ -1362,9 +1362,10 @@ function printReportDoc(visit, fuGroups) {
     row(t("branch_issue"), rep.branch_issue),
   ].join("");
   const doc = `<!DOCTYPE html><html lang="${LANG}" dir="${dir}"><head><meta charset="utf-8">
-    <title>${esc(t("service_report"))} #${String(visit.id).padStart(5, "0")}</title>
+    <title>${esc(t("service_report"))} #${String(visit.id).padStart(5, "0")}${localized(visit, "client") ? " - " + esc(localized(visit, "client")) : ""}</title>
     <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
     <style>
+      @page{size:A4;margin:14mm}
       *{box-sizing:border-box}
       body{font-family:${ar ? "'Cairo'" : "'Inter'"},system-ui,sans-serif;color:#1c2733;margin:0;padding:40px;font-size:13px}
       .sheet{max-width:760px;margin:auto}
@@ -2096,9 +2097,10 @@ function printInvoice(inv) {
   const payRows = (inv.payments || []).map(p =>
     `<tr><td>${fmtDate(p.paid_at)}</td><td>${esc(p.method)}</td><td class="num">${money(p.amount)}</td></tr>`).join("");
   const doc = `<!DOCTYPE html><html lang="${LANG}" dir="${dir}"><head><meta charset="utf-8">
-    <title>${esc(inv.number)}</title>
+    <title>${esc(docTitle)} ${esc(inv.number)}${clientName ? " - " + esc(clientName) : ""}</title>
     <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
+      @page{size:A4;margin:14mm}
       *{box-sizing:border-box}
       body{font-family:${ar ? "'Cairo'" : "'Inter'"},system-ui,sans-serif;color:#1c2733;margin:0;padding:40px;font-size:13px}
       .inv{max-width:760px;margin:auto}
@@ -2202,9 +2204,10 @@ function printCertificate(visit) {
     .map(k => `<tr><td>${esc(t(k))}</td><td class="num">${esc(rep[k])}</td></tr>`).join("");
   const row = (label, val) => val ? `<tr><td class="lbl">${esc(label)}</td><td>${esc(val)}</td></tr>` : "";
   const doc = `<!DOCTYPE html><html lang="${LANG}" dir="${dir}"><head><meta charset="utf-8">
-    <title>${esc(certNo)}</title>
+    <title>${esc(certNo)}${localized(visit, "client") ? " - " + esc(localized(visit, "client")) : ""}</title>
     <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
     <style>
+      @page{size:A4;margin:14mm}
       *{box-sizing:border-box}
       body{font-family:${ar ? "'Cairo'" : "'Inter'"},system-ui,sans-serif;color:#1c2733;margin:0;padding:40px;font-size:13px}
       .cert{max-width:780px;margin:auto;border:2px solid #1f8a4c;border-radius:10px;padding:30px 34px;position:relative}

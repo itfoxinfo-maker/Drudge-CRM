@@ -64,7 +64,7 @@ const TRANSLATIONS = {
     transactions: "Stock Movements",
     // invoices
     invoices_title: "Invoices & Finance", new_invoice: "New Invoice", invoice_no: "Invoice #",
-    issue_date: "Issue Date", due_date: "Due Date", amount: "Amount", tax: "Tax (VAT)",
+    issue_date: "Issue Date", due_date: "Due Date", valid_until: "Valid Until", amount: "Amount", tax: "Tax (VAT)",
     total: "Total", paid: "Paid", outstanding: "Outstanding", add_payment: "Add Payment",
     payment_method: "Method", payment_amount: "Amount", record_payment: "Record Payment",
     pay_now: "Pay Now", payment_done: "Payment received — thank you!",
@@ -256,7 +256,7 @@ const TRANSLATIONS = {
     nav_certificates: "Certificates", my_certificates: "My Certificates",
     certificates_hint: "Download a service certificate for any completed visit.",
     download_certificate: "Download", report_pending: "Report pending",
-    cert_settings: "Service Certificate", cert_footer_label: "Footer Note",
+    cert_settings: "Service Certificate", cert_footer_label: "Footer Note", cert_license_no: "License / Accreditation No.",
     cert_settings_hint: "Customize the wording printed on every service certificate (and add your license / accreditation number).",
     powered_by: "Powered by FoxSystems",
     // RBAC / permissions
@@ -353,7 +353,7 @@ const TRANSLATIONS = {
     add_stock: "إضافة مخزون (شراء)", stock_change: "الكمية (+ / -)", low_stock_warn: "منخفض",
     transactions: "حركات المخزون",
     invoices_title: "الفواتير والمالية", new_invoice: "فاتورة جديدة", invoice_no: "رقم الفاتورة",
-    issue_date: "تاريخ الإصدار", due_date: "تاريخ الاستحقاق", amount: "المبلغ", tax: "الضريبة",
+    issue_date: "تاريخ الإصدار", due_date: "تاريخ الاستحقاق", valid_until: "صالح حتى", amount: "المبلغ", tax: "الضريبة",
     total: "الإجمالي", paid: "المدفوع", outstanding: "المتبقي", add_payment: "إضافة دفعة",
     payment_method: "طريقة الدفع", payment_amount: "المبلغ", record_payment: "تسجيل الدفعة",
     pay_now: "ادفع الآن", payment_done: "تم استلام الدفعة — شكراً لك!",
@@ -534,7 +534,7 @@ const TRANSLATIONS = {
     nav_certificates: "الشهادات", my_certificates: "شهاداتي",
     certificates_hint: "حمّل شهادة خدمة لأي زيارة منجزة.",
     download_certificate: "تحميل", report_pending: "التقرير قيد الإعداد",
-    cert_settings: "شهادة الخدمة", cert_footer_label: "ملاحظة التذييل",
+    cert_settings: "شهادة الخدمة", cert_footer_label: "ملاحظة التذييل", cert_license_no: "رقم الترخيص / الاعتماد",
     cert_settings_hint: "خصّص النص المطبوع على كل شهادة خدمة (وأضف رقم الترخيص / الاعتماد).",
     powered_by: "مدعوم من FoxSystems",
     // RBAC / permissions

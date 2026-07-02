@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the PestCare CRM backup nightly at 02:30
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+# If the machine was off at 02:30, run the backup as soon as it's back up.
+Persistent=true
+Unit=pestcrm-backup.service
+
+[Install]
+WantedBy=timers.target

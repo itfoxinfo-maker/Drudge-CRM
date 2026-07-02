@@ -1,0 +1,12 @@
+[Unit]
+Description=PestCare CRM nightly backup (database + uploads)
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/pest-crm
+Environment=PESTCRM_DATA_DIR=/root/pest-crm/data
+# Consistent online DB snapshot + a compressed archive of uploads/, keeping the
+# most recent 14 of each in data/backups. Runs safely while the server is up.
+ExecStart=/usr/bin/python3 /root/pest-crm/backup.py --uploads --keep 14

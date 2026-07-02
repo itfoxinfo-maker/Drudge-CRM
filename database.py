@@ -6,6 +6,7 @@ demo data is seeded by seed.py.
 import sqlite3
 import os
 import contextlib
+import threading
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("PESTCRM_DATA_DIR", os.path.join(BASE_DIR, "data"))
@@ -674,7 +675,10 @@ def ensure_material_items(conn):
                 "VALUES(?,?,?,0,0,?)", (en, ar, unit, key))
 
 
-def get_conn():
+_local = threading.local()
+
+
+def _new_conn():
     # timeout lets a writer wait instead of failing instantly on a locked DB.
     conn = sqlite3.connect(DB_PATH, timeout=5.0)
     conn.row_factory = sqlite3.Row
@@ -686,6 +690,30 @@ def get_conn():
     # synchronous=NORMAL is durable under WAL and markedly faster on writes.
     conn.execute("PRAGMA synchronous = NORMAL")
     return conn
+
+
+def get_conn():
+    """One SQLite connection reused per thread. The server is threaded (one
+    thread per keep-alive connection, each serving many queries), so caching the
+    connection avoids reconnecting + re-issuing PRAGMAs on every single query.
+    query()/execute()/transaction() always commit or roll back, so a cached
+    connection is never left mid-transaction between calls. The connection is
+    closed automatically when its thread ends (the threading.local is dropped)."""
+    conn = getattr(_local, "conn", None)
+    if conn is None:
+        conn = _new_conn()
+        _local.conn = conn
+    return conn
+
+
+def close_conn():
+    """Close and drop this thread's cached connection (if any)."""
+    conn = getattr(_local, "conn", None)
+    if conn is not None:
+        try:
+            conn.close()
+        finally:
+            _local.conn = None
 
 
 @contextlib.contextmanager
@@ -705,8 +733,6 @@ def transaction():
     except Exception:
         conn.rollback()
         raise
-    finally:
-        conn.close()
 
 
 def _backfill_marker_events(conn):
@@ -746,7 +772,9 @@ def _backfill_marker_events(conn):
 
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = get_conn()
+    # Use a throwaway connection (not the thread-local cache) so the one-off
+    # setup close doesn't invalidate a cached connection for this thread.
+    conn = _new_conn()
     # WAL persists in the DB file; setting it once here lets every later
     # connection inherit it (concurrent readers alongside a writer).
     conn.execute("PRAGMA journal_mode = WAL")
@@ -759,9 +787,13 @@ def init_db():
 
 def query(sql, params=(), one=False):
     conn = get_conn()
-    cur = conn.execute(sql, params)
-    rows = cur.fetchall()
-    conn.close()
+    try:
+        cur = conn.execute(sql, params)
+        rows = cur.fetchall()
+    except Exception:
+        # Leave the reused connection clean for the next call on this thread.
+        conn.rollback()
+        raise
     if one:
         return dict(rows[0]) if rows else None
     return [dict(r) for r in rows]
@@ -770,11 +802,13 @@ def query(sql, params=(), one=False):
 def execute(sql, params=()):
     """Run an INSERT/UPDATE/DELETE. Returns lastrowid."""
     conn = get_conn()
-    cur = conn.execute(sql, params)
-    conn.commit()
-    last_id = cur.lastrowid
-    conn.close()
-    return last_id
+    try:
+        cur = conn.execute(sql, params)
+        conn.commit()
+        return cur.lastrowid
+    except Exception:
+        conn.rollback()
+        raise
 
 
 if __name__ == "__main__":
