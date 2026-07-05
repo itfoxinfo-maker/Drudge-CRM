@@ -263,6 +263,7 @@ function navItems() {
   } else {
     if (role() === "agent") items.push({ k: "myday", i: "🧭", t: "nav_myday" });
     if (can("clients.view")) items.push({ k: "clients", i: "🏢", t: "nav_clients" });
+    if (can("leads.view")) items.push({ k: "leads", i: "🎯", t: "nav_leads" });
     if (can("clients.view")) items.push({ k: "locations", i: "📍", t: "nav_locations" });
     if (can("visits.view")) items.push({ k: "schedule", i: "🗓️", t: "nav_schedule" });
     if (can("visits.edit")) items.push({ k: "dispatch", i: "🚚", t: "nav_dispatch" });
@@ -304,6 +305,7 @@ async function navigate(view, arg) {
   try {
     if (view === "dashboard") await viewDashboard(v);
     else if (view === "clients") await viewClients(v);
+    else if (view === "leads") await viewLeads(v);
     else if (view === "locations") await viewLocations(v);
     else if (view === "client" || view === "folder") await viewClientFolder(v, arg);
     else if (view === "client-analytics") await viewClientAnalytics(v, arg);
@@ -394,7 +396,7 @@ function statusBadge(s) { return `<span class="badge b-${s}">${t(statusKey(s))}<
 function statusKey(s) {
   const map = { scheduled: "st_scheduled", in_progress: "st_in_progress", completed: "st_completed",
     cancelled: "st_cancelled", draft: "inv_draft", sent: "inv_sent", paid: "inv_paid",
-    overdue: "inv_overdue", accepted: "accepted", active: "active", inactive: "status" };
+    overdue: "inv_overdue", accepted: "accepted", declined: "declined", active: "active", inactive: "status" };
   return map[s] || s;
 }
 
@@ -481,14 +483,102 @@ function cockpitSection(c) {
       <td>${esc(a.name)}</td>
       <td class="num">${a.completed}/${a.total}</td>
       <td><div class="util-bar"><span style="width:${a.rate}%"></span></div></td>
-      <td class="num">${a.rate}%</td></tr>`).join("")
-    : `<tr><td colspan="4" class="empty">${t("none")}</td></tr>`;
+      <td class="num">${a.rate}%</td>
+      <td class="num">${a.rating != null ? `⭐ ${a.rating}` : "—"}</td></tr>`).join("")
+    : `<tr><td colspan="5" class="empty">${t("none")}</td></tr>`;
   return `<div class="cards cockpit-kpis">${cards}</div>
     <div class="panel"><h3>${t("tech_utilization")} <span class="muted">· ${t("this_month")}</span></h3>
       <table class="util-table"><thead><tr>
         <th>${t("nav_agents")}</th><th class="num">${t("col_completed_assigned")}</th>
-        <th>${t("rate")}</th><th class="num">%</th></tr></thead>
+        <th>${t("rate")}</th><th class="num">%</th><th class="num">${t("avg_rating")}</th></tr></thead>
       <tbody>${rows}</tbody></table></div>`;
+}
+
+// ====================================================================
+// Leads (sales pipeline — website booking form + manual entry)
+// ====================================================================
+const LEAD_STATUSES = ["new", "contacted", "quoted", "won", "lost"];
+let leadFilter = "";
+
+async function viewLeads(v) {
+  const d = await API.get("/leads" + (leadFilter ? `?status=${leadFilter}` : ""));
+  const rows = d.items || [];
+  const counts = d.counts || {};
+  const total = LEAD_STATUSES.reduce((s, k) => s + (counts[k] || 0), 0);
+  const chip = (k, label, n) => `<button class="btn ${leadFilter === k ? "" : "secondary"} sm" data-lf="${k}">
+    ${label} <span class="badge b-${k || "draft"}">${n}</span></button>`;
+  v.innerHTML = `<div class="page-head"><h2>🎯 ${t("nav_leads")}</h2>
+      ${can("leads.create") ? `<button class="btn" id="add-lead">+ ${t("new_lead")}</button>` : ""}</div>
+    <div class="toolbar" style="flex-wrap:wrap">${chip("", t("all"), total)}
+      ${LEAD_STATUSES.map(s => chip(s, t("ld_" + s), counts[s] || 0)).join(" ")}</div>
+    <div class="panel"><table><thead><tr>
+      <th>${t("date")}</th><th>${t("name_en")}</th><th>${t("contact_person")}</th>
+      <th>${t("preferred_date")}</th><th>${t("lead_source")}</th><th>${t("status")}</th>
+      <th>${t("actions")}</th></tr></thead>
+      <tbody>${rows.map(l => `<tr>
+        <td>${fmtDate(l.created_at)}</td>
+        <td><strong>${esc(l.name)}</strong>${l.company ? `<div class="muted small">${esc(l.company)}</div>` : ""}
+          ${l.message ? `<div class="muted small">💬 ${esc(l.message.slice(0, 120))}</div>` : ""}</td>
+        <td>${l.phone ? `<a href="tel:${esc(l.phone)}" dir="ltr">${esc(l.phone)}</a>` : ""}
+          ${l.email ? `<div class="muted small">${esc(l.email)}</div>` : ""}
+          ${l.sector ? `<div class="muted small">${esc(l.sector)}</div>` : ""}</td>
+        <td>${l.preferred_date ? fmtDate(l.preferred_date) : "—"}</td>
+        <td><span class="badge b-${l.source === "website" ? "sent" : "draft"}">${t(l.source === "website" ? "lead_web" : "lead_manual")}</span></td>
+        <td>${can("leads.edit") ? `<select class="ld-st" data-id="${l.id}">
+            ${LEAD_STATUSES.map(s => `<option value="${s}" ${s === l.status ? "selected" : ""}>${t("ld_" + s)}</option>`).join("")}</select>`
+          : `<span class="badge b-${l.status}">${t("ld_" + l.status)}</span>`}
+          ${l.client_id ? `<div class="muted small">→ ${esc(localized(l, "client") || "")}</div>` : ""}</td>
+        <td>${can("leads.edit") ? `<button class="link-btn sm" data-ed="${l.id}">✏️</button>` : ""}
+          ${(!l.client_id && can("leads.edit") && can("clients.create")) ? `<button class="link-btn sm" data-cv="${l.id}" title="${t("convert_to_client")}">➡🏢</button>` : ""}
+          ${can("leads.delete") ? `<button class="link-btn danger sm" data-rm="${l.id}">🗑</button>` : ""}</td>
+      </tr>`).join("") || `<tr><td colspan="7" class="empty">${t("leads_empty")}</td></tr>`}</tbody></table></div>`;
+  v.querySelectorAll("[data-lf]").forEach(b => b.addEventListener("click", () => {
+    leadFilter = b.dataset.lf; navigate("leads");
+  }));
+  if ($("add-lead")) $("add-lead").addEventListener("click", () => leadForm());
+  v.querySelectorAll(".ld-st").forEach(s => s.addEventListener("change", async () => {
+    try { await API.put(`/leads/${s.dataset.id}`, { status: s.value }); toast(t("saved")); navigate("leads"); }
+    catch (err) { alert(err.message); }
+  }));
+  v.querySelectorAll("[data-ed]").forEach(b => b.addEventListener("click", () =>
+    leadForm(rows.find(l => l.id == b.dataset.ed))));
+  v.querySelectorAll("[data-cv]").forEach(b => b.addEventListener("click", async () => {
+    if (!confirm(t("convert_lead_confirm"))) return;
+    try { const c = await API.post(`/leads/${b.dataset.cv}/convert`); if (handledOffline(c)) return;
+      toast(t("lead_converted")); navigate("client", { id: c.id }); }
+    catch (err) { alert(err.message); }
+  }));
+  v.querySelectorAll("[data-rm]").forEach(b => b.addEventListener("click", async () => {
+    if (!confirm(t("confirm_delete"))) return;
+    try { const r = await API.del(`/leads/${b.dataset.rm}`); if (handledOffline(r, b.closest("tr"))) return; navigate("leads"); }
+    catch (err) { alert(err.message); }
+  }));
+}
+
+function leadForm(l) {
+  const isEdit = !!l; l = l || {};
+  openModal(isEdit ? t("edit") : t("new_lead"), `<form id="ldf"><div class="form-grid">
+    ${field(t("contact_person"), "name", { value: l.name, required: true })}
+    ${field(t("clients_title"), "company", { value: l.company })}
+    ${field(t("phone"), "phone", { value: l.phone })}
+    ${field(t("email"), "email", { value: l.email })}
+    ${field(t("sector"), "sector", { value: l.sector })}
+    ${field(t("preferred_date"), "preferred_date", { type: "date", value: (l.preferred_date || "").slice(0, 10) })}
+    ${field(t("lead_note"), "note", { value: l.note })}
+    <div class="full"><label>${t("lead_message")}</label><textarea name="message" rows="3">${esc(l.message || "")}</textarea></div>
+    </div><div class="form-actions"><button type="button" class="btn secondary" id="ldf-x">${t("cancel")}</button>
+    <button class="btn" type="submit">${t("save")}</button></div></form>`, (root) => {
+    $("ldf-x").addEventListener("click", closeModal);
+    root.querySelector("#ldf").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const d = formData(root);
+      try {
+        const saved = isEdit ? await API.put(`/leads/${l.id}`, d) : await API.post("/leads", d);
+        if (handledOffline(saved)) return;
+        closeModal(); toast(t("saved")); navigate("leads");
+      } catch (err) { alert(err.message); }
+    });
+  });
 }
 
 // ====================================================================
@@ -570,7 +660,8 @@ async function viewClientFolder(v, arg) {
           <div>${t("address_en")}</div><div>${esc(localized(c, "address")) || "—"}</div>
           <div>${t("notes")}</div><div>${esc(c.notes) || "—"}</div>
         </div></div>
-      ${fin ? `<div class="panel"><h3>${t("finance")}</h3>
+      ${fin ? `<div class="panel"><div class="section-title"><h3>${t("finance")}</h3>
+        <button class="btn secondary sm" id="stmt-btn">📄 ${t("statement")}</button></div>
         <div class="cards" style="grid-template-columns:1fr 1fr;">
           <div class="stat-card"><div class="v" style="font-size:18px">${money(fin.total_invoiced)}</div><div class="l">${t("total_invoiced")}</div></div>
           <div class="stat-card"><div class="v" style="font-size:18px">${money(fin.total_paid)}</div><div class="l">${t("total_paid")}</div></div>
@@ -602,6 +693,7 @@ async function viewClientFolder(v, arg) {
   loadClientMaps(c);
   if ($("add-map")) $("add-map").addEventListener("click", () => uploadMapDialog(c));
   if ($("client-analytics-btn")) $("client-analytics-btn").addEventListener("click", () => navigate("client-analytics", { id: c.id }));
+  if ($("stmt-btn")) $("stmt-btn").addEventListener("click", () => statementDialog(c));
   if ($("edit-client")) $("edit-client").addEventListener("click", () => clientForm(c));
   if ($("add-visit")) $("add-visit").addEventListener("click", () => visitForm({ client_id: c.id }));
   wireVisitRows(v);
@@ -879,7 +971,8 @@ function wireDispatchDnD(date) {
       if (dragId == null) return;
       const id = dragId; dragId = null;
       try {
-        const saved = await API.put(`/visits/${id}`, { agent_id: body.dataset.agent || null });
+        const saved = await postVisitWithConflictCheck({ agent_id: body.dataset.agent || null }, id);
+        if (!saved) return;
         if (handledOffline(saved)) return;
         await renderBoard(date); loadSlaStrip();
       } catch (err) { alert(err.message); }
@@ -1472,10 +1565,29 @@ function visitForm(preset) {
       }
       delete d.duration;
       Object.keys(d).forEach(k => { if (d[k] === "") delete d[k]; });
-      try { const saved = await API.post("/visits", d); if (handledOffline(saved)) return; closeModal(); navigate("visit", { id: saved.id }); }
-      catch (err) { alert(err.message); }
+      try {
+        const saved = await postVisitWithConflictCheck(d);
+        if (!saved) return;                       // user chose not to double-book
+        if (handledOffline(saved)) return;
+        closeModal(); navigate("visit", { id: saved.id });
+      } catch (err) { alert(err.message); }
     });
   });
+}
+
+// The server answers 409 "agent_busy|<client>|<start>" when the agent already
+// has an overlapping visit; ask before scheduling the clash anyway.
+async function postVisitWithConflictCheck(d, visitId) {
+  const send = () => visitId ? API.put(`/visits/${visitId}`, d) : API.post("/visits", d);
+  try {
+    return await send();
+  } catch (err) {
+    const m = /^agent_busy\|(.*)\|(.*)$/.exec(err.message || "");
+    if (!m) throw err;
+    if (!confirm(t("agent_busy_confirm").replace("{client}", m[1]).replace("{time}", m[2]))) return null;
+    d.ignore_conflict = true;
+    return send();
+  }
 }
 
 // ---- visit detail ----
@@ -1521,6 +1633,15 @@ async function viewVisit(v, arg) {
       </div>
     </div>
 
+    ${visit.rating ? `<div class="panel"><h3>${t("visit_rating")}</h3>
+      <div class="rated-stars">${"★".repeat(visit.rating.stars)}${"☆".repeat(5 - visit.rating.stars)}</div>
+      ${visit.rating.comment ? `<div class="muted">${esc(visit.rating.comment)}</div>` : ""}</div>`
+    : (role() === "client" && visit.status === "completed") ? `<div class="panel"><h3>${t("rate_this_visit")}</h3>
+      <div class="stars-input" id="rate-stars">${[1, 2, 3, 4, 5].map(n => `<button type="button" data-star="${n}">☆</button>`).join("")}</div>
+      <textarea id="rate-comment" rows="2" placeholder="${t("rating_comment_ph")}" style="width:100%;margin-top:8px"></textarea>
+      <div class="form-actions" style="justify-content:flex-start"><button class="btn sm" id="rate-send" disabled>${t("submit_rating")}</button></div>
+    </div>` : ""}
+
     ${role() !== "client" ? `<div class="panel"><div class="section-title"><h3>${t("chemicals_used")}</h3>
       ${canEdit ? `<button class="btn sm" id="add-chem">+ ${t("add_chemical")}</button>` : ""}</div>
       <table><thead><tr><th>${t("name_en")}</th><th>${t("quantity")}</th><th>${t("area_treated")}</th><th></th></tr></thead>
@@ -1539,6 +1660,21 @@ async function viewVisit(v, arg) {
       <div id="photos" class="photo-grid"></div></div>`;
 
   $("bc").addEventListener("click", () => navigate(role() === "client" ? "visits" : "schedule"));
+  if ($("rate-stars")) {
+    let picked = 0;
+    const paint = () => $("rate-stars").querySelectorAll("[data-star]").forEach(b =>
+      b.textContent = Number(b.dataset.star) <= picked ? "★" : "☆");
+    $("rate-stars").querySelectorAll("[data-star]").forEach(b => b.addEventListener("click", () => {
+      picked = Number(b.dataset.star); paint(); $("rate-send").disabled = false;
+    }));
+    $("rate-send").addEventListener("click", async () => {
+      try {
+        const r = await API.post(`/visits/${id}/rating`, { stars: picked, comment: $("rate-comment").value });
+        if (handledOffline(r)) return;
+        toast(t("rating_thanks")); navigate("visit", { id });
+      } catch (err) { alert(err.message); }
+    });
+  }
   if ($("print-cert")) $("print-cert").addEventListener("click", async () => {
     if (!visit.report || visit.report.status !== "complete") {
       alert(t("no_report_for_cert")); return;
@@ -1687,7 +1823,9 @@ function usageForm(visitId) {
 async function viewChemicals(v) {
   const chems = await API.get("/chemicals");
   v.innerHTML = `<div class="page-head"><h2>${t("chemicals_title")}</h2>
-    ${can("chemicals.create") ? `<button class="btn" id="add-chem">+ ${t("new_chemical")}</button>` : ""}</div>
+    <div style="display:flex;gap:8px">
+    ${can("chemicals.edit") ? `<button class="btn secondary" id="stock-in">📦 ${t("stock_in")}</button>` : ""}
+    ${can("chemicals.create") ? `<button class="btn" id="add-chem">+ ${t("new_chemical")}</button>` : ""}</div></div>
     <div class="panel"><table><thead><tr>
       <th>${t("name_en")}</th><th>${t("active_ingredient")}</th><th>${t("in_stock")}</th>
       <th>${t("reorder_level")}</th><th>${t("hazard_class")}</th>${can("chemicals.edit") ? `<th>${t("actions")}</th>` : ""}</tr></thead>
@@ -1699,11 +1837,71 @@ async function viewChemicals(v) {
         <td>${c.reorder_level} ${esc(c.unit)}</td><td>${esc(c.hazard_class || "—")}</td>
         ${can("chemicals.edit") ? `<td><button class="link-btn sm" data-stock="${c.id}">${t("adjust_stock")}</button>
           · <button class="link-btn sm" data-edit="${c.id}">${t("edit")}</button></td>` : ""}</tr>`;
-      }).join("") || `<tr><td colspan="6" class="empty">${t("none")}</td></tr>`}</tbody></table></div>`;
+      }).join("") || `<tr><td colspan="6" class="empty">${t("none")}</td></tr>`}</tbody></table></div>
+    <div class="panel"><div class="section-title"><h3>📦 ${t("purchase_history")}</h3></div>
+      <div id="po-box">${t("loading")}</div></div>`;
   if ($("add-chem")) $("add-chem").addEventListener("click", () => chemForm());
+  if ($("stock-in")) $("stock-in").addEventListener("click", () => purchaseOrderForm(chems));
   v.querySelectorAll("[data-edit]").forEach(b => b.addEventListener("click", () =>
     chemForm(chems.find(c => c.id == b.dataset.edit))));
   v.querySelectorAll("[data-stock]").forEach(b => b.addEventListener("click", () => stockForm(b.dataset.stock)));
+  API.get("/purchase-orders").then(pos => {
+    const box = $("po-box");
+    if (!box) return;
+    box.innerHTML = pos.length ? `<table><thead><tr>
+        <th>${t("date")}</th><th>${t("supplier")}</th><th>${t("reference")}</th>
+        <th>${t("line_items")}</th><th class="num">${t("total")}</th><th>${t("recorded_by")}</th></tr></thead>
+      <tbody>${pos.map(po => `<tr>
+        <td>${fmtDate(po.created_at)}</td><td>${esc(po.supplier || "—")}</td><td>${esc(po.reference || "—")}</td>
+        <td>${po.items.map(it => `${esc(localized(it, "name"))} × ${it.quantity} ${esc(it.unit || "")}`).join("<br>")}</td>
+        <td class="num">${money(po.total_cost)}</td><td>${esc(po.created_by_name || "—")}</td></tr>`).join("")}</tbody></table>`
+      : `<div class="empty">${t("none")}</div>`;
+  }).catch(() => { const box = $("po-box"); if (box) box.innerHTML = ""; });
+}
+
+// Stock-in: one purchase order with several chemical lines; posting it
+// increments inventory and writes the 'purchase' transactions atomically.
+function purchaseOrderForm(chems) {
+  const opts = chems.map(c => `<option value="${c.id}">${esc(localized(c, "name"))} (${esc(c.unit)})</option>`).join("");
+  const line = () => `<tr class="po-row">
+    <td><select class="po-chem">${opts}</select></td>
+    <td><input class="po-qty" type="number" step="any" min="0" value="1" style="width:80px"></td>
+    <td><input class="po-cost" type="number" step="any" min="0" value="0" style="width:100px"></td>
+    <td><button type="button" class="link-btn danger sm po-rm">✕</button></td></tr>`;
+  openModal(t("stock_in"), `<form id="pof"><div class="form-grid">
+    ${field(t("supplier"), "supplier")}
+    ${field(t("reference"), "reference")}
+    <div class="full"><label>${t("line_items")}</label>
+      <table class="li-table"><thead><tr><th>${t("name_en")}</th><th>${t("quantity")}</th>
+        <th>${t("unit_cost")}</th><th></th></tr></thead><tbody id="po-body">${line()}</tbody></table>
+      <button type="button" class="btn secondary sm" id="po-add" style="margin-top:8px">${t("add_line")}</button></div>
+    ${field(t("notes"), "note", { cls: "full" })}
+    </div><div class="form-actions"><button type="button" class="btn secondary" id="pof-x">${t("cancel")}</button>
+    <button class="btn" type="submit">${t("save")}</button></div></form>`, (root) => {
+    $("pof-x").addEventListener("click", closeModal);
+    $("po-add").addEventListener("click", () => {
+      const tb = document.createElement("tbody"); tb.innerHTML = line();
+      root.querySelector("#po-body").appendChild(tb.firstElementChild);
+    });
+    root.addEventListener("click", (e) => { if (e.target.classList.contains("po-rm")) e.target.closest("tr").remove(); });
+    root.querySelector("#pof").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const d = formData(root);
+      d.items = [...root.querySelectorAll(".po-row")].map(r => ({
+        chemical_id: r.querySelector(".po-chem").value,
+        quantity: r.querySelector(".po-qty").value,
+        unit_cost: r.querySelector(".po-cost").value,
+      })).filter(it => Number(it.quantity) > 0);
+      if (!d.items.length) { alert(t("po_needs_line")); return; }
+      try {
+        const saved = await API.post("/purchase-orders", d);
+        if (handledOffline(saved)) return;
+        closeModal(); toast(t("stock_received"));
+        cache.chemicals = await API.get("/chemicals");
+        navigate("chemicals");
+      } catch (err) { alert(err.message); }
+    });
+  });
 }
 
 function chemForm(c) {
@@ -1885,12 +2083,14 @@ async function viewInvoices(v) {
   v.innerHTML = `<div class="page-head"><h2>${t("invoices_title")}</h2>
     <div style="display:flex;gap:8px">
       ${can("invoices.view") ? `<button class="btn secondary sm" id="exp-inv">⬇ ${t("export_csv")}</button>` : ""}
+      ${can("invoices.edit") ? `<button class="btn secondary sm" id="pb-manage">📖 ${t("price_book")}</button>` : ""}
       ${can("invoices.create") ? `<button class="btn" id="add-inv">+ ${dt === "quote" ? t("quote") : t("new_invoice")}</button>` : ""}</div></div>
     <div class="toolbar">${tab("invoice", t("nav_invoices"))} ${tab("quote", t("nav_quotes"))}</div>
     <div class="panel" id="inv-list">${t("loading")}</div>`;
   v.querySelectorAll("[data-tab]").forEach(b => b.addEventListener("click", () => { invoiceTab = b.dataset.tab; navigate("invoices"); }));
   if ($("add-inv")) $("add-inv").addEventListener("click", () => invoiceForm({ doc_type: dt }));
   if ($("exp-inv")) $("exp-inv").addEventListener("click", () => downloadCsv("invoices"));
+  if ($("pb-manage")) $("pb-manage").addEventListener("click", () => priceBookManager());
   const render = async (page) => {
     const d = await API.get(`/invoices?doc_type=${dt}&page=${page}&limit=${PAGE_SIZE}`);
     $("inv-list").innerHTML =
@@ -1960,12 +2160,59 @@ function collectLineItems(root) {
   })).filter(it => it.description || it.quantity || it.unit_price);
 }
 
+// ---- price book (service catalog) management ----
+async function priceBookManager() {
+  const items = await API.get("/price-book?all=1");
+  const row = (p) => `<tr class="${p.active ? "" : "muted"}">
+    <td><strong>${esc(localized(p, "name"))}</strong>${p.description ? `<div class="muted small">${esc(p.description)}</div>` : ""}</td>
+    <td class="num">${money(p.unit_price)}</td>
+    <td>${p.active ? `<span class="badge b-active">${t("active")}</span>` : `<span class="badge b-inactive">${t("status")}</span>`}</td>
+    <td><button type="button" class="link-btn sm" data-pbe="${p.id}">✏️</button>
+        <button type="button" class="link-btn sm" data-pbt="${p.id}" data-a="${p.active ? 0 : 1}">${p.active ? "⏸" : "▶️"}</button></td></tr>`;
+  openModal(t("price_book"), `<div>
+    <table><thead><tr><th>${t("description")}</th><th class="num">${t("unit_price")}</th><th>${t("status")}</th><th></th></tr></thead>
+    <tbody>${items.map(row).join("") || `<tr><td colspan="4" class="empty">${t("none")}</td></tr>`}</tbody></table>
+    <div class="form-actions"><button type="button" class="btn secondary" id="pbm-x">${t("cancel")}</button>
+    <button type="button" class="btn" id="pbm-add">+ ${t("new_price_item")}</button></div></div>`, (root) => {
+    $("pbm-x").addEventListener("click", closeModal);
+    $("pbm-add").addEventListener("click", () => priceItemForm());
+    root.querySelectorAll("[data-pbe]").forEach(b => b.addEventListener("click", () =>
+      priceItemForm(items.find(p => p.id == b.dataset.pbe))));
+    root.querySelectorAll("[data-pbt]").forEach(b => b.addEventListener("click", async () => {
+      try { await API.put(`/price-book/${b.dataset.pbt}`, { active: b.dataset.a }); priceBookManager(); }
+      catch (err) { alert(err.message); }
+    }));
+  });
+}
+
+function priceItemForm(p) {
+  const isEdit = !!p; p = p || {};
+  openModal(isEdit ? t("edit") : t("new_price_item"), `<form id="pbf"><div class="form-grid">
+    ${field(t("name_en"), "name_en", { value: p.name_en })}
+    ${field(t("name_ar"), "name_ar", { value: p.name_ar })}
+    ${field(t("description"), "description", { value: p.description, cls: "full" })}
+    ${field(t("unit_price"), "unit_price", { type: "number", value: p.unit_price ?? 0 })}
+    </div><div class="form-actions"><button type="button" class="btn secondary" id="pbf-x">${t("cancel")}</button>
+    <button class="btn" type="submit">${t("save")}</button></div></form>`, (root) => {
+    $("pbf-x").addEventListener("click", closeModal);
+    root.querySelector("#pbf").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      try {
+        const d = formData(root);
+        const saved = isEdit ? await API.put(`/price-book/${p.id}`, d) : await API.post("/price-book", d);
+        if (handledOffline(saved)) return;
+        toast(t("saved")); priceBookManager();
+      } catch (err) { alert(err.message); }
+    });
+  });
+}
+
 function invoiceForm(preset) {
   preset = preset || {};
   const isEdit = !!preset.id;                 // editing an existing document
   const isQuote = preset.doc_type === "quote";
   const clientOpts = cache.clients.map(c => ({ v: c.id, l: localized(c, "name") }));
-  const statuses = (isQuote ? ["draft", "sent", "accepted", "cancelled"] : ["draft", "sent", "paid", "overdue", "cancelled"])
+  const statuses = (isQuote ? ["draft", "sent", "accepted", "declined", "cancelled"] : ["draft", "sent", "paid", "overdue", "cancelled"])
     .map(s => ({ v: s, l: t(statusKey(s)) }));
   const title = isEdit ? `${t("edit")} — ${esc(preset.number)}` : (isQuote ? t("quote") : t("new_invoice"));
   openModal(title, `<form id="if"><div class="form-grid">
@@ -1976,6 +2223,8 @@ function invoiceForm(preset) {
               : field(t("due_date"), "due_date", { type: "date", value: preset.due_date })}
     ${field(t("invoice_status"), "status", { options: statuses, value: preset.status })}
     ${field(t("tax"), "tax", { type: "number", value: preset.tax ?? 0 })}
+    <div class="full" id="pb-picker-box" style="display:none"><label>${t("add_from_pricebook")}</label>
+      <select id="pb-picker"><option value="">—</option></select></div>
     ${lineItemsEditor(preset.items)}
     ${field(t("notes"), "notes", { textarea: true, cls: "full", value: preset.notes })}
     </div><div class="form-actions"><button type="button" class="btn secondary" id="if-x">${t("cancel")}</button>
@@ -1991,6 +2240,28 @@ function invoiceForm(preset) {
       const tx = root.querySelector("[name=tax]"); if (tx) tx.dataset.touched = "1";
     }
     wireLineItems(root, "tax");
+    // Price book: picking an item appends a pre-priced line.
+    API.get("/price-book").then(items => {
+      if (!items || !items.length) return;
+      const sel = root.querySelector("#pb-picker");
+      sel.innerHTML = `<option value="">—</option>` + items.map(p =>
+        `<option value="${p.id}">${esc(localized(p, "name"))} — ${money(p.unit_price)}</option>`).join("");
+      root.querySelector("#pb-picker-box").style.display = "";
+      sel.addEventListener("change", () => {
+        const p = items.find(x => x.id == sel.value);
+        if (!p) return;
+        sel.value = "";
+        const tb = root.querySelector("#li-body");
+        const last = tb.lastElementChild;
+        // reuse the trailing empty row if there is one, else add a new row
+        let row = (last && !last.querySelector(".li-desc").value) ? last : null;
+        if (!row) { root.querySelector("#li-add").click(); row = tb.lastElementChild; }
+        row.querySelector(".li-desc").value = localized(p, "name") + (p.description ? ` — ${p.description}` : "");
+        row.querySelector(".li-qty").value = 1;
+        row.querySelector(".li-price").value = p.unit_price;
+        row.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    }).catch(() => {});
     root.querySelector("#if").addEventListener("submit", async (e) => {
       e.preventDefault();
       const d = formData(root);
@@ -2014,6 +2285,8 @@ async function viewInvoice(v, arg) {
         ${(inv.doc_type === "invoice" && inv.status !== "cancelled" && (inv.total - (inv.paid || 0)) > 0.009 && (role() === "client" || can("payments.create"))) ? `<button class="btn sm" id="pay-online">💳 ${t("pay_now")}</button>` : ""}
         ${can("invoices.edit") ? `<button class="btn secondary sm" id="edit-inv">✏️ ${t("edit")}</button>` : ""}
         ${(inv.doc_type === "quote" && can("invoices.edit") && inv.status !== "accepted") ? `<button class="btn sm" id="convert-inv">➡ ${t("convert_to_invoice")}</button>` : ""}
+        ${(inv.doc_type === "quote" && inv.status === "sent" && role() === "client") ? `<button class="btn sm" id="approve-quote">✅ ${t("approve_quote")}</button>
+          <button class="btn secondary sm" id="decline-quote">✖ ${t("decline_quote")}</button>` : ""}
         <button class="btn sm" id="print-inv">🖨️ ${t("print_pdf")}</button></div></div>
     <div class="grid-2">
       <div class="panel"><h3>${inv.doc_type === "quote" ? t("quote") : t("invoice_no")}</h3><div class="kv">
@@ -2045,6 +2318,17 @@ async function viewInvoice(v, arg) {
   if ($("edit-inv")) $("edit-inv").addEventListener("click", () => invoiceForm(inv));
   if ($("convert-inv")) $("convert-inv").addEventListener("click", async () => {
     try { const ni = await API.post(`/invoices/${inv.id}/convert`); if (handledOffline(ni)) return; toast(t("saved")); invoiceTab = "invoice"; navigate("invoice", { id: ni.id }); }
+    catch (err) { alert(err.message); }
+  });
+  if ($("approve-quote")) $("approve-quote").addEventListener("click", async () => {
+    if (!confirm(t("approve_quote_confirm"))) return;
+    try { const ni = await API.post(`/invoices/${inv.id}/approve`); if (handledOffline(ni)) return; toast(t("quote_approved")); navigate("invoice", { id: ni.id }); }
+    catch (err) { alert(err.message); }
+  });
+  if ($("decline-quote")) $("decline-quote").addEventListener("click", async () => {
+    const reason = prompt(t("decline_reason"));
+    if (reason === null) return;
+    try { const r = await API.post(`/invoices/${inv.id}/decline`, { reason }); if (handledOffline(r)) return; toast(t("quote_declined")); navigate("invoice", { id: inv.id }); }
     catch (err) { alert(err.message); }
   });
   if ($("pay-form")) $("pay-form").addEventListener("submit", async (e) => {
@@ -3461,6 +3745,52 @@ function materialsBlock(materials) {
     `<div class="stat-card ${["c-blue", "c-green", "c-teal", "c-amber", "c-purple"][i % 5]}">
       <div class="sc-ic">📦</div><div><div class="v">${m.total}</div><div class="l">${esc(t(m.key))}</div></div></div>`).join("");
   return `<div class="cards">${cards}</div>`;
+}
+
+// ====================================================================
+// Client statement of account (printable ledger)
+// ====================================================================
+function statementDialog(c) {
+  const today = new Date().toISOString().slice(0, 10);
+  const yearAgo = new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10);
+  openModal(t("statement"), `<form id="stf">
+    ${field(t("from_date"), "from", { type: "date", value: yearAgo })}
+    ${field(t("to_date"), "to", { type: "date", value: today })}
+    <div class="form-actions"><button type="button" class="btn secondary" id="stf-x">${t("cancel")}</button>
+    <button class="btn" type="submit">🖨️ ${t("print")}</button></div></form>`, (root) => {
+    $("stf-x").addEventListener("click", closeModal);
+    root.querySelector("#stf").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const d = formData(root);
+      try {
+        const st = await API.get(`/clients/${c.id}/statement?from=${d.from || ""}&to=${d.to || ""}`);
+        closeModal(); printStatement(st);
+      } catch (err) { alert(err.message); }
+    });
+  });
+}
+
+function printStatement(st) {
+  const name = localized(st.client, "name");
+  const line = (e) => `<tr><td>${fmtDate(e.date)}</td>
+    <td>${e.kind === "invoice" ? t("invoice_word") : t("payment_word")} ${esc(e.ref)}${e.method ? ` <span class="muted">(${esc(e.method)})</span>` : ""}</td>
+    <td class="num">${e.debit ? money(e.debit) : ""}</td>
+    <td class="num">${e.credit ? money(e.credit) : ""}</td>
+    <td class="num"><strong>${money(e.balance)}</strong></td></tr>`;
+  const body = `
+    <div class="panel"><h3>${esc(name)} — ${fmtDate(st.from)} → ${fmtDate(st.to)}</h3>
+    <table><thead><tr><th>${t("date")}</th><th>${t("description")}</th>
+      <th class="num">${t("debit")}</th><th class="num">${t("credit")}</th><th class="num">${t("balance")}</th></tr></thead>
+    <tbody>
+      <tr><td>${fmtDate(st.from)}</td><td><em>${t("opening_balance")}</em></td><td></td><td></td>
+        <td class="num"><strong>${money(st.opening)}</strong></td></tr>
+      ${st.entries.map(line).join("")}
+      <tr><td></td><td><strong>${t("closing_balance")}</strong></td>
+        <td class="num"><strong>${money(st.total_debit)}</strong></td>
+        <td class="num"><strong>${money(st.total_credit)}</strong></td>
+        <td class="num"><strong>${money(st.closing)}</strong></td></tr>
+    </tbody></table></div>`;
+  analyticsReportDoc(t("statement_of_account"), name, body);
 }
 
 // ====================================================================

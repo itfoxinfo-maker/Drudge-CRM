@@ -71,6 +71,7 @@ const I18N = {
     contact_title: "Request your free inspection",
     contact_sub: "Tell us about your site and we'll get back to you within one business day.",
     f_name: "Full name", f_phone: "Phone", f_email: "Email",
+    f_company: "Company (optional)", f_date: "Preferred visit date (optional)",
     f_sector: "Type of site", f_msg: "How can we help?", f_send: "Send Request",
     f_thanks: "Thank you! Your request has been received — our team will contact you shortly.",
     c_whatsapp: "WhatsApp", c_email: "Email", c_address: "Address", c_hours: "Working hours",
@@ -141,6 +142,7 @@ const I18N = {
     contact_title: "اطلب معاينتك المجانية",
     contact_sub: "أخبرنا عن موقعك وسنعاود الاتصال بك خلال يوم عمل واحد.",
     f_name: "الاسم الكامل", f_phone: "الهاتف", f_email: "البريد الإلكتروني",
+    f_company: "اسم الشركة (اختياري)", f_date: "تاريخ الزيارة المفضل (اختياري)",
     f_sector: "نوع الموقع", f_msg: "كيف يمكننا مساعدتك؟", f_send: "إرسال الطلب",
     f_thanks: "شكراً لك! تم استلام طلبك — سيتواصل معك فريقنا قريباً.",
     c_whatsapp: "واتساب", c_email: "البريد", c_address: "العنوان", c_hours: "ساعات العمل",
@@ -192,11 +194,36 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   // contact form (front-end only — shows a confirmation)
+  // Booking requests go straight into the CRM's lead pipeline (:8000).
+  const CRM_URL = window.CRM_URL || `${location.protocol}//${location.hostname}:8000`;
   const form = document.getElementById("contact-form");
-  if (form) form.addEventListener("submit", e => {
+  if (form) form.addEventListener("submit", async e => {
     e.preventDefault();
-    form.reset();
-    document.getElementById("form-thanks").classList.add("show");
+    const thanks = document.getElementById("form-thanks");
+    const errBox = document.getElementById("form-error");
+    errBox.textContent = ""; errBox.classList.remove("show");
+    const data = {};
+    form.querySelectorAll("input[name],textarea[name]").forEach(el => { data[el.name] = el.value.trim(); });
+    const btn = form.querySelector("button[type=submit]");
+    btn.disabled = true;
+    try {
+      const res = await fetch(CRM_URL + "/api/public/lead", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      const out = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(out.error || "Request failed");
+      form.reset();
+      thanks.classList.add("show");
+    } catch (err) {
+      errBox.textContent = err.message === "Failed to fetch"
+        ? "Could not send right now — please call or WhatsApp us."
+        : err.message;
+      errBox.classList.add("show");
+    } finally {
+      btn.disabled = false;
+    }
   });
 
   // reveal on scroll

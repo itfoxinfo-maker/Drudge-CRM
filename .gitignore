@@ -9,7 +9,8 @@ __pycache__/
 venv/
 env/
 
-# App data & secrets (do NOT commit)
+# App data & secrets (do NOT commit) — the whole runtime data dir
+data/
 data/crm.db
 data/crm.db.bak-*
 data/*.sqlite

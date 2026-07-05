@@ -300,6 +300,67 @@ CREATE TABLE IF NOT EXISTS payment_intents (
 );
 CREATE INDEX IF NOT EXISTS idx_payment_intents_invoice ON payment_intents(invoice_id);
 
+-- Price book: reusable service/line-item catalog for quotes & invoices.
+CREATE TABLE IF NOT EXISTS price_book (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name_en     TEXT NOT NULL,
+    name_ar     TEXT,
+    description TEXT,
+    unit_price  REAL NOT NULL DEFAULT 0,
+    active      INTEGER NOT NULL DEFAULT 1,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Post-visit customer satisfaction (one rating per visit).
+CREATE TABLE IF NOT EXISTS visit_ratings (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    visit_id    INTEGER NOT NULL UNIQUE REFERENCES visits(id) ON DELETE CASCADE,
+    client_id   INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    stars       INTEGER NOT NULL CHECK (stars BETWEEN 1 AND 5),
+    comment     TEXT,
+    created_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Sales leads: from the marketing website's booking form or entered manually.
+CREATE TABLE IF NOT EXISTS leads (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    name           TEXT NOT NULL,
+    company        TEXT,
+    phone          TEXT,
+    email          TEXT,
+    sector         TEXT,
+    message        TEXT,
+    preferred_date TEXT,
+    source         TEXT NOT NULL DEFAULT 'manual',
+    status         TEXT NOT NULL DEFAULT 'new'
+                   CHECK (status IN ('new','contacted','quoted','won','lost')),
+    note           TEXT,
+    client_id      INTEGER REFERENCES clients(id) ON DELETE SET NULL,
+    handled_by     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
+
+-- Purchase orders: stock-in with supplier + cost tracking.
+CREATE TABLE IF NOT EXISTS purchase_orders (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    supplier    TEXT,
+    reference   TEXT,
+    note        TEXT,
+    total_cost  REAL NOT NULL DEFAULT 0,
+    created_by  INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS purchase_order_items (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    po_id       INTEGER NOT NULL REFERENCES purchase_orders(id) ON DELETE CASCADE,
+    chemical_id INTEGER NOT NULL REFERENCES chemicals(id) ON DELETE CASCADE,
+    quantity    REAL NOT NULL,
+    unit_cost   REAL NOT NULL DEFAULT 0
+);
+
 -- Key/value settings (company profile, tax rate, SMTP, etc.).
 CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,

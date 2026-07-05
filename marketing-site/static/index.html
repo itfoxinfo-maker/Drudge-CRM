@@ -171,14 +171,21 @@
       </div>
       <form id="contact-form" class="card form reveal">
         <div class="f-row">
-          <input type="text" required data-i18n-ph="f_name" placeholder="Full name" />
-          <input type="tel" required data-i18n-ph="f_phone" placeholder="Phone" />
+          <input type="text" name="name" required data-i18n-ph="f_name" placeholder="Full name" />
+          <input type="tel" name="phone" required data-i18n-ph="f_phone" placeholder="Phone" />
         </div>
-        <input type="email" data-i18n-ph="f_email" placeholder="Email" />
-        <input type="text" data-i18n-ph="f_sector" placeholder="Type of site" />
-        <textarea rows="4" data-i18n-ph="f_msg" placeholder="How can we help?"></textarea>
+        <input type="email" name="email" data-i18n-ph="f_email" placeholder="Email" />
+        <input type="text" name="company" data-i18n-ph="f_company" placeholder="Company (optional)" />
+        <input type="text" name="sector" data-i18n-ph="f_sector" placeholder="Type of site" />
+        <label class="f-date-lbl" data-i18n="f_date">Preferred visit date (optional)</label>
+        <input type="date" name="preferred_date" />
+        <textarea rows="4" name="message" data-i18n-ph="f_msg" placeholder="How can we help?"></textarea>
+        <!-- honeypot: humans never see or fill this -->
+        <input type="text" name="website" tabindex="-1" autocomplete="off"
+               style="position:absolute;left:-9999px;height:0;opacity:0" aria-hidden="true" />
         <button type="submit" class="btn btn-accent" data-i18n="f_send">Send Request</button>
         <p id="form-thanks" class="thanks" data-i18n="f_thanks"></p>
+        <p id="form-error" class="thanks" style="color:#dc2626"></p>
       </form>
     </div>
   </section>

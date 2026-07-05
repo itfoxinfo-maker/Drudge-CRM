@@ -795,6 +795,236 @@ def main():
         st, _ = call("POST", "/payments/callback/manual", None, {"token": "deadbeef00"})
         check("callback for unknown reference -> 404", st == 404)
 
+        print("CLIENT QUOTE APPROVAL (portal accept/decline)")
+        st, q1 = call("POST", "/invoices", admin, {
+            "client_id": bill_cid, "doc_type": "quote", "issue_date": today, "status": "sent",
+            "items": [{"description": "Annual plan", "quantity": 1, "unit_price": 400}]})
+        check("sent quote created", st == 200 and q1["total"] == 400)
+        _, cn = call("GET", "/notifications", client)
+        check("client notified when quote is sent",
+              any(n["type"] == "quote_new" for n in cn["items"]))
+        st, _ = call("POST", f"/invoices/{q1['id']}/approve", agent)
+        check("agent without invoices.edit cannot approve (403)", st == 403)
+        st, ninv = call("POST", f"/invoices/{q1['id']}/approve", client)
+        check("client approves own sent quote -> payable invoice",
+              st == 200 and ninv["doc_type"] == "invoice" and ninv["status"] == "sent"
+              and ninv["total"] == 400 and ninv["due_date"])
+        _, q1b = call("GET", f"/invoices/{q1['id']}", client)
+        check("approved quote marked accepted", q1b["status"] == "accepted")
+        st, _ = call("POST", f"/invoices/{q1['id']}/approve", client)
+        check("re-approving an accepted quote -> 400", st == 400)
+        _, an = call("GET", "/notifications", admin)
+        check("staff notified of the approval",
+              any(n["type"] == "quote_approved" for n in an["items"]))
+        st, q2 = call("POST", "/invoices", admin, {
+            "client_id": bill_cid, "doc_type": "quote", "issue_date": today, "status": "sent",
+            "items": [{"description": "One-off", "quantity": 1, "unit_price": 150}]})
+        st, q2d = call("POST", f"/invoices/{q2['id']}/decline", client, {"reason": "too pricey"})
+        check("client declines quote with reason",
+              st == 200 and q2d["status"] == "declined" and "too pricey" in (q2d["notes"] or ""))
+        _, an = call("GET", "/notifications", admin)
+        check("staff notified of the decline",
+              any(n["type"] == "quote_declined" for n in an["items"]))
+        st, q3 = call("POST", "/invoices", admin, {
+            "client_id": bill_cid, "doc_type": "quote", "issue_date": today, "amount": 50})
+        st, _ = call("POST", f"/invoices/{q3['id']}/approve", client)
+        check("draft (not sent) quote cannot be approved (400)", st == 400)
+
+        print("HEALTH ENDPOINT + MONITOR")
+        st, h = call("GET", "/health")
+        check("/api/health answers unauthenticated", st == 200 and h["ok"] is True and h["db"] == "ok")
+        menv = dict(os.environ, PESTCRM_DATA_DIR=tmp, PESTCRM_URL=f"http://localhost:{PORT}")
+        mon = subprocess.run([sys.executable, os.path.join(HERE, "monitor.py"), "--no-restart"],
+                             env=menv, capture_output=True, text=True, timeout=60)
+        check("monitor.py runs clean against a live server", mon.returncode == 0)
+        check("monitor sees healthy http+db+disk",
+              "http: ok" in mon.stdout and "integrity: ok" in mon.stdout and "disk: ok" in mon.stdout)
+        # temp data dir has no backups -> the stale-backup alert must fire
+        check("monitor flags missing backups", "ALERT [backup]" in mon.stdout)
+        _, an = call("GET", "/notifications", admin)
+        check("stale-backup alert lands as admin notification",
+              any(n["type"] == "monitor_backup" for n in an["items"]))
+        mon2 = subprocess.run([sys.executable, os.path.join(HERE, "monitor.py"), "--no-restart"],
+                              env=menv, capture_output=True, text=True, timeout=60)
+        _, an2 = call("GET", "/notifications", admin)
+        check("monitor alerts dedup (once per day)",
+              sum(1 for n in an2["items"] if n["type"] == "monitor_backup")
+              == sum(1 for n in an["items"] if n["type"] == "monitor_backup"))
+
+        print("INVOICE HARDENING (drafts, delete, convert, overpay)")
+        _, dft = call("POST", "/invoices", admin, {"client_id": bill_cid, "issue_date": today,
+                                                   "amount": 999, "status": "draft"})
+        _, clist = call("GET", "/invoices?doc_type=all", client)
+        rows = clist["items"] if isinstance(clist, dict) else clist
+        check("client list hides draft documents", all(r["id"] != dft["id"] for r in rows))
+        st, _ = call("GET", f"/invoices/{dft['id']}", client)
+        check("client cannot open a draft invoice (403)", st == 403)
+        st, _ = call("GET", f"/invoices/{dft['id']}", admin)
+        check("staff still see drafts", st == 200)
+        st, _ = call("DELETE", f"/invoices/{pinv['id']}", admin)
+        check("invoice with payments cannot be deleted (400)", st == 400)
+        st, _ = call("DELETE", f"/invoices/{dft['id']}", admin)
+        check("unpaid invoice still deletable", st == 200)
+        st, _ = call("POST", f"/invoices/{q1['id']}/convert", admin)
+        check("accepted quote cannot be converted again (400)", st == 400)
+        _, ovi = call("POST", "/invoices", admin, {"client_id": bill_cid, "issue_date": today,
+                                                   "amount": 100, "status": "sent"})
+        st, _ = call("POST", f"/invoices/{ovi['id']}/payments", admin, {"amount": 150})
+        check("overpayment rejected (400)", st == 400)
+        st, _ = call("POST", f"/invoices/{ovi['id']}/payments", admin, {"amount": 100})
+        check("exact payment accepted", st == 200)
+
+        print("LEADS (public website form + pipeline)")
+        st, r = call("POST", "/public/lead", None, {"name": "Ahmed Web", "phone": "0100000001",
+                                                    "company": "Cairo Bakery", "sector": "bakery",
+                                                    "message": "Need monthly service",
+                                                    "preferred_date": "2027-02-01"})
+        check("public lead accepted (unauthenticated)", st == 200 and r["ok"] is True)
+        st, r = call("POST", "/public/lead", None, {"name": "Bot", "phone": "1", "website": "spam.com"})
+        check("honeypot swallows bots (fake ok)", st == 200 and r["ok"] is True)
+        st, _ = call("POST", "/public/lead", None, {"name": "No Contact"})
+        check("lead without phone/email rejected (400)", st == 400)
+        _, ld = call("GET", "/leads", admin)
+        check("admin sees the lead with counts", any(l["name"] == "Ahmed Web" for l in ld["items"])
+              and ld["counts"].get("new", 0) >= 1)
+        check("honeypot lead was NOT stored", all(l["name"] != "Bot" for l in ld["items"]))
+        st, _ = call("GET", "/leads", agent)
+        check("agent has no leads access (403)", st == 403)
+        st, _ = call("GET", "/leads", client)
+        check("client has no leads access (403)", st == 403)
+        lead = next(l for l in ld["items"] if l["name"] == "Ahmed Web")
+        check("website lead carries source + date",
+              lead["source"] == "website" and lead["preferred_date"] == "2027-02-01")
+        _, an = call("GET", "/notifications", admin)
+        check("staff notified of new website lead", any(n["type"] == "lead_new" for n in an["items"]))
+        st, up = call("PUT", f"/leads/{lead['id']}", admin, {"status": "contacted"})
+        check("lead status update", st == 200 and up["status"] == "contacted")
+        st, _ = call("PUT", f"/leads/{lead['id']}", admin, {"status": "bogus"})
+        check("invalid lead status rejected (400)", st == 400)
+        st, newc = call("POST", f"/leads/{lead['id']}/convert", admin)
+        check("lead converts to client", st == 200 and newc["name_en"] == "Cairo Bakery")
+        _, ld2 = call("GET", "/leads?status=won", admin)
+        check("converted lead marked won + linked",
+              any(l["id"] == lead["id"] and l["client_id"] == newc["id"] for l in ld2["items"]))
+        st, _ = call("POST", f"/leads/{lead['id']}/convert", admin)
+        check("double-convert rejected (400)", st == 400)
+        # CORS preflight for the website's cross-origin fetch
+        req = urllib.request.Request(BASE + "/public/lead", method="OPTIONS")
+        with urllib.request.urlopen(req) as resp:
+            check("CORS preflight answers 204 + allow-origin",
+                  resp.status == 204 and resp.headers.get("Access-Control-Allow-Origin") == "*")
+
+        print("PRICE BOOK")
+        st, pb1 = call("POST", "/price-book", admin, {"name_en": "General Pest Control",
+                                                      "name_ar": "مكافحة عامة", "unit_price": 750})
+        check("price item created", st == 200 and pb1["unit_price"] == 750)
+        st, _ = call("POST", "/price-book", agent, {"name_en": "Nope", "unit_price": 1})
+        check("agent cannot create price items (403)", st == 403)
+        st, _ = call("GET", "/price-book", client)
+        check("client cannot read the price book (403)", st == 403)
+        _, pbl = call("GET", "/price-book", admin)
+        check("price book lists active items", any(p["id"] == pb1["id"] for p in pbl))
+        st, pb1b = call("PUT", f"/price-book/{pb1['id']}", admin, {"active": 0, "unit_price": 800})
+        check("price item update + deactivate", st == 200 and pb1b["active"] == 0 and pb1b["unit_price"] == 800)
+        _, pbl = call("GET", "/price-book", admin)
+        check("inactive item hidden from picker list", all(p["id"] != pb1["id"] for p in pbl))
+        _, pbl = call("GET", "/price-book?all=1", admin)
+        check("manage list still shows inactive", any(p["id"] == pb1["id"] for p in pbl))
+
+        print("CLIENT STATEMENT OF ACCOUNT")
+        _, stm = call("GET", f"/clients/{bill_cid}/statement", admin)
+        check("statement has invoice + payment entries",
+              any(e["kind"] == "invoice" for e in stm["entries"])
+              and any(e["kind"] == "payment" for e in stm["entries"]))
+        check("statement closing = debits - credits",
+              abs(stm["closing"] - (stm["opening"] + stm["total_debit"] - stm["total_credit"])) < 0.01)
+        bal_ok = True
+        run = stm["opening"]
+        for e in stm["entries"]:
+            run = round(run + e["debit"] - e["credit"], 2)
+            if abs(run - e["balance"]) > 0.01:
+                bal_ok = False
+        check("running balance is consistent", bal_ok)
+        st, _ = call("GET", f"/clients/{bill_cid}/statement", client)
+        check("client can pull own statement", st == 200)
+        st, _ = call("GET", "/clients/999/statement", client)
+        check("client cannot pull another statement", st in (403, 404))
+
+        print("AGENT DOUBLE-BOOKING GUARD")
+        _, cfc = call("POST", "/clients", admin, {"name_en": "Conflict Test Co"})
+        _, v1 = call("POST", "/visits", admin, {"client_id": cfc["id"], "agent_id": 3,
+                                                "scheduled_start": "2027-03-01 09:00",
+                                                "scheduled_end": "2027-03-01 10:00"})
+        st, _ = call("POST", "/visits", admin, {"client_id": cfc["id"], "agent_id": 3,
+                                                "scheduled_start": "2027-03-01 09:30"})
+        check("overlapping visit for same agent -> 409", st == 409)
+        st, v2 = call("POST", "/visits", admin, {"client_id": cfc["id"], "agent_id": 3,
+                                                 "scheduled_start": "2027-03-01 09:30",
+                                                 "ignore_conflict": True})
+        check("override with ignore_conflict works", st == 200)
+        st, v3 = call("POST", "/visits", admin, {"client_id": cfc["id"], "agent_id": 3,
+                                                 "scheduled_start": "2027-03-01 14:00"})
+        check("non-overlapping slot is fine", st == 200)
+        st, _ = call("PUT", f"/visits/{v3['id']}", admin, {"scheduled_start": "2027-03-01 09:15"})
+        check("moving a visit into a clash -> 409", st == 409)
+        st, _ = call("PUT", f"/visits/{v3['id']}", admin, {"notes": "just a note"})
+        check("non-schedule edits skip the conflict check", st == 200)
+
+        print("VISIT RATINGS")
+        call("PUT", f"/visits/{v1['id']}", admin, {"status": "completed"})
+        call("PUT", f"/visits/{v2['id']}", admin, {"status": "completed"})
+        st, _ = call("POST", f"/visits/{v1['id']}/rating", client, {"stars": 5})
+        check("another company's client cannot rate (403)", st == 403)
+        st, _ = call("POST", f"/visits/{v1['id']}/rating", admin, {"stars": 5})
+        check("staff cannot rate (403)", st == 403)
+        # portal user for the conflict-test client
+        call("POST", "/users", admin, {"full_name": "CT Portal", "email": "ct@test.com",
+                                       "password": "ctpass123", "role": "client",
+                                       "client_id": cfc["id"]})
+        ctok = login("ct@test.com", "ctpass123")
+        st, _ = call("POST", f"/visits/{v1['id']}/rating", ctok, {"stars": 9})
+        check("stars out of range rejected (400)", st == 400)
+        st, rt = call("POST", f"/visits/{v1['id']}/rating", ctok, {"stars": 4, "comment": "Great job"})
+        check("client rates completed visit", st == 200 and rt["stars"] == 4)
+        st, _ = call("POST", f"/visits/{v1['id']}/rating", ctok, {"stars": 1})
+        check("visit cannot be rated twice (400)", st == 400)
+        st, _ = call("POST", f"/visits/{v3['id']}/rating", ctok, {"stars": 3})
+        check("scheduled (not completed) visit cannot be rated (400)", st == 400)
+        _, vd = call("GET", f"/visits/{v1['id']}", admin)
+        check("visit detail carries the rating", vd["rating"] and vd["rating"]["stars"] == 4)
+        _, an = call("GET", "/notifications", admin)
+        check("staff notified of the rating", any(n["type"] == "visit_rated" for n in an["items"]))
+        _, dash = call("GET", "/dashboard", admin)
+        check("cockpit shows avg technician rating",
+              any(u.get("rating") == 4.0 for u in dash["cockpit"]["utilization"]))
+
+        print("PURCHASE ORDERS / STOCK-IN")
+        _, chems = call("GET", "/chemicals", admin)
+        c0 = chems[0]
+        before = c0["quantity_in_stock"]
+        st, po = call("POST", "/purchase-orders", admin, {
+            "supplier": "AgroChem Ltd", "reference": "SUP-778",
+            "items": [{"chemical_id": c0["id"], "quantity": 10, "unit_cost": 25}]})
+        check("purchase order created with total", st == 200 and po["total_cost"] == 250)
+        _, chems2 = call("GET", "/chemicals", admin)
+        c0b = next(c for c in chems2 if c["id"] == c0["id"])
+        check("stock incremented by the purchase", c0b["quantity_in_stock"] == before + 10)
+        _, txs = call("GET", f"/chemicals/{c0['id']}/transactions", admin)
+        check("purchase logged in inventory transactions",
+              any(tx["reason"] == "purchase" and tx["reference"] == f"PO-{po['id']}" for tx in txs))
+        st, _ = call("POST", "/purchase-orders", admin, {"items": [{"chemical_id": c0["id"], "quantity": 0}]})
+        check("zero quantity rejected (400)", st == 400)
+        st, _ = call("POST", "/purchase-orders", admin, {"items": [{"chemical_id": 99999, "quantity": 5}]})
+        check("unknown chemical rejected (404)", st == 404)
+        st, _ = call("POST", "/purchase-orders", admin, {"items": []})
+        check("empty purchase rejected (400)", st == 400)
+        st, _ = call("POST", "/purchase-orders", agent, {
+            "items": [{"chemical_id": c0["id"], "quantity": 1}]})
+        check("agent cannot stock in (403)", st == 403)
+        _, pol = call("GET", "/purchase-orders", admin)
+        check("purchase history lists items",
+              any(p["id"] == po["id"] and p["items"] and p["supplier"] == "AgroChem Ltd" for p in pol))
+
     finally:
         proc.terminate()
         try: proc.wait(timeout=5)

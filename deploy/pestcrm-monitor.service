@@ -1,0 +1,11 @@
+[Unit]
+Description=PestCare CRM health monitor (HTTP, disk, DB integrity, backups)
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/pest-crm
+Environment=PESTCRM_DATA_DIR=/root/pest-crm/data
+Environment=PESTCRM_URL=http://127.0.0.1:8000
+ExecStart=/usr/bin/python3 /root/pest-crm/monitor.py

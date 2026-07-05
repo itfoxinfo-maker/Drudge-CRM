@@ -110,6 +110,36 @@ const TRANSLATIONS = {
     quote: "Quote", invoice_word: "Invoice", convert_to_invoice: "Convert to Invoice",
     line_items: "Line Items", add_line: "+ Add Line", qty: "Qty", unit_price: "Unit Price",
     line_total: "Total", accepted: "Accepted", document_type: "Type",
+    declined: "Declined", approve_quote: "Approve Quote", decline_quote: "Decline",
+    approve_quote_confirm: "Approve this quotation? An invoice will be created for it.",
+    decline_reason: "Reason for declining (optional):",
+    quote_approved: "Quote approved — invoice created",
+    quote_declined: "Quote declined",
+    // leads
+    nav_leads: "Leads", new_lead: "New Lead", leads_empty: "No leads yet — website requests land here automatically",
+    ld_new: "New", ld_contacted: "Contacted", ld_quoted: "Quoted", ld_won: "Won", ld_lost: "Lost",
+    lead_source: "Source", lead_web: "Website", lead_manual: "Manual", sector: "Type of site",
+    convert_to_client: "Convert to client", lead_converted: "Lead converted to client",
+    convert_lead_confirm: "Create a client record from this lead?",
+    lead_message: "Customer message", lead_note: "Internal note",
+    // statement of account
+    statement: "Statement", statement_of_account: "Statement of Account",
+    opening_balance: "Opening balance", closing_balance: "Closing balance / Totals",
+    debit: "Debit", credit: "Credit", balance: "Balance", payment_word: "Payment",
+    // price book
+    price_book: "Price Book", add_from_pricebook: "Add from price book",
+    new_price_item: "New service / item",
+    // ratings
+    visit_rating: "Customer rating", rate_this_visit: "Rate this visit",
+    rating_comment_ph: "Any comments about the service? (optional)",
+    submit_rating: "Submit rating", rating_thanks: "Thank you for your feedback!",
+    avg_rating: "Rating",
+    // dispatch conflict
+    agent_busy_confirm: "⚠ This technician already has a visit at {client} around {time}. Schedule anyway?",
+    // purchases / stock-in
+    stock_in: "Stock In", supplier: "Supplier", reference: "Reference", unit_cost: "Unit Cost",
+    purchase_history: "Purchase History", recorded_by: "Recorded by",
+    po_needs_line: "Add at least one item line", stock_received: "Stock received ✓",
     // analytics
     analytics_title: "Analytics", monthly_revenue: "Monthly Invoiced vs Paid", ar_aging: "Receivables Aging",
     agent_productivity: "Agent Productivity", chemical_usage: "Chemical Usage", service_mix: "Service Mix",
@@ -392,6 +422,37 @@ const TRANSLATIONS = {
     quote: "عرض سعر", invoice_word: "فاتورة", convert_to_invoice: "تحويل إلى فاتورة",
     line_items: "البنود", add_line: "+ إضافة بند", qty: "الكمية", unit_price: "سعر الوحدة",
     line_total: "الإجمالي", accepted: "مقبول", document_type: "النوع",
+    declined: "مرفوض", approve_quote: "اعتماد عرض السعر", decline_quote: "رفض",
+    approve_quote_confirm: "هل توافق على عرض السعر هذا؟ سيتم إنشاء فاتورة له.",
+    decline_reason: "سبب الرفض (اختياري):",
+    quote_approved: "تم اعتماد عرض السعر — تم إنشاء الفاتورة",
+    quote_declined: "تم رفض عرض السعر",
+    // leads
+    nav_leads: "العملاء المحتملون", new_lead: "عميل محتمل جديد",
+    leads_empty: "لا يوجد عملاء محتملون بعد — طلبات الموقع الإلكتروني تصل هنا تلقائيًا",
+    ld_new: "جديد", ld_contacted: "تم التواصل", ld_quoted: "أُرسل عرض", ld_won: "تم الكسب", ld_lost: "خسر",
+    lead_source: "المصدر", lead_web: "الموقع الإلكتروني", lead_manual: "يدوي", sector: "نوع الموقع",
+    convert_to_client: "تحويل إلى عميل", lead_converted: "تم تحويل العميل المحتمل إلى عميل",
+    convert_lead_confirm: "إنشاء سجل عميل من هذا العميل المحتمل؟",
+    lead_message: "رسالة العميل", lead_note: "ملاحظة داخلية",
+    // statement of account
+    statement: "كشف حساب", statement_of_account: "كشف حساب",
+    opening_balance: "الرصيد الافتتاحي", closing_balance: "الرصيد الختامي / الإجماليات",
+    debit: "مدين", credit: "دائن", balance: "الرصيد", payment_word: "دفعة",
+    // price book
+    price_book: "قائمة الأسعار", add_from_pricebook: "إضافة من قائمة الأسعار",
+    new_price_item: "خدمة / بند جديد",
+    // ratings
+    visit_rating: "تقييم العميل", rate_this_visit: "قيّم هذه الزيارة",
+    rating_comment_ph: "أي ملاحظات على الخدمة؟ (اختياري)",
+    submit_rating: "إرسال التقييم", rating_thanks: "شكرًا لملاحظاتك!",
+    avg_rating: "التقييم",
+    // dispatch conflict
+    agent_busy_confirm: "⚠ هذا الفني لديه زيارة بالفعل لدى {client} حوالي {time}. الجدولة على أي حال؟",
+    // purchases / stock-in
+    stock_in: "إدخال مخزون", supplier: "المورّد", reference: "المرجع", unit_cost: "تكلفة الوحدة",
+    purchase_history: "سجل المشتريات", recorded_by: "سجّله",
+    po_needs_line: "أضف بندًا واحدًا على الأقل", stock_received: "تم استلام المخزون ✓",
     analytics_title: "التحليلات", monthly_revenue: "الفواتير مقابل المدفوعات الشهرية", ar_aging: "أعمار الذمم المدينة",
     agent_productivity: "إنتاجية الفنيين", chemical_usage: "استهلاك المبيدات", service_mix: "توزيع الخدمات",
     total_revenue: "إجمالي الإيرادات (المدفوعة)", active_contracts: "العقود النشطة", visits_completed: "الزيارات المنجزة",

@@ -178,7 +178,10 @@ tr.clickable:hover { background: var(--green-l); }
 .b-scheduled, .b-sent, .b-draft { background: var(--blue-l); color: var(--blue); }
 .b-in_progress { background: var(--amber-l); color: var(--amber); }
 .b-completed, .b-paid, .b-active, .b-accepted { background: var(--ok-l); color: var(--ok-d); }
-.b-cancelled, .b-overdue, .b-inactive { background: var(--red-l); color: var(--red); }
+.b-cancelled, .b-overdue, .b-inactive, .b-declined, .b-lost { background: var(--red-l); color: var(--red); }
+.b-new { background: var(--blue-l); color: var(--blue); }
+.b-contacted, .b-quoted { background: var(--amber-l); color: var(--amber); }
+.b-won { background: var(--ok-l); color: var(--ok-d); }
 .sev-low { color: var(--ok-d); } .sev-medium { color: var(--amber); }
 .sev-high, .sev-critical { color: var(--red); font-weight: 700; }
 .lowstock { color: var(--red); font-weight: 700; }
@@ -564,3 +567,7 @@ tr.cov-pending td { background: #fff7ed; }
 .util-bar { height: 8px; border-radius: 6px; background: #e6edf3; overflow: hidden; min-width: 80px; }
 .util-bar span { display: block; height: 100%; border-radius: 6px;
   background: linear-gradient(90deg, var(--cyan), var(--green)); }
+
+/* ---- post-visit rating stars ---- */
+.stars-input button { background: none; border: none; font-size: 30px; cursor: pointer; color: #f59e0b; padding: 2px 4px; }
+.rated-stars { font-size: 24px; color: #f59e0b; letter-spacing: 3px; }

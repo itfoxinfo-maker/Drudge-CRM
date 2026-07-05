@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the PestCare CRM health monitor every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Unit=pestcrm-monitor.service
+
+[Install]
+WantedBy=timers.target
