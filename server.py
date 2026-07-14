@@ -443,6 +443,10 @@ def dashboard(ctx):
             "SELECT COUNT(*) c FROM visits WHERE status IN('scheduled','in_progress')", one=True)["c"],
         "low_stock": db.query(
             "SELECT COUNT(*) c FROM chemicals WHERE quantity_in_stock <= reorder_level", one=True)["c"],
+        # products already expired or expiring within 60 days
+        "expiring": db.query(
+            "SELECT COUNT(*) c FROM chemicals WHERE COALESCE(expiry_date,'')<>'' "
+            "AND date(expiry_date) <= date('now','+60 days')", one=True)["c"],
         "outstanding": db.query(
             "SELECT COALESCE(SUM(total),0)-COALESCE((SELECT SUM(amount) FROM payments),0) v "
             "FROM invoices WHERE status IN('sent','overdue','paid')", one=True)["v"],
@@ -982,7 +986,13 @@ def list_visits(ctx):
            "LEFT JOIN users u ON u.id=v.agent_id")
     if where:
         sql += " WHERE " + " AND ".join(where)
-    return _paginate(ctx, sql, params, "ORDER BY v.scheduled_start DESC")
+    res = _paginate(ctx, sql, params, "ORDER BY v.scheduled_start DESC")
+    # GPS check-in data is staff-only.
+    if u["role"] == "client":
+        for r in (res["items"] if isinstance(res, dict) else res):
+            for k in CHECKIN_COLS:
+                r.pop(k, None)
+    return res
 
 
 @route("GET", r"/api/visits/(\d+)")
@@ -991,7 +1001,8 @@ def get_visit(ctx):
     v = db.query(
         "SELECT v.*, c.name_en client_en, c.name_ar client_ar, c.id client_id, "
         "s.name_en service_en, s.name_ar service_ar, u.full_name agent_name, "
-        "st.name site_name, st.map_image site_map_image "
+        "st.name site_name, st.map_image site_map_image, "
+        "st.lat site_lat, st.lng site_lng "
         "FROM visits v JOIN clients c ON c.id=v.client_id "
         "LEFT JOIN service_types s ON s.id=v.service_type_id "
         "LEFT JOIN users u ON u.id=v.agent_id "
@@ -1004,11 +1015,14 @@ def get_visit(ctx):
     # Clients only ever see a finished report — a draft is still being worked on.
     if ctx.user["role"] == "client" and v["report"] and v["report"]["status"] != "complete":
         v["report"] = None
-    # The transportation invoice is internal: never sent to client accounts.
+    # Transportation invoice and GPS check-in data are internal: never sent
+    # to client accounts.
     if ctx.user["role"] == "client":
         if v["report"]:
             for k in ("transport_vehicle", "transport_cost"):
                 v["report"].pop(k, None)
+        for k in CHECKIN_COLS:
+            v.pop(k, None)
     else:
         v["transport"] = db.query(
             "SELECT * FROM transport_entries WHERE visit_id=? ORDER BY id", (vid,))
@@ -1141,6 +1155,95 @@ def delete_visit(ctx):
     require_perm(ctx.user, "visits.delete")
     db.execute("DELETE FROM visits WHERE id=?", (int(ctx.params[0]),))
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------
+# VISIT GPS CHECK-IN / CHECK-OUT (proof of presence; staff-only data)
+# --------------------------------------------------------------------------
+# Fields never sent to client accounts.
+CHECKIN_COLS = ("checkin_at", "checkin_lat", "checkin_lng", "checkin_acc",
+                "checkout_at", "checkout_lat", "checkout_lng", "checkout_acc")
+
+
+def _gps_from_body(b):
+    """Validated (lat, lng, accuracy) from a check-in body; None when absent or
+    out of range — a check-in without GPS is allowed (indoors/denied), the
+    timestamp still counts."""
+    def f(key, lo, hi):
+        v = b.get(key)
+        if v is None or str(v).strip() == "":
+            return None
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return None
+        return x if math.isfinite(x) and lo <= x <= hi else None
+    lat, lng = f("lat", -90, 90), f("lng", -180, 180)
+    if lat is None or lng is None:      # a lone coordinate is meaningless
+        return None, None, None
+    return lat, lng, f("accuracy", 0, 10_000_000)
+
+
+def _client_stamp_or_none(b):
+    """The client-supplied 'at' timestamp (offline check-ins replay later, so
+    the tap time matters) — accepted only if it parses and is within 3 days of
+    now; otherwise None (caller falls back to the server clock)."""
+    at = str(b.get("at") or "").strip()
+    if not at:
+        return None
+    row = db.query("SELECT CASE WHEN abs(julianday(?) - julianday('now')) <= 3 "
+                   "THEN datetime(?) END ts", (at, at), one=True)
+    return row["ts"] if row else None
+
+
+def _checkin_visit_or_403(ctx):
+    vid = int(ctx.params[0])
+    v = db.query("SELECT * FROM visits WHERE id=?", (vid,), one=True)
+    if not v:
+        raise ApiError(404, "Visit not found")
+    u = ctx.user
+    require_perm(u, "visits.edit")
+    if u["role"] == "client":
+        raise ApiError(403, "Not available to client accounts")
+    if u["role"] == "agent" and v["agent_id"] != u["id"]:
+        raise ApiError(403, "Not your visit")
+    return vid, v
+
+
+@route("POST", r"/api/visits/(\d+)/checkin")
+def visit_checkin(ctx):
+    vid, v = _checkin_visit_or_403(ctx)
+    if v["checkin_at"]:
+        raise ApiError(400, "Already checked in")
+    if v["status"] in ("completed", "cancelled"):
+        raise ApiError(400, "Visit is closed")
+    lat, lng, acc = _gps_from_body(ctx.body)
+    ts = _client_stamp_or_none(ctx.body)
+    # Checking in also starts the visit.
+    db.execute("UPDATE visits SET checkin_at=COALESCE(?, datetime('now')), "
+               "checkin_lat=?, checkin_lng=?, checkin_acc=?, "
+               "status=CASE WHEN status='scheduled' THEN 'in_progress' ELSE status END "
+               "WHERE id=?", (ts, lat, lng, acc, vid))
+    audit(ctx, "visit.checkin", "visit", vid,
+          f"{lat:.5f},{lng:.5f}" if lat is not None else "no GPS")
+    return db.query("SELECT * FROM visits WHERE id=?", (vid,), one=True)
+
+
+@route("POST", r"/api/visits/(\d+)/checkout")
+def visit_checkout(ctx):
+    vid, v = _checkin_visit_or_403(ctx)
+    if not v["checkin_at"]:
+        raise ApiError(400, "Check in first")
+    if v["checkout_at"]:
+        raise ApiError(400, "Already checked out")
+    lat, lng, acc = _gps_from_body(ctx.body)
+    ts = _client_stamp_or_none(ctx.body)
+    db.execute("UPDATE visits SET checkout_at=COALESCE(?, datetime('now')), "
+               "checkout_lat=?, checkout_lng=?, checkout_acc=? WHERE id=?",
+               (ts, lat, lng, acc, vid))
+    audit(ctx, "visit.checkout", "visit", vid,
+          f"{lat:.5f},{lng:.5f}" if lat is not None else "no GPS")
+    return db.query("SELECT * FROM visits WHERE id=?", (vid,), one=True)
 
 
 # --------------------------------------------------------------------------
@@ -1520,10 +1623,10 @@ def create_chemical(ctx):
         raise ApiError(400, "Name is required")
     cid = db.execute(
         "INSERT INTO chemicals(name_en,name_ar,active_ingredient,unit,quantity_in_stock,"
-        "reorder_level,hazard_class,reg_no,cost_per_unit) VALUES(?,?,?,?,?,?,?,?,?)",
+        "reorder_level,hazard_class,reg_no,cost_per_unit,expiry_date) VALUES(?,?,?,?,?,?,?,?,?,?)",
         (b["name_en"], b.get("name_ar"), b.get("active_ingredient"), b.get("unit", "L"),
          b.get("quantity_in_stock", 0), b.get("reorder_level", 0), b.get("hazard_class"),
-         b.get("reg_no"), b.get("cost_per_unit", 0)))
+         b.get("reg_no"), b.get("cost_per_unit", 0), b.get("expiry_date") or None))
     return db.query("SELECT * FROM chemicals WHERE id=?", (cid,), one=True)
 
 
@@ -1533,7 +1636,7 @@ def update_chemical(ctx):
     cid = int(ctx.params[0])
     b = ctx.body
     cols = ("name_en", "name_ar", "active_ingredient", "unit", "reorder_level",
-            "hazard_class", "reg_no", "cost_per_unit")
+            "hazard_class", "reg_no", "cost_per_unit", "expiry_date")
     fields = [f"{c}=?" for c in cols if c in b]
     vals = [b[c] for c in cols if c in b]
     if not fields:

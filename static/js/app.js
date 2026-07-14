@@ -440,6 +440,7 @@ async function viewDashboard(v) {
       card(d.visits_today, t("dash_visits_today"), "📅", "c-green") +
       card(d.scheduled, t("dash_scheduled"), "🗓️", "c-purple") +
       card(d.low_stock, t("dash_low_stock"), "🧪", d.low_stock > 0 ? "warn" : "c-green") +
+      card(d.expiring || 0, t("dash_expiring"), "⌛", d.expiring > 0 ? "warn" : "c-green") +
       card(money(d.outstanding), t("dash_outstanding"), "💰", "danger");
     if (d.my_visits !== undefined) cards += card(d.my_visits, t("dash_my_visits"), "📋", "c-blue");
   }
@@ -1124,6 +1125,26 @@ function haversineKm(a, b) {
 }
 function routeKmJs(pts) { let s = 0; for (let i = 0; i < pts.length - 1; i++) s += haversineKm(pts[i], pts[i + 1]); return s; }
 
+// Capture the device GPS position (10s timeout). Resolves null when denied or
+// unavailable so a check-in still goes through with just the timestamp.
+function getGPS() {
+  return new Promise((res) => {
+    if (!navigator.geolocation) return res(null);
+    navigator.geolocation.getCurrentPosition(
+      (p) => res({ lat: p.coords.latitude, lng: p.coords.longitude, accuracy: p.coords.accuracy }),
+      () => res(null),
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 });
+  });
+}
+// Check the agent in/out of a visit (kind: "checkin" | "checkout"), stamping
+// GPS + the tap time ("at" survives offline queueing so a replayed check-in
+// keeps the real moment, not the sync moment).
+async function doCheckin(visitId, kind) {
+  const gps = await getGPS();
+  if (!gps) toast(t("checkin_no_gps"));
+  return API.post(`/visits/${visitId}/${kind}`, { ...(gps || {}), at: new Date().toISOString() });
+}
+
 async function viewMyDay(v, arg) {
   const date = (arg && arg.date) || ymd(new Date());
   const res = await API.get(`/visits?from=${date}&to=${date}`);
@@ -1160,7 +1181,9 @@ function renderMyDayList(items) {
   const rows = items.map((vi, i) => {
     const c = coordsOf(vi);
     const dir = c ? `<a class="btn secondary sm" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=${c[0]},${c[1]}">🧭 ${t("navigate")}</a>` : "";
-    const start = vi.status === "scheduled" ? `<button class="btn sm" data-start="${vi.id}">▶️ ${t("start_visit")}</button>` : "";
+    // Starting a visit = GPS check-in (stamps time + location, sets in_progress).
+    const start = (vi.status === "scheduled" || (vi.status === "in_progress" && !vi.checkin_at))
+      ? `<button class="btn sm" data-start="${vi.id}">📍 ${t("check_in")}</button>` : "";
     return `<div class="md-stop b-${vi.status}">
       <div class="md-seq">${i + 1}</div>
       <div class="md-main">
@@ -1172,8 +1195,9 @@ function renderMyDayList(items) {
   body.innerHTML = `${km ? `<p class="muted small">${t("route_distance")}: <strong>${km} km</strong> · ${items.length} ${t("stops")}</p>` : ""}${rows}`;
   body.querySelectorAll("[data-open]").forEach(b => b.addEventListener("click", () => navigate("visit", { id: b.dataset.open })));
   body.querySelectorAll("[data-start]").forEach(b => b.addEventListener("click", async () => {
-    try { const s = await API.put(`/visits/${b.dataset.start}`, { status: "in_progress" }); if (handledOffline(s)) return; navigate("visit", { id: b.dataset.start }); }
-    catch (e) { alert(e.message); }
+    b.disabled = true;
+    try { const s = await doCheckin(b.dataset.start, "checkin"); if (handledOffline(s)) return; navigate("visit", { id: b.dataset.start }); }
+    catch (e) { alert(e.message); b.disabled = false; }
   }));
 }
 
@@ -1630,6 +1654,21 @@ async function viewVisit(v, arg) {
   const visit = await API.get("/visits/" + id + langParam);
   const canEdit = can("visits.edit");
   const rep = visit.report || {};
+  // GPS check-in/out (staff-only; clients never receive these fields).
+  const gpsLink = (lat, lng) => (lat != null && lng != null)
+    ? `<a target="_blank" rel="noopener" href="https://www.google.com/maps?q=${lat},${lng}">🗺️ ${Number(lat).toFixed(5)}, ${Number(lng).toFixed(5)}</a>`
+    : `<span class="muted small">${t("checkin_no_gps_short")}</span>`;
+  const siteDist = (lat, lng) => (lat != null && visit.site_lat != null)
+    ? ` <span class="muted small">(≈${Math.round(haversineKm([lat, lng], [visit.site_lat, visit.site_lng]) * 1000)} ${t("m_from_site")})</span>` : "";
+  const checkinHtml = role() === "client" ? "" : `
+        <div>📍 ${t("check_in")}</div><div>${visit.checkin_at
+          ? `${fmtDateTime(visit.checkin_at)} · ${gpsLink(visit.checkin_lat, visit.checkin_lng)}${siteDist(visit.checkin_lat, visit.checkin_lng)}`
+          : (canEdit && ["scheduled", "in_progress"].includes(visit.status)
+            ? `<button class="btn sm" id="v-checkin">📍 ${t("check_in")}</button>` : "—")}</div>
+        ${visit.checkin_at ? `<div>🏁 ${t("check_out")}</div><div>${visit.checkout_at
+          ? `${fmtDateTime(visit.checkout_at)} · ${gpsLink(visit.checkout_lat, visit.checkout_lng)}${siteDist(visit.checkout_lat, visit.checkout_lng)}`
+          : (canEdit && visit.status !== "cancelled"
+            ? `<button class="btn sm secondary" id="v-checkout">🏁 ${t("check_out")}</button>` : "—")}</div>` : ""}`;
   v.innerHTML = `
     <div class="breadcrumb" id="bc">← ${t("nav_schedule")}</div>
     <div class="page-head"><h2>${t("visit_detail")} — ${esc(localized(visit, "client"))}</h2>
@@ -1648,6 +1687,7 @@ async function viewVisit(v, arg) {
           ? `<select id="v-visitnum"><option value="">—</option>${Array.from({ length: 12 }, (_, i) => i + 1).map(n =>
               `<option value="${n}" ${Number(visit.visit_number) === n ? "selected" : ""}>${n}</option>`).join("")}</select>`
           : (visit.visit_number || "—")}</div>
+        ${checkinHtml}
       </div>
       ${canEdit && role() !== "agent" ? `<div class="form-actions" style="justify-content:flex-start;flex-wrap:wrap">
         <select id="v-site" style="min-width:140px"><option value="">${t("none")}</option></select>
@@ -1773,6 +1813,20 @@ async function viewVisit(v, arg) {
   v.querySelectorAll("[data-rmuse]").forEach(b => b.addEventListener("click", async () => {
     const r = await API.del("/usage/" + b.dataset.rmuse); if (handledOffline(r, b.closest("tr"))) return; navigate("visit", { id });
   }));
+  // GPS check-in / check-out buttons.
+  const wireCheck = (btnId, kind) => {
+    if (!$(btnId)) return;
+    $(btnId).addEventListener("click", async () => {
+      $(btnId).disabled = true;
+      try {
+        const r = await doCheckin(id, kind);
+        if (handledOffline(r)) return;
+        toast(t("saved")); navigate("visit", { id });
+      } catch (err) { alert(err.message); $(btnId).disabled = false; }
+    });
+  };
+  wireCheck("v-checkin", "checkin");
+  wireCheck("v-checkout", "checkout");
   // Transportation trips: add / remove (internal-only; own API, not report autosave).
   if ($("trip-add")) $("trip-add").addEventListener("click", async () => {
     const vehicle = $("trip-vehicle").value, cost = $("trip-cost").value;
@@ -1974,16 +2028,17 @@ async function viewChemicals(v) {
     ${can("chemicals.create") ? `<button class="btn" id="add-chem">+ ${t("new_chemical")}</button>` : ""}</div></div>
     <div class="panel"><table><thead><tr>
       <th>${t("name_en")}</th><th>${t("active_ingredient")}</th><th>${t("in_stock")}</th>
-      <th>${t("reorder_level")}</th><th>${t("hazard_class")}</th>${can("chemicals.edit") ? `<th>${t("actions")}</th>` : ""}</tr></thead>
+      <th>${t("reorder_level")}</th><th>${t("hazard_class")}</th><th>${t("expiry_date")}</th>${can("chemicals.edit") ? `<th>${t("actions")}</th>` : ""}</tr></thead>
       <tbody>${chems.map(c => {
         const low = c.quantity_in_stock <= c.reorder_level;
         return `<tr><td><strong>${esc(localized(c, "name"))}</strong><div class="muted small">${esc(c.reg_no || "")}</div></td>
         <td>${esc(c.active_ingredient || "—")}</td>
         <td class="${low ? "lowstock" : ""}">${c.quantity_in_stock} ${esc(c.unit)} ${low ? `· ${t("low_stock_warn")}` : ""}</td>
         <td>${c.reorder_level} ${esc(c.unit)}</td><td>${esc(c.hazard_class || "—")}</td>
+        <td>${expiryCell(c.expiry_date)}</td>
         ${can("chemicals.edit") ? `<td><button class="link-btn sm" data-stock="${c.id}">${t("adjust_stock")}</button>
           · <button class="link-btn sm" data-edit="${c.id}">${t("edit")}</button></td>` : ""}</tr>`;
-      }).join("") || `<tr><td colspan="6" class="empty">${t("none")}</td></tr>`}</tbody></table></div>
+      }).join("") || `<tr><td colspan="7" class="empty">${t("none")}</td></tr>`}</tbody></table></div>
     <div class="panel"><div class="section-title"><h3>📦 ${t("purchase_history")}</h3></div>
       <div id="po-box">${t("loading")}</div></div>`;
   if ($("add-chem")) $("add-chem").addEventListener("click", () => chemForm());
@@ -2050,6 +2105,15 @@ function purchaseOrderForm(chems) {
   });
 }
 
+// Expiry cell: red badge when past, amber when within 60 days, else the date.
+function expiryCell(d) {
+  if (!d) return "—";
+  const days = Math.floor((new Date(d) - new Date()) / 86400000);
+  if (days < 0) return `<span class="badge b-cancelled">${t("expired")}</span> <span class="muted small">${fmtDate(d)}</span>`;
+  if (days <= 60) return `<span class="badge b-draft">${t("expires_soon")}</span> <span class="muted small">${fmtDate(d)}</span>`;
+  return fmtDate(d);
+}
+
 function chemForm(c) {
   const isEdit = !!c; c = c || {};
   const units = ["L", "ml", "kg", "g", "unit"].map(u => ({ v: u, l: u }));
@@ -2063,6 +2127,7 @@ function chemForm(c) {
     ${field(t("hazard_class"), "hazard_class", { value: c.hazard_class })}
     ${field(t("reg_no"), "reg_no", { value: c.reg_no })}
     ${field(t("cost_per_unit"), "cost_per_unit", { type: "number", value: c.cost_per_unit || 0 })}
+    ${field(t("expiry_date"), "expiry_date", { type: "date", value: (c.expiry_date || "").slice(0, 10) })}
     </div><div class="form-actions"><button type="button" class="btn secondary" id="chf-x">${t("cancel")}</button>
     <button class="btn" type="submit">${t("save")}</button></div></form>`, (root) => {
     $("chf-x").addEventListener("click", closeModal);

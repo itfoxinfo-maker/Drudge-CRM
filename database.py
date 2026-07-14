@@ -88,6 +88,17 @@ CREATE TABLE IF NOT EXISTS visits (
     location        TEXT,
     notes           TEXT,
     visit_number    INTEGER,   -- the visit's number within the year/month (1–12)
+    -- GPS proof-of-presence: the agent taps Check in / Check out on site and
+    -- the app stamps time + device location (nullable — GPS can be denied or
+    -- unavailable indoors; the timestamp is still recorded). Staff-only data.
+    checkin_at      TEXT,
+    checkin_lat     REAL,
+    checkin_lng     REAL,
+    checkin_acc     REAL,   -- reported GPS accuracy, metres
+    checkout_at     TEXT,
+    checkout_lat    REAL,
+    checkout_lng    REAL,
+    checkout_acc    REAL,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     completed_at    TEXT
 );
@@ -152,6 +163,7 @@ CREATE TABLE IF NOT EXISTS chemicals (
     hazard_class      TEXT,
     reg_no            TEXT,
     cost_per_unit     REAL NOT NULL DEFAULT 0,
+    expiry_date       TEXT,   -- product expiry; dashboard warns when near/past
     created_at        TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -589,6 +601,14 @@ def _migrate(conn):
                    ("transport_cost", "REAL NOT NULL DEFAULT 0")):
         if c not in cols("reports"):
             conn.execute(f"ALTER TABLE reports ADD COLUMN {c} {ddl}")
+    # GPS check-in/out on visits (proof of presence)
+    for c in ("checkin_at TEXT", "checkin_lat REAL", "checkin_lng REAL", "checkin_acc REAL",
+              "checkout_at TEXT", "checkout_lat REAL", "checkout_lng REAL", "checkout_acc REAL"):
+        if c.split()[0] not in cols("visits"):
+            conn.execute(f"ALTER TABLE visits ADD COLUMN {c}")
+    # chemical product expiry dates
+    if "expiry_date" not in cols("chemicals"):
+        conn.execute("ALTER TABLE chemicals ADD COLUMN expiry_date TEXT")
     # multi-trip transportation: move any legacy single vehicle/cost pair off
     # the report into transport_entries, then clear it (so this copies once).
     conn.execute(

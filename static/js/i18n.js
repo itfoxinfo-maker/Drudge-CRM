@@ -331,6 +331,13 @@ const TRANSLATIONS = {
     transport_by_agent: "Totals by agent",
     veh_company_car: "Company car", veh_own_car: "Own car", veh_motorcycle: "Motorcycle",
     veh_taxi: "Taxi / ride-hailing", veh_bus: "Bus", veh_truck: "Truck", veh_other: "Other",
+    // GPS check-in / check-out
+    check_in: "Check in", check_out: "Check out",
+    checkin_no_gps: "No GPS signal — recorded without location",
+    checkin_no_gps_short: "no GPS", m_from_site: "m from site",
+    // chemical expiry
+    expiry_date: "Expiry date", expired: "Expired", expires_soon: "Expires soon",
+    dash_expiring: "Expiring Chemicals",
     // engineer material issues
     nav_issues: "Engineer Issue", new_issue: "New issue", issue_detail: "Issue detail",
     materials: "Materials", material: "Material", add_material: "Add material",
@@ -654,6 +661,13 @@ const TRANSLATIONS = {
     transport_by_agent: "الإجمالي حسب الفني",
     veh_company_car: "سيارة الشركة", veh_own_car: "سيارة خاصة", veh_motorcycle: "دراجة نارية",
     veh_taxi: "تاكسي / أوبر", veh_bus: "حافلة", veh_truck: "شاحنة", veh_other: "أخرى",
+    // GPS check-in / check-out
+    check_in: "تسجيل الوصول", check_out: "تسجيل الانصراف",
+    checkin_no_gps: "لا توجد إشارة GPS — سُجل بدون موقع",
+    checkin_no_gps_short: "بدون GPS", m_from_site: "متر من الموقع",
+    // chemical expiry
+    expiry_date: "تاريخ الانتهاء", expired: "منتهي الصلاحية", expires_soon: "ينتهي قريباً",
+    dash_expiring: "مبيدات قاربت على الانتهاء",
     // engineer material issues
     nav_issues: "صرف للمهندس", new_issue: "صرف جديد", issue_detail: "تفاصيل الصرف",
     materials: "المواد", material: "المادة", add_material: "إضافة مادة",
