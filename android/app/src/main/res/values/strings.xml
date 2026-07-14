@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">PestCare Agent</string>
+    <string name="app_name">Fox CRM</string>
     <string name="server_url">Server URL</string>
     <string name="save">Save</string>
     <string name="cancel">Cancel</string>
