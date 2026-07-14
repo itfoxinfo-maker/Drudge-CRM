@@ -118,6 +118,10 @@ CREATE TABLE IF NOT EXISTS reports (
     glo_pieces           REAL NOT NULL DEFAULT 0,
     flybase_bags         REAL NOT NULL DEFAULT 0,
     branch_issue         TEXT,
+    -- Transportation invoice (internal): how the agent travelled to the visit
+    -- and what it cost. Never shown to clients or on the printed report.
+    transport_vehicle    TEXT,
+    transport_cost       REAL NOT NULL DEFAULT 0,
     -- 'draft' while the agent is still filling it in (auto-saved); 'complete'
     -- once the core fields + both signatures are captured.
     status          TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','complete')),
@@ -567,6 +571,11 @@ def _migrate(conn):
                    ("glo_pieces", "REAL NOT NULL DEFAULT 0"),
                    ("flybase_bags", "REAL NOT NULL DEFAULT 0"),
                    ("branch_issue", "TEXT")):
+        if c not in cols("reports"):
+            conn.execute(f"ALTER TABLE reports ADD COLUMN {c} {ddl}")
+    # transportation invoice (internal-only travel log per visit)
+    for c, ddl in (("transport_vehicle", "TEXT"),
+                   ("transport_cost", "REAL NOT NULL DEFAULT 0")):
         if c not in cols("reports"):
             conn.execute(f"ALTER TABLE reports ADD COLUMN {c} {ddl}")
     # report draft/complete workflow: agents auto-save drafts; a report is only

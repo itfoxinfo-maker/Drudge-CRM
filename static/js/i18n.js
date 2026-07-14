@@ -304,6 +304,7 @@ const TRANSLATIONS = {
     mod_calendar: "Calendar", mod_chemicals: "Chemicals & Inventory", mod_invoices: "Invoices",
     mod_issues: "Engineer Issues",
     mod_payments: "Payments", mod_contracts: "Contracts", mod_analytics: "Analytics",
+    mod_transport: "Transportation",
     mod_certificates: "Certificates", mod_maps: "Site Maps & Devices", mod_users: "Users & Agents",
     mod_settings: "Settings", mod_permissions: "Permissions (RBAC)",
     // pagination
@@ -317,6 +318,17 @@ const TRANSLATIONS = {
     upload: "Upload", comment: "Comment", business_plan: "Business plan",
     attach_hint: "Images, PDF or Excel — up to 25 MB. You can select several.",
     attach_after_save: "Save the report first, then you can attach files.",
+    // transportation invoice (internal travel-cost log)
+    nav_transport: "Transportation", transport_title: "Transportation",
+    transport_invoice: "Transportation invoice", transport_vehicle: "Vehicle",
+    transport_cost: "Transport cost",
+    transport_internal_note: "Internal only — never shown to the client or on the printed report.",
+    transport_internal_short: "internal — not printed",
+    transport_total: "Total cost", transport_trips: "Trips",
+    transport_by_branch: "Totals by branch", transport_by_client: "Totals by client",
+    transport_by_agent: "Totals by agent",
+    veh_company_car: "Company car", veh_own_car: "Own car", veh_motorcycle: "Motorcycle",
+    veh_taxi: "Taxi / ride-hailing", veh_bus: "Bus", veh_truck: "Truck", veh_other: "Other",
     // engineer material issues
     nav_issues: "Engineer Issue", new_issue: "New issue", issue_detail: "Issue detail",
     materials: "Materials", material: "Material", add_material: "Add material",
@@ -613,6 +625,7 @@ const TRANSLATIONS = {
     mod_calendar: "التقويم", mod_chemicals: "المبيدات والمخزون", mod_invoices: "الفواتير",
     mod_issues: "صرف المواد للمهندسين",
     mod_payments: "المدفوعات", mod_contracts: "العقود", mod_analytics: "التحليلات",
+    mod_transport: "المواصلات",
     mod_certificates: "الشهادات", mod_maps: "خرائط المواقع والأجهزة", mod_users: "المستخدمون والفنيون",
     mod_settings: "الإعدادات", mod_permissions: "الصلاحيات (RBAC)",
     // pagination
@@ -626,6 +639,17 @@ const TRANSLATIONS = {
     upload: "رفع", comment: "تعليق", business_plan: "خطة العمل",
     attach_hint: "صور أو PDF أو Excel — حتى 25 ميجابايت. يمكن اختيار عدة ملفات.",
     attach_after_save: "احفظ التقرير أولاً لتتمكن من إرفاق الملفات.",
+    // transportation invoice (internal travel-cost log)
+    nav_transport: "المواصلات", transport_title: "المواصلات",
+    transport_invoice: "فاتورة المواصلات", transport_vehicle: "وسيلة النقل",
+    transport_cost: "تكلفة المواصلات",
+    transport_internal_note: "للاستخدام الداخلي فقط — لا تظهر للعميل ولا في نسخة التقرير المطبوعة.",
+    transport_internal_short: "داخلي — لا يُطبع",
+    transport_total: "إجمالي التكلفة", transport_trips: "الرحلات",
+    transport_by_branch: "الإجمالي حسب الفرع", transport_by_client: "الإجمالي حسب العميل",
+    transport_by_agent: "الإجمالي حسب الفني",
+    veh_company_car: "سيارة الشركة", veh_own_car: "سيارة خاصة", veh_motorcycle: "دراجة نارية",
+    veh_taxi: "تاكسي / أوبر", veh_bus: "حافلة", veh_truck: "شاحنة", veh_other: "أخرى",
     // engineer material issues
     nav_issues: "صرف للمهندس", new_issue: "صرف جديد", issue_detail: "تفاصيل الصرف",
     materials: "المواد", material: "المادة", add_material: "إضافة مادة",

@@ -156,6 +156,7 @@ PERMISSION_CATALOG = [
     {"module": "payments",     "actions": ["view", "create", "delete"]},
     {"module": "contracts",    "actions": ["view", "create", "edit", "delete"]},
     {"module": "analytics",    "actions": ["view"]},
+    {"module": "transport",    "actions": ["view"]},
     {"module": "certificates", "actions": ["view"]},
     {"module": "maps",         "actions": ["view", "create", "edit", "delete"]},
     {"module": "users",        "actions": ["view", "create", "edit", "delete"]},
@@ -195,12 +196,13 @@ ROLE_DEFAULTS = {
         "dashboard": True, "clients": True, "leads": True, "visits": True, "calendar": True,
         "chemicals": True, "issues": True, "invoices": True, "payments": True,
         "contracts": True, "analytics": True, "certificates": True, "maps": True,
-        "users": True, "settings": True, "permissions": False,
+        "transport": True, "users": True, "settings": True, "permissions": False,
     }),
     "agent": _expand({
         "dashboard": ["view"], "clients": ["view"], "visits": ["view", "edit"],
         "calendar": ["view"], "chemicals": ["view"], "certificates": ["view"],
         "issues": ["view", "create"], "maps": ["view", "create", "edit"],
+        "transport": ["view"],
     }),
     "client": _expand({
         "dashboard": ["view"], "visits": ["view"], "invoices": ["view"],
@@ -1002,6 +1004,10 @@ def get_visit(ctx):
     # Clients only ever see a finished report — a draft is still being worked on.
     if ctx.user["role"] == "client" and v["report"] and v["report"]["status"] != "complete":
         v["report"] = None
+    # The transportation invoice is internal: never sent to client accounts.
+    if ctx.user["role"] == "client" and v["report"]:
+        for k in ("transport_vehicle", "transport_cost"):
+            v["report"].pop(k, None)
     v["rating"] = db.query("SELECT stars, comment, created_at FROM visit_ratings "
                            "WHERE visit_id=?", (vid,), one=True)
     v["chemicals"] = db.query(
@@ -1149,10 +1155,13 @@ def upsert_report(ctx):
     b = ctx.body
     existing = db.query("SELECT * FROM reports WHERE visit_id=?", (vid,), one=True)
     text_cols = ("summary", "pests_found", "findings", "recommendations", "severity",
-                 "next_visit_due", "spare_parts_changed", "branch_issue")
-    # Engineer service log — quantities of parts/materials used during the visit.
+                 "next_visit_due", "spare_parts_changed", "branch_issue",
+                 "transport_vehicle")
+    # Engineer service log — quantities of parts/materials used during the visit,
+    # plus the internal transportation cost (never shown to clients).
     num_cols = ("lamps_used", "cables_used", "transformers_used", "light_sheets_used",
-                "fipronil_ml", "imidacloprid_gm", "baits_count", "glo_pieces", "flybase_bags")
+                "fipronil_ml", "imidacloprid_gm", "baits_count", "glo_pieces", "flybase_bags",
+                "transport_cost")
 
     def num(v):
         try:
@@ -1363,6 +1372,69 @@ def list_reports(ctx):
             if r.get("summary"):
                 r["summary"] = _translate(r["summary"], lang)
     return res
+
+
+# --------------------------------------------------------------------------
+# TRANSPORTATION — internal travel-cost log recorded on visit reports.
+# Never exposed to client accounts (no transport.view perm, plus a hard block).
+# Agents are scoped to their own trips; managers/admins see everyone and get
+# cost totals grouped by branch, client and agent.
+# --------------------------------------------------------------------------
+@route("GET", r"/api/transport")
+def list_transport(ctx):
+    u = ctx.user
+    require_perm(u, "transport.view")
+    if u["role"] == "client":
+        raise ApiError(403, "Not available to client accounts")
+    # Only reports where the agent actually filled the transportation section.
+    where = ["(COALESCE(r.transport_cost,0) > 0 OR COALESCE(r.transport_vehicle,'') <> '')"]
+    params = []
+    if u["role"] == "agent":
+        where.append("v.agent_id=?"); params.append(u["id"])
+    for key, col in (("client", "v.client_id"), ("agent", "v.agent_id")):
+        if ctx.query.get(key):
+            where.append(f"{col}=?"); params.append(ctx.query[key])
+    site = ctx.query.get("site")
+    if site:
+        if str(site) in ("none", "0"):
+            where.append("v.site_id IS NULL")
+        else:
+            where.append("v.site_id=?"); params.append(site)
+    if ctx.query.get("from"):
+        where.append("date(v.scheduled_start) >= date(?)"); params.append(ctx.query["from"])
+    if ctx.query.get("to"):
+        where.append("date(v.scheduled_start) <= date(?)"); params.append(ctx.query["to"])
+    base = ("FROM reports r JOIN visits v ON v.id=r.visit_id "
+            "JOIN clients c ON c.id=v.client_id "
+            "LEFT JOIN sites st ON st.id=v.site_id "
+            "LEFT JOIN users u2 ON u2.id=v.agent_id "
+            "WHERE " + " AND ".join(where))
+    res = _paginate(
+        ctx,
+        "SELECT r.visit_id, r.transport_vehicle, r.transport_cost, "
+        "v.scheduled_start, v.agent_id, v.client_id, v.site_id, "
+        "c.name_en client_en, c.name_ar client_ar, st.name site_name, "
+        "u2.full_name agent_name " + base,
+        params, "ORDER BY v.scheduled_start DESC")
+    out = res if isinstance(res, dict) else {"items": res}
+    tot = db.query("SELECT COUNT(*) trips, COALESCE(SUM(r.transport_cost),0) total "
+                   + base, params, one=True)
+    out["trips"] = tot["trips"]
+    out["total"] = tot["total"]
+    # Cost roll-ups for the owner/CEO view (grouped over the same filter scope).
+    out["by_branch"] = db.query(
+        "SELECT c.name_en client_en, c.name_ar client_ar, st.name site_name, "
+        "COUNT(*) trips, COALESCE(SUM(r.transport_cost),0) total "
+        + base + " GROUP BY v.client_id, v.site_id ORDER BY total DESC", params)
+    out["by_client"] = db.query(
+        "SELECT c.name_en client_en, c.name_ar client_ar, "
+        "COUNT(*) trips, COALESCE(SUM(r.transport_cost),0) total "
+        + base + " GROUP BY v.client_id ORDER BY total DESC", params)
+    out["by_agent"] = db.query(
+        "SELECT u2.full_name agent_name, "
+        "COUNT(*) trips, COALESCE(SUM(r.transport_cost),0) total "
+        + base + " GROUP BY v.agent_id ORDER BY total DESC", params)
+    return out
 
 
 # --------------------------------------------------------------------------

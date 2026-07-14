@@ -269,6 +269,7 @@ function navItems() {
     if (can("visits.edit")) items.push({ k: "dispatch", i: "🚚", t: "nav_dispatch" });
     if (can("visits.view")) items.push({ k: "requests", i: "📨", t: "nav_requests" });
     if (can("visits.view")) items.push({ k: "reports", i: "📋", t: "nav_reports" });
+    if (can("transport.view")) items.push({ k: "transport", i: "🚕", t: "nav_transport" });
     if (can("calendar.view")) items.push({ k: "calendar", i: "📅", t: "nav_calendar" });
     if (can("contracts.view")) items.push({ k: "contracts", i: "🔁", t: "nav_contracts" });
     if (can("chemicals.view")) items.push({ k: "chemicals", i: "🧪", t: "nav_chemicals" });
@@ -318,6 +319,7 @@ async function navigate(view, arg) {
     else if (view === "myday") await viewMyDay(v, arg);
     else if (view === "reports") await viewReports(v);
     else if (view === "report") await viewReportDoc(v, arg);
+    else if (view === "transport") await viewTransport(v);
     else if (view === "visit") await viewVisit(v, arg);
     else if (view === "chemicals") await viewChemicals(v);
     else if (view === "issues") await viewIssues(v);
@@ -350,14 +352,27 @@ $("modal-close").addEventListener("click", closeModal);
 $("modal-overlay").addEventListener("click", (e) => { if (e.target === $("modal-overlay")) closeModal(); });
 
 // Collapsible sidebar — toggled from the topbar, remembered across sessions.
+// In the Android app (html.pc-app) it's a slide-over drawer that starts closed.
+const IS_APP = document.documentElement.classList.contains("pc-app");
 function applySidebarState() {
-  $("app").classList.toggle("nav-collapsed", localStorage.getItem("navCollapsed") === "1");
+  const stored = localStorage.getItem("navCollapsed");
+  $("app").classList.toggle("nav-collapsed", stored === null ? IS_APP : stored === "1");
 }
 if ($("nav-toggle")) $("nav-toggle").addEventListener("click", () => {
   const collapsed = $("app").classList.toggle("nav-collapsed");
   localStorage.setItem("navCollapsed", collapsed ? "1" : "0");
 });
 applySidebarState();
+// App only: close the drawer after picking a nav item or tapping the dimmed
+// page behind it (clicks elsewhere inside the drawer keep it open).
+if (IS_APP) document.addEventListener("click", (e) => {
+  const app = $("app");
+  if (!app || app.classList.contains("nav-collapsed")) return;
+  if (e.target.closest("#nav-toggle")) return;
+  if (e.target.closest(".sidebar") && !e.target.closest(".nav-item")) return;
+  app.classList.add("nav-collapsed");
+  localStorage.setItem("navCollapsed", "1");
+});
 
 function field(label, name, opts = {}) {
   const { type = "text", value = "", cls = "", options, textarea } = opts;
@@ -1254,6 +1269,12 @@ async function viewReports(v) {
   refresh(1);
 }
 
+// Transportation vehicles the agent can choose from on the report's internal
+// transportation invoice (stored as keys, displayed localized).
+const TRANSPORT_VEHICLES = ["company_car", "own_car", "motorcycle", "taxi", "bus", "truck", "other"];
+const vehicleLabel = (k) => k ? (TRANSPORT_VEHICLES.includes(k) ? t("veh_" + k) : k) : "—";
+const vehicleOptions = () => [{ v: "", l: "—" }, ...TRANSPORT_VEHICLES.map(k => ({ v: k, l: t("veh_" + k) }))];
+
 // Report fields, in document order. area=multi-line. Materials are numbers.
 const REPORT_TEXT_FIELDS = [
   { n: "summary", area: true }, { n: "pests_found" }, { n: "findings", area: true },
@@ -1313,6 +1334,16 @@ async function viewReportDoc(v, arg) {
     `<tr><td>${esc(localized(cu, "name"))}</td><td>${cu.quantity} ${esc(cu.unit || "")}</td><td>${esc(cu.area_treated || "—")}</td></tr>`).join("");
 
   const allRows = [...REPORT_TEXT_FIELDS.map(textRow), ...REPORT_MAT_FIELDS.map(matRow)].join("");
+  // Internal transportation invoice — editable here, but deliberately absent
+  // from printReportDoc and every client-facing view.
+  const hasTrans = has(rep.transport_vehicle) || Number(rep.transport_cost) > 0;
+  const transRows = role() === "client" ? "" : `
+    <div class="rdoc-row" data-empty="${hasTrans ? "0" : "1"}"><label>🚕 ${t("transport_vehicle")}
+        <span class="muted small">(${t("transport_internal_short")})</span></label>
+      <select data-rep="transport_vehicle">${vehicleOptions().map(o =>
+        `<option value="${esc(o.v)}" ${String(o.v) === String(rep.transport_vehicle || "") ? "selected" : ""}>${esc(o.l)}</option>`).join("")}</select></div>
+    <div class="rdoc-row" data-empty="${hasTrans ? "0" : "1"}"><label>${t("transport_cost")} (${currencyLabel()})</label>
+      <input type="number" step="any" data-rep="transport_cost" value="${esc(Number(rep.transport_cost) > 0 ? rep.transport_cost : "")}"></div>`;
   const statusBadgeHtml = `<span class="badge b-${rep.status === "complete" ? "completed" : "draft"}">${t(rep.status === "complete" ? "report_complete" : "report_draft")}</span>`;
   // Attachments flagged "Business plan" on the visit are surfaced on the report.
   const bpPhotos = (visit.photos || []).filter(p => Number(p.is_business_plan));
@@ -1337,7 +1368,7 @@ async function viewReportDoc(v, arg) {
         <div><span>${t("service")}</span><b>${esc(localized(visit, "service") || "—")}</b></div>
         ${visit.visit_number ? `<div><span>${t("visit_number")}</span><b>${esc(visit.visit_number)}</b></div>` : ""}
       </div>
-      <div class="rdoc-body">${allRows}</div>
+      <div class="rdoc-body">${allRows}${transRows}</div>
       <div class="rdoc-extra" data-empty="${fuHtml ? "0" : "1"}">
         <h3 class="rdoc-sec">🏷️ ${t("followup_report")}</h3>
         ${fuHtml || `<div class="empty">${t("followup_nothing")}</div>`}</div>
@@ -1771,6 +1802,12 @@ function reportForm(rep, visitId, canEdit) {
       ${field(t("flybase_bags"), "flybase_bags", { type: "number", value: rep.flybase_bags || "" })}
     </div>
     ${field(t("branch_issue"), "branch_issue", { value: rep.branch_issue, textarea: true })}
+    <div class="section-title" style="margin:18px 0 4px"><h3>🚕 ${t("transport_invoice")}</h3></div>
+    <div class="muted small" style="margin-bottom:8px">${t("transport_internal_note")}</div>
+    <div class="form-grid">
+      ${field(t("transport_vehicle"), "transport_vehicle", { options: vehicleOptions(), value: rep.transport_vehicle || "" })}
+      ${field(`${t("transport_cost")} (${currencyLabel()})`, "transport_cost", { type: "number", value: rep.transport_cost || "" })}
+    </div>
     ${canEdit ? `<div class="form-actions" style="justify-content:space-between;align-items:center">
         <span id="report-draft-hint" class="muted small"></span>
         <button class="btn" type="submit">✔ ${t("complete_save_report")}</button></div>` : ""}
@@ -1815,6 +1852,84 @@ function usageForm(visitId) {
       catch (err) { alert(err.message); }
     });
   });
+}
+
+// ====================================================================
+// Transportation — internal travel-cost log built from report entries.
+// Agents see only their own trips (server-enforced); managers/admins also
+// get cost roll-ups per branch / client / agent. Clients never see this.
+// ====================================================================
+async function viewTransport(v) {
+  const mgr = can("users.view");
+  const clientOpts = `<option value="">${t("all")}</option>` +
+    cache.clients.map(c => `<option value="${c.id}">${esc(localized(c, "name"))}</option>`).join("");
+  const agentSel = mgr
+    ? `<label>${t("agent")}: <select id="tf-agent"><option value="">${t("all")}</option>${cache.agents.map(a => `<option value="${a.id}">${esc(a.full_name)}</option>`).join("")}</select></label>` : "";
+  v.innerHTML = `<div class="page-head"><h2>🚕 ${t("transport_title")}</h2></div>
+    <div class="muted small" style="margin:-6px 0 12px">${t("transport_internal_note")}</div>
+    <div class="toolbar">
+      <label>${t("client")}: <select id="tf-client">${clientOpts}</select></label>
+      <label>${t("location_lbl")}: <select id="tf-site"><option value="">${t("all")}</option></select></label>
+      ${agentSel}
+      <label>${t("from")}: <input type="date" id="tf-from"></label>
+      <label>${t("to")}: <input type="date" id="tf-to"></label>
+    </div>
+    <div class="cards" id="tr-cards"></div>
+    <div class="panel" id="tr-list">${t("loading")}</div>
+    <div id="tr-groups"></div>`;
+  const val = (id) => ($(id) && $(id).value) || "";
+  function buildQuery(page) {
+    const p = [`page=${page}`, `limit=${PAGE_SIZE}`];
+    if (val("tf-client")) p.push("client=" + val("tf-client"));
+    if (val("tf-site")) p.push("site=" + val("tf-site"));
+    if (val("tf-agent")) p.push("agent=" + val("tf-agent"));
+    if (val("tf-from")) p.push("from=" + val("tf-from"));
+    if (val("tf-to")) p.push("to=" + val("tf-to"));
+    return p.join("&");
+  }
+  const card = (val2, label, icon, cls) =>
+    `<div class="stat-card ${cls}"><div class="sc-ic">${icon}</div><div><div class="v">${val2}</div><div class="l">${label}</div></div></div>`;
+  const groupTable = (title, rows, nameCell) => rows.length ? `<div class="panel">
+      <div class="section-title"><h3>${title}</h3></div>
+      <table><thead><tr><th>${t("name_en")}</th><th class="num">${t("transport_trips")}</th><th class="num">${t("transport_total")}</th></tr></thead>
+      <tbody>${rows.map(r => `<tr><td>${nameCell(r)}</td><td class="num">${r.trips}</td><td class="num"><strong>${money(r.total)}</strong></td></tr>`).join("")}</tbody></table></div>` : "";
+  async function refresh(page = 1) {
+    const d = await API.get("/transport?" + buildQuery(page));
+    $("tr-cards").innerHTML =
+      card(money(d.total), t("transport_total"), "💰", "c-amber") +
+      card(d.trips, t("transport_trips"), "🚕", "c-blue");
+    const rows = (d.items || []).map(r => `<tr data-visit="${r.visit_id}">
+      <td>${fmtDate(r.scheduled_start)}</td>
+      ${mgr ? `<td>${esc(r.agent_name || "—")}</td>` : ""}
+      <td>${esc(localized(r, "client"))}</td>
+      <td>${esc(r.site_name || "—")}</td>
+      <td>${esc(vehicleLabel(r.transport_vehicle))}</td>
+      <td class="num"><strong>${money(r.transport_cost)}</strong></td></tr>`).join("");
+    $("tr-list").innerHTML = `<table><thead><tr>
+        <th>${t("date")}</th>${mgr ? `<th>${t("agent")}</th>` : ""}<th>${t("client")}</th>
+        <th>${t("location_lbl")}</th><th>${t("transport_vehicle")}</th><th class="num">${t("transport_cost")}</th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="6" class="empty">${t("none")}</td></tr>`}</tbody></table>` + pagerHTML(d);
+    $("tr-list").querySelectorAll("tr[data-visit]").forEach(tr =>
+      tr.addEventListener("click", () => navigate("visit", { id: tr.dataset.visit })));
+    wirePager($("tr-list"), d, refresh);
+    $("tr-groups").innerHTML = mgr
+      ? groupTable(`🏢 ${t("transport_by_branch")}`, d.by_branch || [],
+          r => `${esc(localized(r, "client"))}<div class="muted small">${esc(r.site_name || "—")}</div>`) +
+        groupTable(`👥 ${t("transport_by_client")}`, d.by_client || [], r => esc(localized(r, "client"))) +
+        groupTable(`👷 ${t("transport_by_agent")}`, d.by_agent || [], r => esc(r.agent_name || "—"))
+      : "";
+  }
+  $("tf-client").addEventListener("change", async () => {
+    const cid = val("tf-client"), sel = $("tf-site");
+    if (!cid) { sel.innerHTML = `<option value="">${t("all")}</option>`; refresh(1); return; }
+    await loadSiteOptions(cid, sel, "", t("all"));
+    if (sel.dataset.hasSites === "1") sel.insertAdjacentHTML("beforeend", `<option value="none">${t("unassigned")}</option>`);
+    refresh(1);
+  });
+  ["tf-site", "tf-agent", "tf-from", "tf-to"].forEach(id => {
+    if ($(id)) $(id).addEventListener("change", () => refresh(1));
+  });
+  refresh(1);
 }
 
 // ====================================================================

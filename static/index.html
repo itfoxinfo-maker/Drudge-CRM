@@ -4,6 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>PestCare CRM</title>
+  <!-- The Android app's WebView injects window.PestPrint before the page runs;
+       tag the document so CSS/JS can adapt only inside the app (never on web). -->
+  <script>if (window.PestPrint) document.documentElement.classList.add("pc-app");</script>
   <!-- PWA: installable + offline (field agents) -->
   <link rel="manifest" href="/manifest.webmanifest" />
   <meta name="theme-color" content="#1f74d6" />

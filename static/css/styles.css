@@ -571,3 +571,30 @@ tr.cov-pending td { background: #fff7ed; }
 /* ---- post-visit rating stars ---- */
 .stars-input button { background: none; border: none; font-size: 30px; cursor: pointer; color: #f59e0b; padding: 2px 4px; }
 .rated-stars { font-size: 24px; color: #f59e0b; letter-spacing: 3px; }
+
+/* ---------- Android app (WebView) only — html.pc-app ----------
+   In the app the sidebar is a slide-over drawer: completely hidden when
+   closed, full-width overlay when open. The page content always gets the
+   whole screen. None of this applies in a normal browser. */
+html.pc-app .sidebar {
+  position: fixed; top: 0; bottom: 0; inset-inline-start: 0; height: 100%;
+  width: 260px; z-index: 60; box-shadow: 4px 0 24px rgba(0,0,0,.35);
+  transition: width .2s ease;
+}
+/* Open drawer always shows full labels (overrides the narrow-screen rail). */
+html.pc-app .nav-item { justify-content: flex-start; padding: 11px 15px; }
+html.pc-app .brand-sm { justify-content: flex-start; padding: 0 22px 18px; }
+html.pc-app .nav-item span:last-child,
+html.pc-app .brand-sm span { display: inline; }
+html.pc-app .sidebar-foot .user-box { display: block; }
+html.pc-app .sidebar-foot .link-btn { display: inline; text-align: start; }
+html.pc-app .powered-sm { display: block; }
+html.pc-app #nav { padding: 10px; }
+/* Closed = gone completely. */
+html.pc-app .app.nav-collapsed .sidebar { width: 0; padding: 0; box-shadow: none; }
+/* Dim the page behind the open drawer (tap it to close — see app.js). */
+html.pc-app .app:not(.nav-collapsed)::after {
+  content: ""; position: fixed; inset: 0; background: rgba(7,24,42,.45); z-index: 55;
+}
+/* Content fills the screen edge to edge with tighter padding. */
+html.pc-app .view { max-width: none; padding: 14px; }
