@@ -1334,16 +1334,16 @@ async function viewReportDoc(v, arg) {
     `<tr><td>${esc(localized(cu, "name"))}</td><td>${cu.quantity} ${esc(cu.unit || "")}</td><td>${esc(cu.area_treated || "—")}</td></tr>`).join("");
 
   const allRows = [...REPORT_TEXT_FIELDS.map(textRow), ...REPORT_MAT_FIELDS.map(matRow)].join("");
-  // Internal transportation invoice — editable here, but deliberately absent
-  // from printReportDoc and every client-facing view.
-  const hasTrans = has(rep.transport_vehicle) || Number(rep.transport_cost) > 0;
-  const transRows = role() === "client" ? "" : `
-    <div class="rdoc-row" data-empty="${hasTrans ? "0" : "1"}"><label>🚕 ${t("transport_vehicle")}
+  // Internal transportation trips — shown read-only here, and deliberately
+  // absent from printReportDoc and every client-facing view. Edited from the
+  // visit page's report section.
+  const trips = role() === "client" ? [] : (visit.transport || []);
+  const tripTotal = trips.reduce((s, e) => s + (Number(e.cost) || 0), 0);
+  const transRows = !trips.length ? "" : `
+    <div class="rdoc-row" data-empty="0"><label>🚕 ${t("transport_invoice")}
         <span class="muted small">(${t("transport_internal_short")})</span></label>
-      <select data-rep="transport_vehicle">${vehicleOptions().map(o =>
-        `<option value="${esc(o.v)}" ${String(o.v) === String(rep.transport_vehicle || "") ? "selected" : ""}>${esc(o.l)}</option>`).join("")}</select></div>
-    <div class="rdoc-row" data-empty="${hasTrans ? "0" : "1"}"><label>${t("transport_cost")} (${currencyLabel()})</label>
-      <input type="number" step="any" data-rep="transport_cost" value="${esc(Number(rep.transport_cost) > 0 ? rep.transport_cost : "")}"></div>`;
+      <div>${trips.map(e => `${esc(vehicleLabel(e.vehicle))} — ${money(e.cost)}`).join("<br>")}
+        ${trips.length > 1 ? `<br><strong>${t("transport_total")}: ${money(tripTotal)}</strong>` : ""}</div></div>`;
   const statusBadgeHtml = `<span class="badge b-${rep.status === "complete" ? "completed" : "draft"}">${t(rep.status === "complete" ? "report_complete" : "report_draft")}</span>`;
   // Attachments flagged "Business plan" on the visit are surfaced on the report.
   const bpPhotos = (visit.photos || []).filter(p => Number(p.is_business_plan));
@@ -1660,7 +1660,7 @@ async function viewVisit(v, arg) {
       </div>
       <div class="panel"><div class="section-title"><h3>${t("report")}</h3>
         ${role() !== "client" && rep.id ? `<span class="badge b-${rep.status === "complete" ? "completed" : "draft"}">${t(rep.status === "complete" ? "report_complete" : "report_draft")}</span>` : ""}</div>
-        ${role() === "client" ? clientReportView(rep) : reportForm(rep, id, canEdit)}
+        ${role() === "client" ? clientReportView(rep) : reportForm(rep, id, canEdit, visit.transport)}
       </div>
     </div>
 
@@ -1773,6 +1773,19 @@ async function viewVisit(v, arg) {
   v.querySelectorAll("[data-rmuse]").forEach(b => b.addEventListener("click", async () => {
     const r = await API.del("/usage/" + b.dataset.rmuse); if (handledOffline(r, b.closest("tr"))) return; navigate("visit", { id });
   }));
+  // Transportation trips: add / remove (internal-only; own API, not report autosave).
+  if ($("trip-add")) $("trip-add").addEventListener("click", async () => {
+    const vehicle = $("trip-vehicle").value, cost = $("trip-cost").value;
+    if (!vehicle && !(Number(cost) > 0)) { alert(t("transport_need_info")); return; }
+    try {
+      const r = await API.post(`/visits/${id}/transport`, { vehicle, cost });
+      if (handledOffline(r)) return;
+      navigate("visit", { id });
+    } catch (err) { alert(err.message); }
+  });
+  v.querySelectorAll("[data-rmtrip]").forEach(b => b.addEventListener("click", async () => {
+    const r = await API.del("/transport/" + b.dataset.rmtrip); if (handledOffline(r, b.closest("tr"))) return; navigate("visit", { id });
+  }));
   renderPhotos("visit", id, visit.photos);
   if (role() !== "client") loadVisitCoverage(id);
   if ($("add-photo")) $("add-photo").addEventListener("click", () => uploadPhotoDialog("visit", id, () => navigate("visit", { id })));
@@ -1781,8 +1794,31 @@ async function viewVisit(v, arg) {
   if ($("add-report-file")) $("add-report-file").addEventListener("click", () => uploadPhotoDialog("report", rep.id, () => navigate("visit", { id })));
 }
 
-function reportForm(rep, visitId, canEdit) {
+function reportForm(rep, visitId, canEdit, trips) {
   const dis = canEdit ? "" : "disabled";
+  // Transportation invoice — multiple trips per visit, stored separately from
+  // the report (own API) so it stays outside the report autosave and outside
+  // every client-facing / printed rendering.
+  trips = trips || [];
+  const tripTotal = trips.reduce((s, e) => s + (Number(e.cost) || 0), 0);
+  const transportHtml = `
+    <div class="section-title" style="margin:18px 0 4px"><h3>🚕 ${t("transport_invoice")}</h3></div>
+    <div class="muted small" style="margin-bottom:8px">${t("transport_internal_note")}</div>
+    ${trips.length ? `<table><thead><tr><th>${t("transport_vehicle")}</th>
+        <th class="num">${t("transport_cost")} (${currencyLabel()})</th>${canEdit ? "<th></th>" : ""}</tr></thead>
+      <tbody>${trips.map(e => `<tr>
+        <td>${esc(vehicleLabel(e.vehicle))}</td><td class="num">${money(e.cost)}</td>
+        ${canEdit ? `<td><button type="button" class="link-btn sm danger" data-rmtrip="${e.id}">✕ ${t("delete")}</button></td>` : ""}</tr>`).join("")}
+      <tr><td><strong>${t("transport_total")}</strong></td>
+        <td class="num"><strong>${money(tripTotal)}</strong></td>${canEdit ? "<td></td>" : ""}</tr></tbody></table>` : ""}
+    ${canEdit ? `<div class="form-grid" style="align-items:end;margin-top:8px">
+      <div class="field"><label>${t("transport_vehicle")}</label>
+        <select id="trip-vehicle">${vehicleOptions().map(o => `<option value="${esc(o.v)}">${esc(o.l)}</option>`).join("")}</select></div>
+      <div class="field"><label>${t("transport_cost")} (${currencyLabel()})</label>
+        <input type="number" step="any" min="0" id="trip-cost"></div>
+      <div class="field"><label>&nbsp;</label>
+        <button type="button" class="btn sm secondary" id="trip-add">+ ${t("transport_add")}</button></div>
+    </div>` : ""}`;
   return `<form id="report-form">
     ${field(t("summary"), "summary", { value: rep.summary, textarea: true })}
     ${field(t("pests_found"), "pests_found", { value: rep.pests_found })}
@@ -1802,16 +1838,11 @@ function reportForm(rep, visitId, canEdit) {
       ${field(t("flybase_bags"), "flybase_bags", { type: "number", value: rep.flybase_bags || "" })}
     </div>
     ${field(t("branch_issue"), "branch_issue", { value: rep.branch_issue, textarea: true })}
-    <div class="section-title" style="margin:18px 0 4px"><h3>🚕 ${t("transport_invoice")}</h3></div>
-    <div class="muted small" style="margin-bottom:8px">${t("transport_internal_note")}</div>
-    <div class="form-grid">
-      ${field(t("transport_vehicle"), "transport_vehicle", { options: vehicleOptions(), value: rep.transport_vehicle || "" })}
-      ${field(`${t("transport_cost")} (${currencyLabel()})`, "transport_cost", { type: "number", value: rep.transport_cost || "" })}
-    </div>
     ${canEdit ? `<div class="form-actions" style="justify-content:space-between;align-items:center">
         <span id="report-draft-hint" class="muted small"></span>
         <button class="btn" type="submit">✔ ${t("complete_save_report")}</button></div>` : ""}
     </form>${!canEdit ? "<script>document.querySelectorAll('#report-form [name]').forEach(e=>e.disabled=true)</script>" : ""}
+    ${transportHtml}
     ${rep.id ? `<div class="section-title" style="margin:18px 0 8px"><h3>📎 ${t("attachments")}</h3>
       ${canEdit ? `<button type="button" class="btn sm" id="add-report-file">📎 ${t("add_attachment")}</button>` : ""}</div>
       <div id="report-files" class="photo-grid"></div>` : `<div class="muted small" style="margin-top:12px">${t("attach_after_save")}</div>`}`;

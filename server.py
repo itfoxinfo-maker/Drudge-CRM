@@ -1005,9 +1005,13 @@ def get_visit(ctx):
     if ctx.user["role"] == "client" and v["report"] and v["report"]["status"] != "complete":
         v["report"] = None
     # The transportation invoice is internal: never sent to client accounts.
-    if ctx.user["role"] == "client" and v["report"]:
-        for k in ("transport_vehicle", "transport_cost"):
-            v["report"].pop(k, None)
+    if ctx.user["role"] == "client":
+        if v["report"]:
+            for k in ("transport_vehicle", "transport_cost"):
+                v["report"].pop(k, None)
+    else:
+        v["transport"] = db.query(
+            "SELECT * FROM transport_entries WHERE visit_id=? ORDER BY id", (vid,))
     v["rating"] = db.query("SELECT stars, comment, created_at FROM visit_ratings "
                            "WHERE visit_id=?", (vid,), one=True)
     v["chemicals"] = db.query(
@@ -1155,13 +1159,10 @@ def upsert_report(ctx):
     b = ctx.body
     existing = db.query("SELECT * FROM reports WHERE visit_id=?", (vid,), one=True)
     text_cols = ("summary", "pests_found", "findings", "recommendations", "severity",
-                 "next_visit_due", "spare_parts_changed", "branch_issue",
-                 "transport_vehicle")
-    # Engineer service log — quantities of parts/materials used during the visit,
-    # plus the internal transportation cost (never shown to clients).
+                 "next_visit_due", "spare_parts_changed", "branch_issue")
+    # Engineer service log — quantities of parts/materials used during the visit.
     num_cols = ("lamps_used", "cables_used", "transformers_used", "light_sheets_used",
-                "fipronil_ml", "imidacloprid_gm", "baits_count", "glo_pieces", "flybase_bags",
-                "transport_cost")
+                "fipronil_ml", "imidacloprid_gm", "baits_count", "glo_pieces", "flybase_bags")
 
     def num(v):
         try:
@@ -1173,6 +1174,22 @@ def upsert_report(ctx):
     # (auto-save while typing) is stored as a draft and can't be finalised until
     # the required fields + both signatures are present.
     want_complete = (b.get("status") or "").lower() == "complete"
+
+    # Legacy shim: clients running a cached pre-multi-trip app.js still send a
+    # single transport_vehicle/transport_cost pair on the report body. Fold it
+    # into ONE transport_entries row (never back into the report columns, which
+    # the migration would re-copy on restart and duplicate).
+    if (str(b.get("transport_vehicle") or "").strip() or num(b.get("transport_cost")) > 0):
+        veh = str(b.get("transport_vehicle") or "").strip() or None
+        cost = num(b.get("transport_cost"))
+        first = db.query("SELECT id FROM transport_entries WHERE visit_id=? "
+                         "ORDER BY id LIMIT 1", (vid,), one=True)
+        if first:
+            db.execute("UPDATE transport_entries SET vehicle=?, cost=? WHERE id=?",
+                       (veh, cost, first["id"]))
+        else:
+            db.execute("INSERT INTO transport_entries(visit_id,vehicle,cost,created_by) "
+                       "VALUES(?,?,?,?)", (vid, veh, cost, u["id"]))
 
     if existing:
         fields, vals = [], []
@@ -1386,9 +1403,7 @@ def list_transport(ctx):
     require_perm(u, "transport.view")
     if u["role"] == "client":
         raise ApiError(403, "Not available to client accounts")
-    # Only reports where the agent actually filled the transportation section.
-    where = ["(COALESCE(r.transport_cost,0) > 0 OR COALESCE(r.transport_vehicle,'') <> '')"]
-    params = []
+    where, params = ["1=1"], []
     if u["role"] == "agent":
         where.append("v.agent_id=?"); params.append(u["id"])
     for key, col in (("client", "v.client_id"), ("agent", "v.agent_id")):
@@ -1404,37 +1419,83 @@ def list_transport(ctx):
         where.append("date(v.scheduled_start) >= date(?)"); params.append(ctx.query["from"])
     if ctx.query.get("to"):
         where.append("date(v.scheduled_start) <= date(?)"); params.append(ctx.query["to"])
-    base = ("FROM reports r JOIN visits v ON v.id=r.visit_id "
+    base = ("FROM transport_entries e JOIN visits v ON v.id=e.visit_id "
             "JOIN clients c ON c.id=v.client_id "
             "LEFT JOIN sites st ON st.id=v.site_id "
             "LEFT JOIN users u2 ON u2.id=v.agent_id "
             "WHERE " + " AND ".join(where))
     res = _paginate(
         ctx,
-        "SELECT r.visit_id, r.transport_vehicle, r.transport_cost, "
+        "SELECT e.id, e.visit_id, e.vehicle transport_vehicle, e.cost transport_cost, "
         "v.scheduled_start, v.agent_id, v.client_id, v.site_id, "
         "c.name_en client_en, c.name_ar client_ar, st.name site_name, "
         "u2.full_name agent_name " + base,
-        params, "ORDER BY v.scheduled_start DESC")
+        params, "ORDER BY v.scheduled_start DESC, e.id DESC")
     out = res if isinstance(res, dict) else {"items": res}
-    tot = db.query("SELECT COUNT(*) trips, COALESCE(SUM(r.transport_cost),0) total "
+    tot = db.query("SELECT COUNT(*) trips, COALESCE(SUM(e.cost),0) total "
                    + base, params, one=True)
     out["trips"] = tot["trips"]
     out["total"] = tot["total"]
     # Cost roll-ups for the owner/CEO view (grouped over the same filter scope).
     out["by_branch"] = db.query(
         "SELECT c.name_en client_en, c.name_ar client_ar, st.name site_name, "
-        "COUNT(*) trips, COALESCE(SUM(r.transport_cost),0) total "
+        "COUNT(*) trips, COALESCE(SUM(e.cost),0) total "
         + base + " GROUP BY v.client_id, v.site_id ORDER BY total DESC", params)
     out["by_client"] = db.query(
         "SELECT c.name_en client_en, c.name_ar client_ar, "
-        "COUNT(*) trips, COALESCE(SUM(r.transport_cost),0) total "
+        "COUNT(*) trips, COALESCE(SUM(e.cost),0) total "
         + base + " GROUP BY v.client_id ORDER BY total DESC", params)
     out["by_agent"] = db.query(
         "SELECT u2.full_name agent_name, "
-        "COUNT(*) trips, COALESCE(SUM(r.transport_cost),0) total "
+        "COUNT(*) trips, COALESCE(SUM(e.cost),0) total "
         + base + " GROUP BY v.agent_id ORDER BY total DESC", params)
     return out
+
+
+@route("POST", r"/api/visits/(\d+)/transport")
+def add_transport(ctx):
+    """Agent adds one transportation trip (vehicle + cost) to a visit. Any
+    number of trips per visit."""
+    vid = int(ctx.params[0])
+    v = db.query("SELECT * FROM visits WHERE id=?", (vid,), one=True)
+    if not v:
+        raise ApiError(404, "Visit not found")
+    u = ctx.user
+    require_perm(u, "visits.edit")
+    if u["role"] == "client":
+        raise ApiError(403, "Not available to client accounts")
+    if u["role"] == "agent" and v["agent_id"] != u["id"]:
+        raise ApiError(403, "Not your visit")
+    b = ctx.body
+    vehicle = str(b.get("vehicle") or "").strip() or None
+    try:
+        cost = float(b.get("cost")) if str(b.get("cost") or "").strip() != "" else 0.0
+    except (TypeError, ValueError):
+        raise ApiError(400, "Cost must be a number")
+    if not math.isfinite(cost) or cost < 0:
+        raise ApiError(400, "Cost must be a positive number")
+    if not vehicle and cost <= 0:
+        raise ApiError(400, "Choose a vehicle or enter a cost")
+    eid = db.execute("INSERT INTO transport_entries(visit_id,vehicle,cost,created_by) "
+                     "VALUES(?,?,?,?)", (vid, vehicle, cost, u["id"]))
+    return db.query("SELECT * FROM transport_entries WHERE id=?", (eid,), one=True)
+
+
+@route("DELETE", r"/api/transport/(\d+)")
+def delete_transport(ctx):
+    u = ctx.user
+    require_perm(u, "visits.edit")
+    if u["role"] == "client":
+        raise ApiError(403, "Not available to client accounts")
+    eid = int(ctx.params[0])
+    e = db.query("SELECT e.id, v.agent_id FROM transport_entries e "
+                 "JOIN visits v ON v.id=e.visit_id WHERE e.id=?", (eid,), one=True)
+    if not e:
+        raise ApiError(404, "Entry not found")
+    if u["role"] == "agent" and e["agent_id"] != u["id"]:
+        raise ApiError(403, "Not your visit")
+    db.execute("DELETE FROM transport_entries WHERE id=?", (eid,))
+    return {"ok": True}
 
 
 # --------------------------------------------------------------------------

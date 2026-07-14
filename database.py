@@ -118,8 +118,8 @@ CREATE TABLE IF NOT EXISTS reports (
     glo_pieces           REAL NOT NULL DEFAULT 0,
     flybase_bags         REAL NOT NULL DEFAULT 0,
     branch_issue         TEXT,
-    -- Transportation invoice (internal): how the agent travelled to the visit
-    -- and what it cost. Never shown to clients or on the printed report.
+    -- Legacy single transportation pair — superseded by transport_entries
+    -- (kept so old cached clients don't error; values are migrated + cleared).
     transport_vehicle    TEXT,
     transport_cost       REAL NOT NULL DEFAULT 0,
     -- 'draft' while the agent is still filling it in (auto-saved); 'complete'
@@ -127,6 +127,17 @@ CREATE TABLE IF NOT EXISTS reports (
     status          TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','complete')),
     completed_at    TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Transportation invoice (internal): the trips an agent took for a visit —
+-- vehicle + cost, any number per visit. Never shown to clients or printed.
+CREATE TABLE IF NOT EXISTS transport_entries (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    visit_id   INTEGER NOT NULL REFERENCES visits(id) ON DELETE CASCADE,
+    vehicle    TEXT,
+    cost       REAL NOT NULL DEFAULT 0,
+    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- Chemical / product inventory.
@@ -578,6 +589,15 @@ def _migrate(conn):
                    ("transport_cost", "REAL NOT NULL DEFAULT 0")):
         if c not in cols("reports"):
             conn.execute(f"ALTER TABLE reports ADD COLUMN {c} {ddl}")
+    # multi-trip transportation: move any legacy single vehicle/cost pair off
+    # the report into transport_entries, then clear it (so this copies once).
+    conn.execute(
+        "INSERT INTO transport_entries(visit_id, vehicle, cost, created_at) "
+        "SELECT visit_id, NULLIF(transport_vehicle,''), COALESCE(transport_cost,0), created_at "
+        "FROM reports WHERE COALESCE(transport_cost,0)>0 OR COALESCE(transport_vehicle,'')<>''")
+    conn.execute(
+        "UPDATE reports SET transport_vehicle=NULL, transport_cost=0 "
+        "WHERE COALESCE(transport_cost,0)>0 OR COALESCE(transport_vehicle,'')<>''")
     # report draft/complete workflow: agents auto-save drafts; a report is only
     # "complete" once the core fields + both signatures are present.
     if "status" not in cols("reports"):
